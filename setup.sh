@@ -2,7 +2,6 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/lib-common.sh"
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -11,6 +10,196 @@ if [[ "$(uname -s)" != "Linux" ]] || ! command -v dnf &> /dev/null; then
     echo "Este script é só para Fedora/Linux (precisa do dnf). Sistema detectado: $(uname -s) — use o repo 'dotfiles' (setup.sh) no Mac." >&2
     exit 1
 fi
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Defaults pessoais — este é um dotfiles de uso individual (não um template
+# genérico pra terceiros clonarem), então faz sentido fixar aqui em vez de
+# perguntar toda vez. O e-mail é o noreply do GitHub (público por design,
+# não expõe o e-mail real). Ainda dá pra sobrescrever por variável de
+# ambiente ou digitando outra coisa no prompt.
+DEFAULT_GIT_NAME="rvlmt"
+DEFAULT_GIT_EMAIL="80988467+rvlmt@users.noreply.github.com"
+
+# Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
+# (pré-exportados), senão pergunta com o default sugerido entre colchetes
+# (Enter aceita, digitar outra coisa sobrescreve só nesta execução).
+prompt_git_identity() {
+    if [ -z "$GIT_NAME" ]; then
+        read -rp "Nome completo para o Git [$DEFAULT_GIT_NAME]: " GIT_NAME
+        GIT_NAME="${GIT_NAME:-$DEFAULT_GIT_NAME}"
+    fi
+    if [ -z "$GIT_EMAIL" ]; then
+        read -rp "E-mail (Git e SSH) [$DEFAULT_GIT_EMAIL]: " GIT_EMAIL
+        GIT_EMAIL="${GIT_EMAIL:-$DEFAULT_GIT_EMAIL}"
+    fi
+}
+
+confirm() {
+    local prompt="$1"
+    local reply
+    read -rp "$prompt [y/N] " reply
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
+install_npm_global() {
+    local package="$1" bin_name="$2"
+    if command -v "$bin_name" &> /dev/null; then
+        echo -e "${YELLOW}$bin_name já instalado, pulando.${NC}"
+        return
+    fi
+    if command -v bun &> /dev/null; then
+        bun add -g "$package" || npm install -g "$package"
+    elif command -v npm &> /dev/null; then
+        npm install -g "$package"
+    else
+        echo -e "${YELLOW}Nem Bun nem npm encontrados para instalar $package.${NC}"
+        return
+    fi
+    if command -v "$bin_name" &> /dev/null; then
+        echo -e "${GREEN}✓ $bin_name instalado.${NC}"
+    else
+        echo -e "${YELLOW}Aviso: $package instalado, mas o comando '$bin_name' não foi encontrado no PATH.${NC}"
+    fi
+}
+
+# CLIs de IA disponíveis via npm/Bun ou script oficial.
+# Antigravity CLI fica de fora daqui por só ter formula Homebrew (macOS).
+install_common_ai_clis() {
+    export PATH="$HOME/.bun/bin:$(npm config get prefix 2>/dev/null)/bin:$HOME/.local/bin:$PATH"
+
+    install_npm_global "@anthropic-ai/claude-code" "claude"
+    install_npm_global "@openai/codex" "codex"
+    install_npm_global "@google/gemini-cli" "gemini"
+    install_npm_global "@github/copilot" "copilot"
+
+    if command -v cursor-agent &> /dev/null; then
+        echo -e "${YELLOW}cursor-agent já instalado, pulando.${NC}"
+    else
+        curl https://cursor.com/install -fsS | bash
+        echo -e "${GREEN}✓ Cursor Agent CLI instalado.${NC}"
+    fi
+
+    if command -v opencode &> /dev/null; then
+        echo -e "${YELLOW}opencode já instalado, pulando.${NC}"
+    else
+        curl -fsSL https://opencode.ai/install | bash
+        echo -e "${GREEN}✓ Open Code (sst/opencode) instalado.${NC}"
+    fi
+
+    if command -v agy &> /dev/null; then
+        echo -e "${YELLOW}agy (Antigravity CLI) já instalado, pulando.${NC}"
+    else
+        curl -fsSL https://antigravity.google/cli/install.sh | bash
+        echo -e "${GREEN}✓ Antigravity CLI (agy) instalado.${NC}"
+    fi
+}
+
+# Instala a CLI do OpenCodex (@bitkyc08/opencodex) via Bun ou npm.
+install_opencodex() {
+    if command -v bun &> /dev/null; then
+        echo "Instalando via Bun..."
+        bun add -g @bitkyc08/opencodex || npm install -g @bitkyc08/opencodex
+    elif command -v npm &> /dev/null; then
+        echo "Instalando via npm..."
+        npm install -g @bitkyc08/opencodex
+    else
+        echo -e "${YELLOW}Nem Bun nem npm encontrados para instalar o OpenCodex.${NC}"
+        return
+    fi
+
+    export PATH="$HOME/.bun/bin:$(npm config get prefix 2>/dev/null)/bin:$PATH"
+
+    if command -v ocx &> /dev/null; then
+        echo -e "${GREEN}✓ OpenCodex CLI (ocx) instalado com sucesso.${NC}"
+        echo -e "Para iniciar o proxy OpenCodex, execute no seu terminal: ${GREEN}ocx start${NC}"
+    else
+        echo -e "${YELLOW}Aviso: O comando 'ocx' não foi encontrado no PATH.${NC}"
+    fi
+}
+
+# Gera (se não existir) uma chave SSH Ed25519 e garante que o ssh-agent a carregue.
+generate_ssh_key() {
+    local email="$1"
+    local ssh_key="$HOME/.ssh/id_ed25519"
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+
+    if [ ! -f "$ssh_key" ]; then
+        ssh-keygen -t ed25519 -C "$email" -f "$ssh_key" -N ""
+        eval "$(ssh-agent -s)"
+        ssh-add "$ssh_key"
+        echo -e "${GREEN}✓ Chave Ed25519 criada.${NC}"
+    else
+        echo -e "${YELLOW}Chave SSH já existe em $ssh_key.${NC}"
+    fi
+}
+
+# Configura git --global e autentica o GitHub CLI, enviando a chave pública se necessário.
+configure_git_and_gh() {
+    local git_name="$1" git_email="$2" key_title="$3"
+    local ssh_key="$HOME/.ssh/id_ed25519"
+
+    git config --global user.name "$git_name"
+    git config --global user.email "$git_email"
+    git config --global init.defaultBranch main
+    git config --global pull.rebase false
+
+    if ! command -v gh &> /dev/null; then
+        echo -e "${YELLOW}GitHub CLI (gh) não encontrado.${NC}"
+        return
+    fi
+
+    if gh auth status &> /dev/null; then
+        echo -e "${GREEN}✓ GitHub CLI já autenticado.${NC}"
+        return
+    fi
+
+    echo -e "${YELLOW}Iniciando handshake com o GitHub via navegador...${NC}"
+    gh auth login -p https -w -s admin:public_key,read:user,user:email
+
+    if [ -f "$ssh_key.pub" ]; then
+        local gh_ssh_err
+        gh_ssh_err="$(mktemp)"
+        if gh ssh-key add "$ssh_key.pub" --title "$key_title" 2>"$gh_ssh_err"; then
+            echo -e "${GREEN}✓ Chave SSH enviada ao GitHub.${NC}"
+        elif grep -qi "already in use" "$gh_ssh_err"; then
+            echo -e "${YELLOW}Chave SSH já estava cadastrada no GitHub.${NC}"
+        else
+            echo -e "${YELLOW}⚠ Falha ao enviar chave SSH ao GitHub: $(cat "$gh_ssh_err")${NC}"
+        fi
+        rm -f "$gh_ssh_err"
+    fi
+}
+
+# Cria/atualiza o link simbólico ~/.zshrc → <repo>/zshrc. CONFIRM_ZSHRC_OVERWRITE
+# já vem decidido pelo bloco de confirmações antecipadas no início do script,
+# então este módulo nunca pergunta nada no meio da execução.
+link_zshrc() {
+    local zshrc_src="$SCRIPT_DIR/zshrc"
+    local zshrc_dest="$HOME/.zshrc"
+
+    if [ -L "$zshrc_dest" ] && [ "$(readlink "$zshrc_dest")" = "$zshrc_src" ]; then
+        echo -e "${GREEN}✓ ~/.zshrc já aponta para este repositório.${NC}"
+    elif [ -e "$zshrc_dest" ] || [ -L "$zshrc_dest" ]; then
+        if [ "$CONFIRM_ZSHRC_OVERWRITE" = "1" ]; then
+            local backup="$zshrc_dest.backup.$(date +%Y%m%d%H%M%S)"
+            mv "$zshrc_dest" "$backup"
+            echo -e "${YELLOW}~/.zshrc anterior salvo em $backup${NC}"
+            ln -s "$zshrc_src" "$zshrc_dest"
+            echo -e "${GREEN}✓ ~/.zshrc agora aponta para $zshrc_src${NC}"
+        else
+            echo -e "${YELLOW}~/.zshrc mantido como está.${NC}"
+        fi
+    else
+        ln -s "$zshrc_src" "$zshrc_dest"
+        echo -e "${GREEN}✓ ~/.zshrc agora aponta para $zshrc_src${NC}"
+    fi
+}
 
 # Módulos disponíveis, na ordem em que rodam.
 ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc autologin power-management reboot-timer"
@@ -45,8 +234,31 @@ for arg in "$@"; do
     esac
 done
 
+validate_steps() {
+    local list="$1" label="$2" step
+    [ -z "$list" ] && return
+    for step in ${list//,/ }; do
+        if [[ " $ALL_STEPS " != *" $step "* ]]; then
+            echo "Módulo desconhecido em $label: '$step'" >&2
+            usage
+            exit 1
+        fi
+    done
+}
 validate_steps "$ONLY" "--only"
 validate_steps "$SKIP" "--skip"
+
+should_run() {
+    local step="$1"
+    if [ -n "$ONLY" ]; then
+        [[ ",$ONLY," == *",$step,"* ]]
+        return $?
+    fi
+    if [ -n "$SKIP" ]; then
+        [[ ",$SKIP," == *",$step,"* ]] && return 1
+    fi
+    return 0
+}
 
 # toolbx e gui-access são opcionais: só rodam se pedidos explicitamente via
 # --only, a menos que o usuário já tenha especificado um --skip próprio.
@@ -132,13 +344,15 @@ if should_run "base"; then
     # --skip-unavailable: um pacote ausente/indisponível (nome mudou, repo
     # específico da versão do Fedora, etc.) não deve travar a instalação dos
     # outros — instala o que der e avisa o que ficou de fora.
-    # dnf-plugins-core é o pacote do plugin config-manager no DNF4; dnf5-plugins
-    # é o equivalente no DNF5 (padrão desde o Fedora 41). --skip-unavailable
-    # deixa instalar só o que existir na versão rodando, sem travar o resto.
+    # dnf5-plugins traz o "dnf config-manager" usado mais abaixo (tailscale,
+    # brave) — este script assume DNF5 (padrão desde o Fedora 41); numa
+    # instalação em versão anterior (DNF4), troque por dnf-plugins-core e
+    # ajuste os "config-manager addrepo --from-repofile=" pra
+    # "config-manager --add-repo".
     sudo dnf install -y --skip-unavailable \
         git gh jq tree tmux zellij ripgrep fd-find unzip \
         curl wget btop \
-        dnf-plugins-core dnf5-plugins
+        dnf5-plugins
 
     # Node/npm direto via dnf: é o que install_common_ai_clis (ai-clis) usa pra
     # instalar as CLIs de IA via npm — sem isso o módulo ai-clis não funciona.
@@ -183,7 +397,7 @@ if should_run "hostname"; then
 fi
 
 # ==============================================================================
-# Chave SSH Ed25519 + Git/GitHub CLI (compartilhado com o macOS via lib-common.sh)
+# Chave SSH Ed25519 + Git/GitHub CLI
 # ==============================================================================
 if should_run "ssh"; then
     echo -e "\n${BLUE}==> SSH (Ed25519)${NC}"
@@ -265,13 +479,8 @@ if should_run "tailscale"; then
         # da Tailscale faz exatamente isso por baixo dos panos, mas preferimos
         # ser explícitos aqui — sem rodar um script remoto como root a cada vez,
         # e com verificação GPG nativa do dnf nos pacotes.
-        #
-        # Sintaxe do config-manager mudou no DNF5 (padrão desde o Fedora 41):
-        # "--add-repo <url>" (DNF4) virou "addrepo --from-repofile=<url>" (DNF5).
-        # Tenta a sintaxe antiga primeiro, cai pra nova se falhar.
         TAILSCALE_REPO_URL="https://pkgs.tailscale.com/stable/fedora/tailscale.repo"
-        sudo dnf config-manager --add-repo "$TAILSCALE_REPO_URL" \
-            || sudo dnf config-manager addrepo --from-repofile="$TAILSCALE_REPO_URL"
+        sudo dnf config-manager addrepo --from-repofile="$TAILSCALE_REPO_URL"
         sudo dnf install -y tailscale
         echo -e "${GREEN}✓ Tailscale instalado.${NC}"
     else
@@ -396,8 +605,7 @@ if should_run "desktop-apps"; then
     # Brave — repo oficial deles.
     if ! command -v brave-browser &> /dev/null; then
         sudo rpm --import https://brave-browser-rpm-release.s3.brave.com/brave-core.asc
-        sudo dnf config-manager --add-repo https://brave-browser-rpm-release.s3.brave.com/brave-browser.repo \
-            || sudo dnf config-manager addrepo --from-repofile=https://brave-browser-rpm-release.s3.brave.com/brave-browser.repo
+        sudo dnf config-manager addrepo --from-repofile=https://brave-browser-rpm-release.s3.brave.com/brave-browser.repo
         sudo dnf install -y --skip-unavailable brave-browser
     fi
 
@@ -482,7 +690,7 @@ if should_run "zshrc"; then
     echo -e "\n${BLUE}==> Link do .zshrc${NC}"
     if [ "$CONFIRM_ZSHRC" = "1" ]; then
         sudo dnf install -y --skip-unavailable zsh zsh-autosuggestions zsh-syntax-highlighting
-        link_zshrc "$SCRIPT_DIR"
+        link_zshrc
         if [ "$SHELL" != "$(command -v zsh)" ]; then
             sudo chsh -s "$(command -v zsh)" "$USER" && echo -e "${GREEN}✓ Shell padrão alterado para zsh (efeito no próximo login).${NC}"
         fi

@@ -9,7 +9,7 @@ O Mac (thin client: terminal, IDE, navegador, cliente Tailscale/devpod) é
 provisionado pelo repo irmão **[dotfiles](https://github.com/rvlmt/dotfiles)**.
 Os dois repos são independentes de propósito — nenhum depende do outro pra
 rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
-(`lib-common.sh`, `zshrc`, módulos com `--only`/`--skip`).
+(`zshrc`, módulos com `--only`/`--skip`).
 
 ## Arquitetura
 
@@ -30,13 +30,10 @@ com as CLIs de IA em si.
 
 ## Estrutura
 
-- **`setup.sh`** — provisiona o servidor Fedora. Idempotente: pode ser
-  executado várias vezes sem duplicar configuração.
-- **`lib-common.sh`** — funções usadas pelo `setup.sh` (cores, confirmação,
-  geração de chave SSH, config git/gh, instalação das CLIs de IA). Cópia
-  independente da equivalente no repo `dotfiles` (Mac) — mudanças em uma não
-  se propagam pra outra automaticamente, de propósito (ver "Por que dois
-  repos" abaixo). Não é executado diretamente.
+- **`setup.sh`** — provisiona o servidor Fedora. Um arquivo só (cores,
+  confirmação, geração de chave SSH, config git/gh, instalação das CLIs de
+  IA, os módulos — tudo junto); idempotente, pode ser executado várias vezes
+  sem duplicar configuração.
 - **`zshrc`** — configurações e aliases do terminal, portáveis entre macOS e
   Fedora. Cópia independente da do repo `dotfiles`; aqui é opcional e
   pergunta antes de aplicar (módulo `zshrc`, faz sentido agora que a máquina
@@ -56,9 +53,12 @@ módulos inteiros de uma plataforma toda vez que se mexia na outra — mais
 lógica condicional, mais coisa pra entender antes de rodar um `./setup.sh`
 simples numa máquina nova. Separar por papel (thin client vs. servidor de
 execução) deixa cada script fazendo sentido sozinho, ao custo de duplicar um
-punhado de arquivos pequenos (`lib-common.sh`, `zshrc`) — duplicação
-aceitável aqui porque são poucos e mudam raramente; se um dia isso doer de
-verdade, dá pra reconsiderar.
+punhado de arquivos pequenos (`zshrc`) — duplicação aceitável aqui porque são
+poucos e mudam raramente; se um dia isso doer de verdade, dá pra
+reconsiderar. Pela mesma lógica, `lib-common.sh` (que só existia pra
+compartilhar funções entre `setup.sh` e `setup-fedora.sh` no repo antigo) foi
+embutido direto no `setup.sh` de cada repo — não há mais um segundo script no
+mesmo repo pra justificar mantê-las separadas.
 
 ## Como rodar num Fedora novo ou recém-formatado
 
@@ -94,7 +94,7 @@ verdade, dá pra reconsiderar.
    3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).
    4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.
    5. `podman` — Instala Podman rootless, configura subuid/subgid, habilita linger (containers sobrevivem ao logout/desconexão de SSH) e configura `userns=keep-id` (`~/.config/containers/containers.conf`) — sem isso, processos rodando como "root" dentro de um container não conseguem escrever em bind-mounts que pertencem ao seu usuário real.
-   6. `tailscale` — Adiciona o repo oficial da Tailscale via `dnf config-manager` e instala via `dnf` (não usa `curl | sh`), conecta com `tailscale up` (sem `--ssh` de propósito — ver nota abaixo). Detecta e usa a sintaxe certa tanto no DNF4 (`--add-repo <url>`) quanto no DNF5 (`addrepo --from-repofile=<url>`, padrão desde o Fedora 41).
+   6. `tailscale` — Adiciona o repo oficial da Tailscale via `dnf config-manager` e instala via `dnf` (não usa `curl | sh`), conecta com `tailscale up` (sem `--ssh` de propósito — ver nota abaixo). Assume DNF5 (padrão desde o Fedora 41) — numa instalação em versão anterior (DNF4), a sintaxe do `config-manager` mudou (`addrepo --from-repofile=<url>` → `--add-repo <url>`); ajuste manualmente se for o seu caso.
    7. `sshd-hardening` — Desabilita login por senha e login root via SSH. **Pede confirmação** (no início, junto com as outras). Recusa aplicar (avisa e pula) se `~/.ssh/authorized_keys` estiver vazio — ver passo 2 abaixo, senão você fica sem nenhum jeito de entrar via SSH.
    8. `firewalld` — Garante o firewall ativo e marca a interface `tailscale0` como confiável.
 
@@ -171,7 +171,7 @@ O template de devcontainer traz, por padrão:
 
 ## Pré-configurando respostas (evitar digitar de novo a cada execução)
 
-`GIT_NAME` e `GIT_EMAIL` já têm um default fixado em `lib-common.sh`
+`GIT_NAME` e `GIT_EMAIL` já têm um default fixado no topo do `setup.sh`
 (`DEFAULT_GIT_NAME`/`DEFAULT_GIT_EMAIL`). O prompt mostra esse default entre
 colchetes; Enter aceita, digitar outra coisa sobrescreve só naquela
 execução. Também podem ser pré-exportados no ambiente antes de rodar, o que
