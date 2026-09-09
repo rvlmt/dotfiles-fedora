@@ -1,0 +1,21 @@
+{
+  "name": "coding-agent-workspace",
+  "build": {
+    "dockerfile": "Containerfile"
+  },
+  "remoteUser": "node",
+  "runArgs": ["--memory=4g", "--cpus=2"],
+  "mounts": [
+    "source=${localWorkspaceFolderBasename}-agent-home,target=/home/node/.agent-home,type=volume"
+  ],
+  "containerEnv": {
+    "GH_CONFIG_DIR": "/home/node/.agent-home/gh",
+    "AGENT_LOG_DIR": "/home/node/.agent-home/logs"
+  },
+  "postCreateCommand": "git config --global --add safe.directory '*' && mkdir -p /home/node/.agent-home/gh /home/node/.agent-home/logs",
+  "customizations": {
+    "vscode": {
+      "extensions": []
+    }
+  }
+}

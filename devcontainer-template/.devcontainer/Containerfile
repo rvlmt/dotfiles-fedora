@@ -1,0 +1,34 @@
+# Template de workspace isolado para coding agents (Claude Code, Codex, etc.),
+# pensado para rodar via devpod + Podman no servidor Fedora.
+#
+# Como usar: copie a pasta .devcontainer/ deste template para a raiz de um
+# projeto e ajuste a imagem base/dependências conforme a stack do projeto.
+FROM mcr.microsoft.com/devcontainers/javascript-node:1-20-bullseye
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tmux ripgrep fd-find gh \
+    && rm -rf /var/lib/apt/lists/*
+
+USER node
+
+# Mesmo conjunto de CLIs de IA do módulo ai-clis (setup.sh, deste repo e do repo "dotfiles" no Mac).
+RUN npm install -g \
+        @anthropic-ai/claude-code \
+        @openai/codex \
+        @google/gemini-cli \
+        @github/copilot
+
+RUN curl https://cursor.com/install -fsS | bash \
+    && curl -fsSL https://opencode.ai/install | bash \
+    && curl -fsSL https://antigravity.google/cli/install.sh | bash
+
+ENV PATH="/home/node/.local/bin:/home/node/.opencode/bin:${PATH}"
+
+# Trilha de auditoria: toda sessão de shell interativa fica gravada em
+# $AGENT_LOG_DIR (volume nomeado, fora do repo — não é versionado nem some
+# quando o container é recriado). Serve pra revisar depois o que um agente
+# autônomo realmente executou.
+RUN echo '[ -n "$PS1" ] && [ -n "$AGENT_LOG_DIR" ] && [ -z "$AGENT_LOG_STARTED" ] && \
+    export AGENT_LOG_STARTED=1 && \
+    exec script -qefc "$SHELL" "$AGENT_LOG_DIR/session-$(date +%Y%m%d-%H%M%S)-$$.log"' \
+    >> /home/node/.bashrc
