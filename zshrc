@@ -74,8 +74,22 @@ alias glog="git log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset
 alias gundo="git reset --soft HEAD~1"
 
 # ==============================================================================
-# 🐳 DOCKER & ORBSTACK
+# 🐳 CONTAINERS (Podman & Docker)
 # ==============================================================================
+# Aliases Podman nativos
+alias p="podman"
+alias pc="podman compose"
+alias pps="podman ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+alias ppsa="podman ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+alias pcu="podman compose up -d"
+alias pcd="podman compose down"
+alias pcr="podman compose restart"
+alias pcl="podman compose logs -f"
+alias pclt="podman compose logs -f --tail=100"
+alias pex="podman exec -it"
+alias pprune="podman system prune -af --volumes"
+
+# Aliases Docker (compatibilidade, mapeados para podman via podman-docker no Fedora)
 alias d="docker"
 alias dps="docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 alias dpsa="docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
@@ -87,11 +101,6 @@ alias dcl="docker compose logs -f"
 alias dclt="docker compose logs -f --tail=100"
 alias dex="docker exec -it"
 alias dprune="docker system prune -af --volumes"
-
-# Comandos dedicados do OrbStack
-alias orb-stop="orb stop"
-alias orb-start="orb start"
-alias orb-restart="orb restart"
 
 # ==============================================================================
 # 📦 RUNTIMES & FERRAMENTAS DEV (Bun, Node, OpenCodex)

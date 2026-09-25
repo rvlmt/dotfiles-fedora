@@ -79,9 +79,7 @@ mesmo repo pra justificar mantê-las separadas.
    > `gh auth login` (login via navegador) seguido de
    > `gh repo clone rvlmt/dotfiles-fedora ~/dotfiles-fedora`.
 
-   O script pede a senha do `sudo` uma vez logo no início e mantém o cache
-   "quente" em background até terminar — evita travar pedindo senha de novo
-   no meio de um `dnf upgrade` longo.
+   O script deve ser executado como **usuário comum** (`./setup.sh`, e **NÃO** `sudo ./setup.sh`), pois ele configura o `$HOME`, chaves SSH, dotfiles e Podman rootless do seu usuário. Ele pede a senha do `sudo` uma vez logo no início e mantém o cache "quente" em background até terminar — evita travar pedindo senha de novo no meio de um `dnf upgrade` longo.
 
    **Todas as perguntas de confirmação (`y/N`) acontecem logo no início**,
    antes de qualquer `dnf`/instalação — assim você responde tudo de uma vez
@@ -94,14 +92,14 @@ mesmo repo pra justificar mantê-las separadas.
    3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).
    4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.
    5. `podman` — Instala Podman rootless, configura subuid/subgid, habilita linger (containers sobrevivem ao logout/desconexão de SSH) e configura `userns=keep-id` (`~/.config/containers/containers.conf`) — sem isso, processos rodando como "root" dentro de um container não conseguem escrever em bind-mounts que pertencem ao seu usuário real.
-   6. `tailscale` — Adiciona o repo oficial da Tailscale via `dnf config-manager` e instala via `dnf` (não usa `curl | sh`), conecta com `tailscale up` (sem `--ssh` de propósito — ver nota abaixo). Assume DNF5 (padrão desde o Fedora 41) — numa instalação em versão anterior (DNF4), a sintaxe do `config-manager` mudou (`addrepo --from-repofile=<url>` → `--add-repo <url>`); ajuste manualmente se for o seu caso.
+   6. `tailscale` — Adiciona o repo oficial da Tailscale via `dnf config-manager` e instala via `dnf` (não usa `curl | sh`), conecta com `tailscale up` (sem `--ssh` de propósito — ver nota abaixo). Assume DNF5 (padrão desde o Fedora 41).
    7. `sshd-hardening` — Desabilita login por senha e login root via SSH. **Pede confirmação** (no início, junto com as outras). Recusa aplicar (avisa e pula) se `~/.ssh/authorized_keys` estiver vazio — ver passo 2 abaixo, senão você fica sem nenhum jeito de entrar via SSH.
    8. `firewalld` — Garante o firewall ativo e marca a interface `tailscale0` como confiável.
 
    **Por que não usar o Tailscale SSH (`tailscale up --ssh`)**: ele exige reautenticação interativa via navegador sempre que a política da tailnet tiver `action: check` nos grants de SSH (o default da maioria das tailnets) — quebra qualquer ferramenta que não sabe abrir um navegador (Codex Desktop, devpod rodando não-interativamente, cron, etc.), e o próprio Tailscale avisa incompatibilidade com SELinux enforcing no Fedora. O acesso SSH real já é coberto por `sshd-hardening` (só chave, sem senha) + `firewalld` (sshd só na interface `tailscale0`) — chave clássica, sem nenhuma reautenticação. Se você já rodou uma versão anterior deste script com `--ssh`, desative com `sudo tailscale set --ssh=false`.
 
    9. `toolbx` *(opcional, não roda por padrão)* — Sandbox Podman rápida para mexer em algo fora do contexto de um projeto/devpod. Rode com `--only=toolbx`.
-   10. `gui-access` *(opcional, não roda por padrão)* — Habilita o GNOME Remote Desktop nativo (RDP via `grdctl`), já que o Fedora é uma Workstation completa (AIO dedicado) e às vezes vale controlar direto com tela. Rode com `--only=gui-access`; depois defina uma senha com `grdctl rdp set-credentials <usuario> <senha>` e conecte via um cliente RDP no Mac. Combinado com `autologin` (abaixo), o RDP volta a funcionar mesmo depois de um reboot sem ninguém fisicamente presente.
+   10. `gui-access` *(opcional, não roda por padrão)* — Habilita o GNOME Remote Desktop nativo (RDP via `grdctl`), já que o Fedora é uma Workstation completa (AIO dedicado) e às vezes vale controlar direto com tela. Rode com `--only=gui-access`; depois defina uma senha com `grdctl rdp set-credentials <usuario> <senha>` e conecte via um cliente RDP no Mac.
    11. `desktop-apps` — Equivalente ao Brewfile do Mac. Cada app foi checado individualmente contra fonte oficial antes de decidir instalar ou não (ver `ROLLBACK.md`/comentários no script pra fontes exatas):
        - **Instalados automaticamente** (fonte oficial confirmada, funciona no Fedora): VS Code (repo Microsoft), Google Chrome (RPM oficial), Brave (repo oficial), Zed (script oficial), Antigravity IDE (repo rpm oficial do Google), Cursor (AppImage oficial), OpenCode Desktop (RPM oficial), Transmission (repo do Fedora).
        - **Genuinamente sem versão Linux** (confirmado oficialmente, sem alternativa real): Adobe Creative Cloud, Raycast, OpenUsage, OrbStack, Rectangle (GNOME já tem tiling nativo), Arc (nunca suportou Linux), AppCleaner e Pearcleaner (resolvem um problema específico do modelo de "bundle" do macOS que não existe no Fedora).
@@ -109,18 +107,14 @@ mesmo repo pra justificar mantê-las separadas.
        - **Oficial só via Docker/Podman Compose** (não é app desktop nativo): Open Design.
        - **Sem app oficial, só opção não-oficial/não-verificada de terceiros** (não instalada automaticamente, decisão sua): GitHub Desktop, Notion, Figma, Spotify e Termius (os Flatpaks desses dois últimos são "Unverified"/não afiliados no Flathub, apesar de populares), FontBase (AppImage oficial existe, mas sem link "sempre atual" estável), Surfshark (sem suporte oficial a Fedora), Ghostty (só via COPR de terceiros).
        - devpod tem binário Linux oficial, mas não é instalado aqui — ele roda do lado Mac controlando este servidor.
-   12. `ai-clis` — Mesmo conjunto de CLIs de IA do Mac (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI).
-   13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`).
-   14. `zshrc` — **Pergunta antes de aplicar**: linka o `zshrc` compartilhado também neste servidor, instala `zsh`+plugins via `dnf` e troca o shell padrão. Faz sentido agora que a máquina tem sessão gráfica/RDP, não só SSH.
-   15. `autologin` — Habilita login automático do GDM para o seu usuário (`/etc/gdm/custom.conf`). **Pede confirmação**: qualquer um com acesso físico à máquina passa a ter uma sessão logada sem senha — aceitável aqui porque é um AIO dedicado, não uma máquina compartilhada.
-   16. `power-management` — **Pergunta antes de aplicar**: impede suspensão/bloqueio de tela por ociosidade (dconf) e mascara os alvos de suspensão/hibernação no systemd-logind — essencial numa máquina controlada remotamente, sem ninguém fisicamente presente pra "mexer o mouse".
-   17. `reboot-timer` — **Pergunta antes de aplicar**: agenda um reboot semanal (domingo às 04h) via timer systemd, como higiene geral.
+   12. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). Opcional no host, já que os coding agents rodam primariamente isolados dentro dos containers devpod.
+   13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), router local para modelos de IA.
+   14. `zshrc` — **Pergunta antes de aplicar**: linka o `zshrc` compartilhado também neste servidor (com aliases para Git, Podman e Docker), instala `zsh`+plugins via `dnf` e troca o shell padrão.
 
    Use `--only=modulo1,modulo2` ou `--skip=modulo1,modulo2`. Só `toolbx` e
    `gui-access` ficam de fora por padrão (precisam de `--only` explícito); os
-   demais módulos sensíveis (`zshrc`, `autologin`, `power-management`,
-   `reboot-timer`) participam da execução normal, com a confirmação já
-   coletada no início.
+   demais módulos interativos (`ai-clis`, `zshrc`) participam da execução normal,
+   com a confirmação coletada logo no início.
 
    ```bash
    ./setup.sh --only=podman,tailscale
@@ -168,6 +162,76 @@ O template de devcontainer traz, por padrão:
 - **Limite de recursos** (`runArgs: --memory=4g --cpus=2`) — um agente com bug/loop não derruba o servidor inteiro. Ajuste por projeto.
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
+
+## Configurações Manuais Opcionais no Host (GUI ou Terminal)
+
+Caso você queira transformar o Fedora em um servidor autônomo sem intervenção física (ex.: recuperação após reboot para sessões RDP), essas configurações podem ser feitas sob demanda:
+
+### 1. Login automático do GDM (Autologin)
+Permite que o Fedora suba a sessão gráfica no boot sem ninguém digitar a senha fisicamente. **Atenção**: qualquer pessoa com acesso físico ao computador terá acesso à sessão aberta.
+
+- **Pela GUI**: **Configurações → Usuários** → selecione seu usuário → ative o toggle **"Login Automático"**.
+- **Pelo Terminal**:
+  ```bash
+  sudo sed -i '/^\[daemon\]/,/^\[/{/^AutomaticLoginEnable=/d; /^AutomaticLogin=/d}' /etc/gdm/custom.conf
+  sudo sed -i "/^\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin=$USER" /etc/gdm/custom.conf
+  ```
+
+### 2. Gestão de Energia (Prevenir suspensão e tela preta por ociosidade)
+Garante que o host continue sempre ativo mesmo sem mouse ou teclado físicos conectados.
+
+- **Pela GUI**: **Configurações → Energia** → defina "Apagar tela" para **Nunca** e desative "Suspensão Automática".
+- **Pelo Terminal** (dconf + máscara no systemd-logind):
+  ```bash
+  # Previne suspensão e bloqueio no GNOME
+  sudo mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
+  printf 'user-db:user\nsystem-db:local\n' | sudo tee /etc/dconf/profile/user > /dev/null
+  sudo tee /etc/dconf/db/local.d/00-power-management > /dev/null <<'EOF'
+  [org/gnome/settings-daemon/plugins/power]
+  sleep-inactive-ac-type='nothing'
+  sleep-inactive-ac-timeout=0
+
+  [org/gnome/desktop/session]
+  idle-delay=uint32 0
+
+  [org/gnome/desktop/screensaver]
+  lock-enabled=false
+  EOF
+  sudo dconf update
+
+  # Mascara suspensão/hibernação no systemd
+  sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+  ```
+
+### 3. Reboot Semanal Agendado
+Caso queira programar um reboot automático como rotina de limpeza do sistema (ex.: domingo às 04h):
+
+- **Pelo Terminal**:
+  ```bash
+  sudo tee /etc/systemd/system/scheduled-reboot.service > /dev/null <<'EOF'
+  [Unit]
+  Description=Reboot semanal agendado (higiene geral do servidor)
+
+  [Service]
+  Type=oneshot
+  ExecStart=/usr/bin/systemctl reboot
+  EOF
+
+  sudo tee /etc/systemd/system/scheduled-reboot.timer > /dev/null <<'EOF'
+  [Unit]
+  Description=Dispara o reboot semanal agendado
+
+  [Timer]
+  OnCalendar=Sun *-*-* 04:00:00
+  Persistent=true
+
+  [Install]
+  WantedBy=timers.target
+  EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now scheduled-reboot.timer
+  ```
 
 ## Pré-configurando respostas (evitar digitar de novo a cada execução)
 

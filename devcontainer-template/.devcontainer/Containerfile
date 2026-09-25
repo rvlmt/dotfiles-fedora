@@ -7,6 +7,7 @@ FROM mcr.microsoft.com/devcontainers/javascript-node:1-20-bullseye
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tmux ripgrep fd-find gh \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
 USER node
@@ -30,5 +31,6 @@ ENV PATH="/home/node/.local/bin:/home/node/.opencode/bin:${PATH}"
 # autônomo realmente executou.
 RUN echo '[ -n "$PS1" ] && [ -n "$AGENT_LOG_DIR" ] && [ -z "$AGENT_LOG_STARTED" ] && \
     export AGENT_LOG_STARTED=1 && \
+    mkdir -p "$AGENT_LOG_DIR" 2>/dev/null && \
     exec script -qefc "$SHELL" "$AGENT_LOG_DIR/session-$(date +%Y%m%d-%H%M%S)-$$.log"' \
     >> /home/node/.bashrc

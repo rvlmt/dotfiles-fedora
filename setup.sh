@@ -11,6 +11,12 @@ if [[ "$(uname -s)" != "Linux" ]] || ! command -v dnf &> /dev/null; then
     exit 1
 fi
 
+if [ "$EUID" -eq 0 ]; then
+    echo "Não execute este script como root ou com 'sudo ./setup.sh'!" >&2
+    echo "Execute './setup.sh' diretamente como seu usuário normal. O script solicitará sudo quando necessário." >&2
+    exit 1
+fi
+
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -67,8 +73,7 @@ install_npm_global() {
     fi
 }
 
-# CLIs de IA disponíveis via npm/Bun ou script oficial.
-# Antigravity CLI fica de fora daqui por só ter formula Homebrew (macOS).
+# CLIs de IA disponíveis via npm/Bun ou script oficial (instaladas no host se confirmado).
 install_common_ai_clis() {
     export PATH="$HOME/.bun/bin:$(npm config get prefix 2>/dev/null)/bin:$HOME/.local/bin:$PATH"
 
@@ -202,7 +207,7 @@ link_zshrc() {
 }
 
 # Módulos disponíveis, na ordem em que rodam.
-ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc autologin power-management reboot-timer"
+ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc"
 
 usage() {
     cat <<EOF
@@ -262,9 +267,8 @@ should_run() {
 
 # toolbx e gui-access são opcionais: só rodam se pedidos explicitamente via
 # --only, a menos que o usuário já tenha especificado um --skip próprio.
-# zshrc, autologin, power-management e reboot-timer participam da execução
-# normal, mas cada um pergunta antes de agir (confirm()) — não precisam de
-# --only.
+# ai-clis e zshrc participam da execução normal, mas cada um pergunta antes
+# de agir (confirm()) — não precisam de --only.
 if [ -z "$ONLY" ] && [ -z "$SKIP" ]; then
     SKIP="toolbx,gui-access"
 fi
@@ -299,30 +303,20 @@ if should_run "sshd-hardening" && [ ! -f /etc/ssh/sshd_config.d/99-dotfiles-hard
     confirm "Desabilitar login por senha via SSH (só chave pública a partir daqui)?" && CONFIRM_SSHD_HARDENING=1
 fi
 
+CONFIRM_AI_CLIS=""
+if should_run "ai-clis"; then
+    confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) também diretamente no host Fedora? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
+fi
+
 CONFIRM_ZSHRC=""
 if should_run "zshrc"; then
-    confirm "Usar o zshrc compartilhado (aliases git/docker/bun) também neste servidor Fedora?" && CONFIRM_ZSHRC=1
+    confirm "Usar o zshrc compartilhado (aliases git/docker/podman/bun) também neste servidor Fedora?" && CONFIRM_ZSHRC=1
 fi
 
 CONFIRM_ZSHRC_OVERWRITE=0
 if [ "$CONFIRM_ZSHRC" = "1" ] && { [ -e "$HOME/.zshrc" ] || [ -L "$HOME/.zshrc" ]; } \
     && [ "$(readlink "$HOME/.zshrc" 2>/dev/null)" != "$SCRIPT_DIR/zshrc" ]; then
     confirm "Já existe um ~/.zshrc. Substituir por um link para este repositório (o atual será salvo como backup)?" && CONFIRM_ZSHRC_OVERWRITE=1
-fi
-
-CONFIRM_AUTOLOGIN=""
-if should_run "autologin" && [ -f /etc/gdm/custom.conf ] && ! grep -q "^AutomaticLoginEnable=True" /etc/gdm/custom.conf 2>/dev/null; then
-    confirm "Habilitar login automático do GDM para '$USER'? (qualquer um com acesso físico à máquina terá uma sessão logada sem senha)" && CONFIRM_AUTOLOGIN=1
-fi
-
-CONFIRM_POWER_MANAGEMENT=""
-if should_run "power-management"; then
-    confirm "Impedir suspensão/bloqueio de tela por ociosidade neste servidor?" && CONFIRM_POWER_MANAGEMENT=1
-fi
-
-CONFIRM_REBOOT_TIMER=""
-if should_run "reboot-timer"; then
-    confirm "Agendar reboot semanal (domingo às 04h) via systemd timer?" && CONFIRM_REBOOT_TIMER=1
 fi
 
 # O script tem vários "sudo" espalhados, e o "dnf upgrade" do módulo base
@@ -667,15 +661,19 @@ EOF
 fi
 
 # ==============================================================================
-# CLIs de IA (mesmo conjunto do macOS)
+# CLIs de IA (opcional no host — rodarão principalmente dentro dos devcontainers)
 # ==============================================================================
 if should_run "ai-clis"; then
     echo -e "\n${BLUE}==> CLIs de IA${NC}"
-    install_common_ai_clis
+    if [ "$CONFIRM_AI_CLIS" = "1" ]; then
+        install_common_ai_clis
+    else
+        echo -e "${YELLOW}Instalação de CLIs de IA no host ignorada (rodarão dentro dos devcontainers).${NC}"
+    fi
 fi
 
 # ==============================================================================
-# OpenCodex CLI (@bitkyc08/opencodex) — mesmo pacote instalado no macOS
+# OpenCodex CLI (@bitkyc08/opencodex) — router para modelos de IA
 # ==============================================================================
 if should_run "opencodex"; then
     echo -e "\n${BLUE}==> OpenCodex${NC}"
@@ -684,7 +682,7 @@ fi
 
 # ==============================================================================
 # Link do .zshrc (opcional — pergunta antes de aplicar). Faz sentido agora que
-# o servidor tem sessão gráfica/RDP (autologin + gui-access), não só SSH.
+# o servidor tem sessão gráfica/RDP (gui-access), não só SSH.
 # ==============================================================================
 if should_run "zshrc"; then
     echo -e "\n${BLUE}==> Link do .zshrc${NC}"
@@ -699,101 +697,6 @@ if should_run "zshrc"; then
     fi
 fi
 
-# ==============================================================================
-# Login automático (GDM) — sessão gráfica sobe sozinha no boot, sem precisar de
-# alguém sentado no AIO pra digitar a senha. Pré-requisito pro RDP funcionar
-# depois de um reboot sem ninguém fisicamente presente. Pede confirmação: quem
-# tiver acesso físico à máquina passa a ter uma sessão logada sem senha.
-# ==============================================================================
-if should_run "autologin"; then
-    echo -e "\n${BLUE}==> Login automático (GDM)${NC}"
-    GDM_CONFIG="/etc/gdm/custom.conf"
-    if [ ! -f "$GDM_CONFIG" ]; then
-        echo -e "${YELLOW}$GDM_CONFIG não encontrado — GDM não parece estar instalado, pulando.${NC}"
-    elif grep -q "^AutomaticLoginEnable=True" "$GDM_CONFIG" 2>/dev/null; then
-        echo -e "${YELLOW}Login automático já habilitado em $GDM_CONFIG.${NC}"
-    else
-        if [ "$CONFIRM_AUTOLOGIN" = "1" ]; then
-            sudo cp "$GDM_CONFIG" "$GDM_CONFIG.bak.$(date +%Y%m%d%H%M%S)"
-            sudo sed -i '/^\[daemon\]/,/^\[/{/^AutomaticLoginEnable=/d; /^AutomaticLogin=/d}' "$GDM_CONFIG"
-            if grep -q "^\[daemon\]" "$GDM_CONFIG"; then
-                sudo sed -i "/^\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin=$USER" "$GDM_CONFIG"
-            else
-                printf '[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=%s\n' "$USER" | sudo tee -a "$GDM_CONFIG" > /dev/null
-            fi
-            echo -e "${GREEN}✓ Login automático habilitado para $USER (efeito após reboot; backup salvo).${NC}"
-        else
-            echo -e "${YELLOW}Login automático ignorado.${NC}"
-        fi
-    fi
-fi
-
-# ==============================================================================
-# Impede suspensão/desligamento por ociosidade — essencial numa máquina
-# controlada remotamente: ninguém fisicamente presente pra "mexer o mouse".
-# Duas camadas: dconf (GNOME) + mask no systemd-logind (reforço independente
-# de desktop).
-# ==============================================================================
-if should_run "power-management"; then
-    echo -e "\n${BLUE}==> Gestão de energia (impedir suspensão por ociosidade)${NC}"
-    if [ "$CONFIRM_POWER_MANAGEMENT" = "1" ]; then
-        sudo mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
-        if [ ! -f /etc/dconf/profile/user ] || ! grep -q "^system-db:local" /etc/dconf/profile/user; then
-            printf 'user-db:user\nsystem-db:local\n' | sudo tee /etc/dconf/profile/user > /dev/null
-        fi
-        sudo tee /etc/dconf/db/local.d/00-power-management > /dev/null <<'EOF'
-[org/gnome/settings-daemon/plugins/power]
-sleep-inactive-ac-type='nothing'
-sleep-inactive-ac-timeout=0
-
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-EOF
-        sudo dconf update
-        echo -e "${GREEN}✓ dconf configurado: sem suspensão/bloqueio de tela por ociosidade.${NC}"
-
-        sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
-        echo -e "${GREEN}✓ Alvos de suspensão/hibernação mascarados no systemd-logind.${NC}"
-    else
-        echo -e "${YELLOW}Gestão de energia ignorada.${NC}"
-    fi
-fi
-
-# ==============================================================================
-# Reboot semanal (domingo 04h) — higiene geral, opcional.
-# ==============================================================================
-if should_run "reboot-timer"; then
-    echo -e "\n${BLUE}==> Reboot semanal agendado${NC}"
-    if [ "$CONFIRM_REBOOT_TIMER" = "1" ]; then
-        sudo tee /etc/systemd/system/scheduled-reboot.service > /dev/null <<'EOF'
-[Unit]
-Description=Reboot semanal agendado (higiene geral do servidor)
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/systemctl reboot
-EOF
-        sudo tee /etc/systemd/system/scheduled-reboot.timer > /dev/null <<'EOF'
-[Unit]
-Description=Dispara o reboot semanal agendado
-
-[Timer]
-OnCalendar=Sun *-*-* 04:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now scheduled-reboot.timer
-        echo -e "${GREEN}✓ Reboot agendado: todo domingo às 04h (systemctl list-timers pra conferir).${NC}"
-    else
-        echo -e "${YELLOW}Reboot semanal ignorado.${NC}"
-    fi
-fi
-
 echo -e "\n${GREEN}=== Configuração do servidor finalizada! ===${NC}"
 echo -e "Próximo passo no Mac: configure o devpod com este servidor como provider SSH via Tailscale."
+

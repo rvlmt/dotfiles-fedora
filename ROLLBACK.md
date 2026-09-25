@@ -21,25 +21,19 @@ sudo firewall-cmd --reload
 Pra desligar o firewalld por completo (não recomendado, ele que garante que só
 o Tailscale alcança a máquina): `sudo systemctl disable --now firewalld`.
 
-### `autologin` — desabilitar login automático do GDM
+### `autologin` (configuração manual) — desabilitar login automático do GDM
 
 Mais simples, pela GUI: **Configurações → Usuários** → clique no seu usuário
 → desliga o toggle "Login Automático".
 
-Ou via terminal — o script salva um backup do arquivo antes de mexer
-(`/etc/gdm/custom.conf.bak.AAAAMMDDHHMMSS`), então dá pra restaurar direto
-esse backup, ou só remover as duas linhas:
-
+Ou via terminal (caso tenha configurado manualmente):
 ```bash
-ls /etc/gdm/custom.conf.bak.*        # confirma o backup mais recente
-sudo cp /etc/gdm/custom.conf.bak.AAAAMMDDHHMMSS /etc/gdm/custom.conf
-# ou, sem usar o backup:
 sudo sed -i '/^AutomaticLoginEnable=/d; /^AutomaticLogin=/d' /etc/gdm/custom.conf
 ```
 
 Efeito só depois do próximo reboot/logout.
 
-### `power-management` — voltar a suspender/bloquear por ociosidade
+### `power-management` (configuração manual) — voltar a suspender/bloquear por ociosidade
 
 A parte do **dconf** já é revertível direto pela GUI (**Configurações →
 Energia**) — o que escrevemos é só um default, sem lock, então qualquer
@@ -58,7 +52,7 @@ ligada em Configurações → Energia:
 sudo systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target
 ```
 
-### `reboot-timer` — cancelar o reboot semanal agendado
+### `reboot-timer` (configuração manual) — cancelar o reboot semanal agendado
 
 ```bash
 sudo systemctl disable --now scheduled-reboot.timer
