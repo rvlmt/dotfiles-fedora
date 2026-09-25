@@ -166,21 +166,22 @@ O template de devcontainer traz, por padrão:
 ## Dev Container CLI no host Fedora
 
 O Dev Container CLI é a exceção deliberada, user-scoped, ao
-container-first: é um controlador do host, não um toolchain de aplicação. Os
-agents/controllers continuam no Fedora; nenhuma credencial ou CLI de agent é
-adicionada aos devcontainers de aplicação.
+container-first: é um controlador do host, não um toolchain de aplicação.
+Esta seção não altera a arquitetura de execução dos agents. Os
+devcontainers de aplicação não recebem credenciais nem CLIs de agent; o
+template `agent-sandbox` é tratado separadamente.
 
 A instalação é gerenciada e pinada pelo `mise`, incluindo um runtime Node
 próprio para o CLI:
 
 ```bash
 mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
-mise exec -- node --version
-mise exec -- devcontainer --version
+mise exec node@22.23.3 devcontainer-cli@0.89.0 -- node --version
+mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer --version
 ```
 
-Em repositórios que possuem um `mise.toml` local, force as versões globais no
-comando para que o runtime do projeto não substitua o runtime do CLI:
+Force as versões globais também nos comandos executados dentro de um
+repositório, para que um `mise.toml` local não substitua o runtime do CLI:
 
 ```bash
 mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
@@ -193,17 +194,57 @@ mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer exec \
   <comando-do-aplicativo>
 ```
 
-`--docker-path podman` é obrigatório tanto em `up` quanto em `exec`; sem ele o
-CLI pode procurar o provider Docker-compatible via socket. O
-`podman.socket` permanece desabilitado, e builds/testes/lint de aplicação não
-usam `docker compose` nem `podman-compose`.
+Neste fluxo, `--docker-path podman` é uma exigência de política: torna o
+provider explícito e não depende do shim `podman-docker`, que também
+faria o CLI detectar Podman. O CLI executa o binário informado; esta
+operação não depende do `podman.socket`. O socket permanece
+desabilitado, e builds/testes/lint de aplicação não usam `docker compose`
+nem `podman-compose`.
 
-O provider Podman direto do CLI `0.89.0` adiciona
-`--security-opt label=disable` automaticamente. Essa é a estratégia aceita
-neste host: os containers continuam rootless e separados por projeto, mas o
-workflow de devcontainer não deve ser descrito como um confine SELinux. Mantenha
-as credenciais fora do workspace montado e não use esse modo como boundary
-host.
+Quando executado pelo usuário regular contra Podman rootless, o provider
+Podman do CLI em Linux adiciona `--security-opt label=disable`. Esse
+comportamento pertence ao variant do Podman, não a uma versão específica
+do CLI. Os containers continuam rootless e separados por projeto, mas este
+workflow de devcontainer não deve ser descrito como confine SELinux.
+Mantenha as credenciais fora do workspace montado e não use este modo
+como boundary do host.
+
+### Ciclo de vida dos devcontainers
+
+O CLI `0.89.0` não oferece um `down` completo. O cleanup usa o label
+`devcontainer.local_folder` e deve ser feito em etapas, revisando a lista
+antes de remover qualquer container:
+
+```bash
+WORKSPACE=/caminho/absolato/do/projeto
+
+# 1. Identificar containers do projeto.
+podman ps -a \
+  --filter "label=devcontainer.local_folder=${WORKSPACE}" \
+  --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}'
+
+# 2. Parar somente os IDs revisados no passo anterior.
+podman stop <id-1> <id-2>
+
+# 3. Verificar portas residuais. Sem saída significa que estão livres.
+ss -ltnp | grep -E ':(8000|8080|5173|3000|5432)\b'
+
+# 4. Remover os mesmos IDs depois da confirmação.
+podman rm <id-1> <id-2>
+
+# 5. Confirmar que não restou container com o label do projeto.
+podman ps -a \
+  --filter "label=devcontainer.local_folder=${WORKSPACE}" \
+  --format '{{.ID}} {{.Names}} {{.Status}}'
+
+# 6. Recriar quando o cleanup estiver aprovado.
+mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
+  --docker-path podman \
+  --workspace-folder "${WORKSPACE}"
+```
+
+Nenhuma etapa deste runbook deve ser automatizada com `rm` por wildcard:
+os IDs revisados são parte do procedimento.
 
 ## Configurações Manuais Opcionais no Host (GUI ou Terminal)
 
