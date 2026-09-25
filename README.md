@@ -163,6 +163,48 @@ O template de devcontainer traz, por padrão:
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
 
+## Dev Container CLI no host Fedora
+
+O Dev Container CLI é a exceção deliberada, user-scoped, ao
+container-first: é um controlador do host, não um toolchain de aplicação. Os
+agents/controllers continuam no Fedora; nenhuma credencial ou CLI de agent é
+adicionada aos devcontainers de aplicação.
+
+A instalação é gerenciada e pinada pelo `mise`, incluindo um runtime Node
+próprio para o CLI:
+
+```bash
+mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
+mise exec -- node --version
+mise exec -- devcontainer --version
+```
+
+Em repositórios que possuem um `mise.toml` local, force as versões globais no
+comando para que o runtime do projeto não substitua o runtime do CLI:
+
+```bash
+mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
+  --docker-path podman \
+  --workspace-folder /caminho/do/projeto
+
+mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer exec \
+  --docker-path podman \
+  --workspace-folder /caminho/do/projeto \
+  <comando-do-aplicativo>
+```
+
+`--docker-path podman` é obrigatório tanto em `up` quanto em `exec`; sem ele o
+CLI pode procurar o provider Docker-compatible via socket. O
+`podman.socket` permanece desabilitado, e builds/testes/lint de aplicação não
+usam `docker compose` nem `podman-compose`.
+
+O provider Podman direto do CLI `0.89.0` adiciona
+`--security-opt label=disable` automaticamente. Essa é a estratégia aceita
+neste host: os containers continuam rootless e separados por projeto, mas o
+workflow de devcontainer não deve ser descrito como um confine SELinux. Mantenha
+as credenciais fora do workspace montado e não use esse modo como boundary
+host.
+
 ## Configurações Manuais Opcionais no Host (GUI ou Terminal)
 
 Caso você queira transformar o Fedora em um servidor autônomo sem intervenção física (ex.: recuperação após reboot para sessões RDP), essas configurações podem ser feitas sob demanda:
