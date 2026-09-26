@@ -120,24 +120,48 @@ mesmo repo pra justificar mantê-las separadas.
    confirmação coletada logo no início. `zshrc` não pergunta, exceto na
    substituição destrutiva descrita acima.
 
-   ### Imagens órfãs acumulam: prune depois dos ciclos
+   ### Camadas `<none>` são cache, não lixo
 
-   Cada `devcontainer up` deixa camadas intermediárias de build marked
-   `<none>`, e o runbook de cleanup desta seção remove **containers** por label,
-   nunca **images**. Num host de uso contínuo isso acumula dezenas de GB sem
-   que nada avise. Numa auditoria este store tinha 90 GB, dos quais 124 camadas
-   `<none>` respondiam pelo quase todo; as 3 imagens em uso e os volumes
-   ocupavam menos de 1 GB somados.
+   Cada `devcontainer up` deixa camadas intermediárias de build com tag `<none>`.
+   Elas **não são lixo**: são cache de buildah, reaproveitado por digest de pai.
+   Um build igual reusa essas camadas; só um build diferente (base ou Containerfile
+   alterados) as descarta de qualquer forma. Ficam "órfãs" apenas porque nada as
+   referencia por nome depois que a imagem final recebeu tag.
 
-   O cleanup de containers, quando for necessário, deve ser seguido de um prune
-   de órfãs — que não remove imagens em uso, volumes nem containers:
+   O runbook de cleanup desta seção remove **containers** por label, nunca
+   **images** — então nada remove essas camadas por conta própria, e elas
+   acumulam em disco conforme o número de builds e recriações de devcontainer.
+
+   **Podar ou não é uma decisão de tradeoff, não uma correção.** Removê-las
+   libera disco mas obriga o próximo `devcontainer build` a refazer as camadas do
+   zero; mantê-las economiza rebuild mas ocupa disco. Num host com espaço,
+   **não podar é legítimo** — as camadas são o cache que faz o próximo build ser
+   rápido. Podar só faz sentido sob pressão de disco, e o comando abaixo não
+   remove imagens em uso, volumes nem containers:
 
    ```bash
    podman image prune --force --filter dangling=true
    ```
 
-   Acompanhe com `podman images` e `du -sh ~/.local/share/containers/storage`:
-   o store deve voltar ao tamanho das bases realmente em uso.
+   Meça o espaço pelo `df`, não pelo `du` do store. Se o filesystem do store for
+   btrfs com compressão, o `du` superestima o uso real com facilidade:
+   `stat -c %b` devolve blocos **não comprimidos**, enquanto o disco ocupa o
+   tamanho comprimido. Num host assim, camadas de imagem cheias de texto e JS
+   comprimem várias vezes, e a diferença entre `du` e `df` passa de dezenas de GB
+   sem que nada esteja errado. Neste host, um arquivo de 200 MB de texto repetido
+   foi reportado pelo `du` como 200 MB e ocupou 6,5 MB de disco.
+
+   Antes de acreditar em qualquer número de disco, uma checagem basta. O
+   `--target` é obrigatório: sem ele o `findmnt` não resolve um caminho dentro de
+   um subvolume e responde que não há compressão.
+
+   ```bash
+   findmnt -T ~/.local/share/containers/storage -no OPTIONS \
+     | tr ',' '\n' | grep -i '^compress='
+   ```
+
+   Se não imprimir nada, o `du` é confiável nesse filesystem. Se imprimir, meça
+   pelo `df`.
 
    ```bash
    ./setup.sh --only=podman,tailscale
