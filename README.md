@@ -489,37 +489,45 @@ não a ferramenta mais sensível.
 
 | Serviço | Escuta | Publicação na tailnet | Auth da app |
 |---|---|---|---|
-| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` | nenhuma — ver abaixo |
+| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` | basic auth obrigatória — ver abaixo |
 | _(reservado)_ | — | `:443`, para o próximo serviço | — |
 
 Ao publicar um serviço novo: acrescente a linha na tabela com uma porta livre, e
 não troque o que já existe. `setup_opencode_serve` não sobrescreve config de outro
 serviço — se já houver algo publicado, avisa e devolve a decisão.
 
-#### O OpenCode não tem senha; a fronteira é a tailnet
+#### A senha do OpenCode é obrigatória, e o padrão a mantém estável
 
-O instalador do OpenCode sobe o servidor com `serve --service`, que gera uma senha
-aleatória, guarda em `~/.config/opencode/service.json` e liga **HTTP basic auth**
-em `/api/*`. O padrão declara o comando **sem** `--service` e faz
-`UnsetEnvironment=OPENCODE_SERVER_PASSWORD`, então a API não exige credencial.
+A senha do servidor **não é opcional** no OpenCode v2, apesar de a documentação
+dizer que `OPENCODE_SERVER_PASSWORD` "habilita" o basic auth. O que o binário faz
+é sempre escolher um valor:
 
-Por que remover em vez de rotacionar: a senha vazou para uma sessão de agente
-sincronizada na nuvem, e o CLI não tem como rotacioná-la — `opencode pair` só
-reexibe. Remover a auth elimina o segredo em vez de tentar gerenciar um
-comprometido.
+- **com `--service`** (o que o instalador usa e o padrão preserva): a senha vem de
+  `~/.config/opencode/service.json` e é **estável** entre restarts;
+- **sem `--service`**: a senha vem de `OPENCODE_SERVER_PASSWORD` ou, se ela não
+  existir, é **gerada aleatoriamente a cada start** e registrada no journal.
 
-**O que isso significa em troca:** sem basic auth, quem alcança a porta da tailnet
-chega à API inteira, que inclui ler qualquer arquivo (`/api/file/content`),
-**executar shell** (`/api/session/:id/shell`) e dirigir o agente
-(`/api/session/:id/message`). A fronteira passa a ser **a membership da
-tailnet** — hoje 6 aparelhos, todos da mesma conta. Se algum dia entrar um
-dispositivo ou uma conta de terceiros na tailnet, essa pessoa ganha shell neste
-host. Reavalie antes de adicionar alguém.
+`UnsetEnvironment=OPENCODE_SERVER_PASSWORD` não desliga a autenticação — apenas
+escolhe o caminho aleatório, o que invalida as credenciais já salvas no navegador
+a cada reinício. Por isso o drop-in preserva `--service` de propósito.
 
-É por isso que o padrão declara o comando inteiro, em vez de preservar as flags do
-instalador: preservar `--service` reintroduziria a senha silenciosamente em cada
-execução do `setup.sh`. A unit é `Type=simple`, então o servidor não precisa da
-flag para ficar em foreground.
+Definir uma senha de sua preferência:
+
+```bash
+./setup.sh --only=ai-clis
+# ou direto:
+opencode service set password <a-sua-senha>
+systemctl --user restart opencode
+```
+
+A senha é lida de `service.json` no start, então o restart é o que a aplica. Não
+há como passá-la por stdin — `opencode service set` recebe o valor em `argv` —
+por isso a leitura no `setup.sh` é silenciosa e apaga a variável assim que usa. O
+histórico do shell não é afetado, já que o valor nunca é digitado como argumento.
+
+Quem alcança a porta da tailnet ainda precisa dessa credencial: a API inclui ler
+qualquer arquivo (`/api/file/content`) e **executar shell**
+(`/api/session/:id/shell`), então trate a senha como chave de acesso ao host.
 
 #### Por que porta, e não prefixo de caminho
 

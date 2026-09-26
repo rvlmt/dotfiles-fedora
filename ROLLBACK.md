@@ -201,15 +201,14 @@ rm -f ~/.local/bin/agy ~/.local/bin/agent ~/.local/bin/cursor-agent
 rm -rf ~/.opencode ~/.cursor-agent
 ```
 
-O módulo também declara a escuta do servidor do OpenCode por drop-in, a
-publicação na tailnet e a **ausência de senha** — então as três fazem parte do
-rollback:
+O módulo também declara a escuta do servidor do OpenCode por drop-in e a
+publicação na tailnet, então as duas fazem parte do rollback:
 
 ```bash
 # Tira a publicação (o servidor deixa de ser alcançável de fora).
 sudo tailscale serve reset
 
-# Devolve a unit ao estado que o instalador deixou — inclusive a senha.
+# Devolve a unit ao estado que o instalador deixou.
 rm -rf ~/.config/systemd/user/opencode.service.d
 systemctl --user daemon-reload
 ```
@@ -217,14 +216,14 @@ systemctl --user daemon-reload
 ⚠️ `tailscale serve reset` apaga **toda** a config de publicação do nó, não só a
 do OpenCode. Se houver outro serviço publicado, remova o dele com
 `tailscale serve clear` em vez de reset. Com o drop-in removido, o servidor volta
-a escutar no endereço que o instalador deixou **e volta a ter senha** — o
-`--service` do instalador a regenera. Remover a unit inteira
+a escutar no endereço que o instalador deixou. Remover a unit inteira
 (`rm ~/.config/systemd/user/opencode.service`) também a apaga do estado do
 usuário e precisa de `disable` antes.
 
-A senha em si fica em `~/.config/opencode/service.json` e é regenerada pelo
-wrapper; para eliminá-la de vez, o caminho é o drop-in acima, não apagar o
-arquivo.
+A senha **não** faz parte do rollback: ela vive em
+`~/.config/opencode/service.json` e é mantida de propósito, porque sem
+`--service` o servidor geraria uma senha aleatória a cada start. Para trocá-la,
+`opencode service set password <senha>` seguido de restart.
 
 `claude` e `cursor-agent` não dependem de Node, mas `codex`, `gemini`, `copilot` e
 `ocx` resolvem `#!/usr/bin/env node` — por isso remova estas últimas **antes** do
