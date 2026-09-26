@@ -18,15 +18,17 @@ rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
 │ Tailscale client                               │◄────►│ Tailscale (SSH só na interface tailscale0)           │
 │ devpod CLI (provider SSH → fedora via tailnet) │      │ Podman rootless                                      │
 │ VS Code + Remote-SSH/devpod extension          │      │ 1 container por projeto (.devcontainer/)             │
-│ terminal (fallback SSH direto)                 │      │   → ai-clis dentro do container (claude, codex, ...) │
+│ terminal (fallback SSH direto)                 │      │   → devcontainer do app (sem CLIs de agente)         │
 │ cliente RDP (opcional, GUI do Fedora)          │      │ GNOME Remote Desktop nativo (RDP, opcional)          │
 └──────────────────────────────────────────────────┘      └─────────────────────────────────────────────────────┘
 ```
 
 Cada projeto carrega seu próprio `.devcontainer/` (a partir do template em
-`devcontainer-template/`), então o ambiente de trabalho do agente é isolado
-e reprodutível por projeto — o host Fedora só entra com Podman/rede/SSH, não
-com as CLIs de IA em si.
+`devcontainer-template/`), então o ambiente de build e teste da aplicação é
+isolado e reprodutível por projeto. O host Fedora entra com Podman, rede e SSH —
+e, se você aceitar o módulo `ai-clis`, também com as CLIs de agente, que é uma
+escolha sua e não uma dependência do app. O devcontainer do projeto não recebe
+essas CLIs em nenhum dos casos. Ver [Papéis de host](#papéis-de-host-bare-metal-vm-e-devcontainer).
 
 ## Estrutura
 
@@ -165,29 +167,55 @@ O template de devcontainer traz, por padrão:
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
 
+## Papéis de host: bare metal, VM e devcontainer
+
+Antes do runtime, o que este repositório se propõe a ser:
+
+- **Bare metal** — a máquina que roda Podman, rede e SSH. É o papel deste repo.
+- **VM Fedora (agentic dev)** — opcional, uma camada a mais. Onde os agentes
+  trabalham com as CLIs instaladas.
+- **Devcontainer** — o código da aplicação, isolado dentro de qualquer um dos dois.
+
+Um bare metal descartável pode exercise os três papéis ao mesmo tempo: é o caso
+deste host, que é ao mesmo tempo a caixa de containers e a caixa agentic dev. O
+`setup.sh` não impõe essa escolha — o módulo `ai-clis` **pergunta** se as CLIs de
+agente devem ser instaladas no host, e o `devcontainer` é usado por projeto,
+independentemente dessa resposta. Adicionar a camada de VM como um perfil
+dedicado (`--profile host|vm`) é evolução futura, não um pressuposto.
+
+O que **não** muda em nenhum dos papéis: código de aplicação roda no devcontainer
+do projeto, com o toolchain pinado pelo próprio projeto. O que o host carrega é
+controller, não ambiente de aplicação.
+
 ## Runtime Node no host
 
 O Node e o npm do host vêm do `mise`, com versão pinada — **não** do `dnf`. O
-`setup.sh` não instala mais `nodejs`/`npm` de propósito, para que o runtime do
-host não dependa da versão que o Fedora decidir empacotar a cada atualização:
+`setup.sh` não instala mais `nodejs`/`npm` de propósito, para que o runtime não
+dependa da versão que o Fedora decidir empacotar a cada atualização:
 
 ```bash
 mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
 ```
 
-Quem consome esse Node no host:
+O consumo **baseline** é o Dev Container CLI, que é controller de host. O
+`setup.sh` cria ainda `~/.local/bin/devcontainer` apontando para o shim do `mise`,
+o que dá um atalho curto que funciona inclusive fora de shell interativo — situação
+em que `mise activate` não se aplica, como em serviço systemd ou script.
 
-- `codex`, `gemini`, `copilot` e `ocx`/`opencodex`, instaladas pelo Bun em
-  `~/.bun/bin` com shebang `#!/usr/bin/env node` — elas resolvem o `node` do PATH.
-- O serviço `antigravity-cli-daemon` (criado pelo instalador do `agy`), que
-  executa o MCP HeroUI como filho `npm exec`.
+Se você aceitou o módulo `ai-clis`, há consumo adicional, e ele é consequência
+dessa escolha, não um invariante do host:
 
-`claude`, `opencode` e `cursor-agent` são binários nativos e não usam Node. O Bun
-também não depende de Node para instalar os pacotes.
+- `codex`, `gemini`, `copilot` e `ocx`/`opencodex` resolvem `#!/usr/bin/env node`,
+  ou seja, o mesmo Node do mise. `claude`, `opencode` e `cursor-agent` são
+  binários nativos e não usam Node.
+- O instalador do `agy` cria o serviço `antigravity-cli-daemon`, que executa
+  `npm exec` como filho. Serviço systemd não lê `~/.zshrc` nem o `~/.bashrc`, então
+  o `setup.sh` cria um drop-in em
+  `~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`
+  para que ele encontre o mise. **É isso que permite remover o RPM `nodejs22*` com
+  segurança** — remover antes quebraria o daemon.
 
-O `setup.sh` cria ainda `~/.local/bin/devcontainer` apontando para o shim do
-`mise`. Isso dá um atalho curto que funciona inclusive fora de shell interativo —
-situação em que `mise activate` não se aplica, como em serviço systemd ou script.
+Rollback de cada peça em [`ROLLBACK.md`](ROLLBACK.md), seções `ai-clis` e `base`.
 
 ### Ressalva: shim resolve por diretório
 
