@@ -1,34 +1,20 @@
 # dotfiles-fedora
 
-Provisiona o servidor Fedora Workstation (AIO local, sempre ligado) que roda
-os ambientes de execução dos coding agents: containers Podman rootless
-isolados por projeto, orquestrados via [devpod](https://devpod.sh) a partir
-de um Mac na mesma tailnet.
+Provisiona o Fedora Workstation que é **workstation pessoal e hospedeiro de VMs**.
+Os agentes e os containers rodam **dentro de uma VM**, não no host: ver
+[ARQUITETURA.md](ARQUITETURA.md) para o desenho e o papel de cada camada.
+
+> **Este README documenta a implementação de hoje, não o alvo.** O
+> `setup.sh` atual ainda provisiona um host que roda os agentes diretamente, como
+> a [ARQUITETURA.md](ARQUITETURA.md) descreve que vai deixar de fazer. O perfil
+> `vm` ainda não existe. Onde os dois divergem, o README descreve o que o script
+> faz, e a ARQUITETURA descreve para onde vai.
 
 O Mac (thin client: terminal, IDE, navegador, cliente Tailscale/devpod) é
 provisionado pelo repo irmão **[dotfiles](https://github.com/rvlmt/dotfiles)**.
 Os dois repos são independentes de propósito — nenhum depende do outro pra
 rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
 (`zshrc`, módulos com `--only`/`--skip`).
-
-## Arquitetura
-
-```
-┌────────────── Mac (thin client) ──────────────┐      ┌────────── Fedora (servidor, sempre ligado) ──────────┐
-│ Tailscale client                               │◄────►│ Tailscale (SSH só na interface tailscale0)           │
-│ devpod CLI (provider SSH → fedora via tailnet) │      │ Podman rootless                                      │
-│ VS Code + Remote-SSH/devpod extension          │      │ 1 container por projeto (.devcontainer/)             │
-│ terminal (fallback SSH direto)                 │      │   → devcontainer do app (sem CLIs de agente)         │
-│ cliente RDP (opcional, GUI do Fedora)          │      │ GNOME Remote Desktop nativo (RDP, opcional)          │
-└──────────────────────────────────────────────────┘      └─────────────────────────────────────────────────────┘
-```
-
-Cada projeto carrega seu próprio `.devcontainer/` (a partir do template em
-`devcontainer-template/`), então o ambiente de build e teste da aplicação é
-isolado e reprodutível por projeto. O host Fedora entra com Podman, rede e SSH —
-e, se você aceitar o módulo `ai-clis`, também com as CLIs de agente, que é uma
-escolha sua e não uma dependência do app. O devcontainer do projeto não recebe
-essas CLIs em nenhum dos casos. Ver [Papéis de host](#papéis-de-host-bare-metal-vm-e-devcontainer).
 
 ## Estrutura
 
@@ -48,6 +34,9 @@ essas CLIs em nenhum dos casos. Ver [Papéis de host](#papéis-de-host-bare-meta
   antes de rodar `devpod up`.
 - **[`ROLLBACK.md`](ROLLBACK.md)** — como reverter cada mudança feita pelo
   script, módulo por módulo.
+- **[`ARQUITETURA.md`](ARQUITETURA.md)** — o que este repo é: as três camadas, o
+  papel de cada uma, as decisões fechadas e o que segue em aberto. É o alvo; este
+  README é o runbook.
 
 ## Por que dois repos (`dotfiles` + `dotfiles-fedora`)
 
@@ -204,40 +193,50 @@ Tailscale (sem exposição pública). O módulo `sshd-hardening` desabilita logi
 senha, mas se recusa a aplicar enquanto `~/.ssh/authorized_keys` estiver vazio —
 confirme que existe chave autorizada antes de contar com isso. O isolamento entre
 projetos é de container (Podman rootless com `userns=keep-id`), e essa é a
-fronteira real aqui: **não** há usuário Linux dedicado neste host, e há uma etapa
-planejada para introduzi-lo. A postura completa, incluindo o que ela **não**
-cobre, está em
-[Postura de segurança do devcontainer](#postura-de-segurança-do-devcontainer-labeldisable).
+fronteira real aqui: **não** há usuário Linux dedicado neste host. A postura
+completa, e o que ela **não** cobre, está em
+[ARQUITETURA.md](ARQUITETURA.md).
 
 O template de devcontainer traz, por padrão:
 - **Limite de recursos** (`runArgs: --memory=4g --cpus=2`) — um agente com bug/loop não derruba o servidor inteiro. Ajuste por projeto.
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
+  > **Ressalva: esse nome colide.** O volume é derivado de
+  > `${localWorkspaceFolderBasename}`, que é só o nome do diretório. Dois projetos
+  > com o mesmo nome base — duas cópias do mesmo repositório em caminhos
+  > diferentes, ou dois projetos chamados `api` — compartilham o volume, e com ele as
+  > credenciais. Isso contraria a exigência de "um container por projeto, sem
+  > volume compartilhado". O conserto é derivar o nome de algo único (o caminho
+  > completo tem hash) em vez do basename, e ainda não foi feito.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
 
 Os três itens acima descrevem **o que o template traz**, não o que ele garante.
 O template é um arquétipo de agent sandbox, não é fronteira de host, e não deve
-receber código não confiável — a posição explícita está em
-[O que o template de agent sandbox não é](#o-que-o-template-de-agent-sandbox-não-é).
+receber código não confiável. As lacunas conhecidas dele estão levantadas na
+[#3](https://github.com/rvlmt/dotfiles-fedora/issues/3): base flutuante e antiga,
+instaladores de CLI não pinados, auditoria que só cobre shell interativo, e
+credencial compartilhando volume com os logs.
 
-## Papéis de host: bare metal, VM e devcontainer
+## O que este fluxo de devcontainer exige
 
-Antes do runtime, o que este repositório se propõe a ser:
+O registro de risco do modo `label=disable` saiu do README quando a arquitetura
+passou a ter a VM como fronteira, e a discussão foi para
+[ARQUITETURA.md](ARQUITETURA.md). O que sobrevive são as **exigências de
+operação** — e elas valem porque o fluxo depende delas, não porque o risco foi
+aceito:
 
-- **Bare metal** — a máquina que roda Podman, rede e SSH. É o papel deste repo.
-- **VM Fedora (agentic dev)** — opcional, uma camada a mais. Onde os agentes
-  trabalham com as CLIs instaladas.
-- **Devcontainer** — o código da aplicação, isolado dentro de qualquer um dos dois.
+- **`podman.socket` desabilitado.** Nada expõe a API do engine por TCP ou socket.
+  É o que permite rodar o Dev Container CLI com `--docker-path podman` sem
+  reabrir uma superfície.
+- **`userns=keep-id`** em `~/.config/containers/containers.conf`, para que o uid do
+  container seja o uid real e um bind-mount continue pertencendo a quem o montou.
+- **Credencial de agente fora do workspace montado.** `GH_CONFIG_DIR` e as
+  credenciais de provider nunca dentro do repositório.
+- **Um container por projeto, sem volume compartilhado entre projetos.** Ver a
+  ressalva sobre o template, logo abaixo, sobre o nome do volume.
 
-Um bare metal descartável pode exercise os três papéis ao mesmo tempo: é o caso
-deste host, que é ao mesmo tempo a caixa de containers e a caixa agentic dev. O
-`setup.sh` não impõe essa escolha — o módulo `ai-clis` **pergunta** se as CLIs de
-agente devem ser instaladas no host, e o `devcontainer` é usado por projeto,
-independentemente dessa resposta. Adicionar a camada de VM como um perfil
-dedicado (`--profile host|vm`) é evolução futura, não um pressuposto.
-
-O que **não** muda em nenhum dos papéis: código de aplicação roda no devcontainer
-do projeto, com o toolchain pinado pelo próprio projeto. O que o host carrega é
-controller, não ambiente de aplicação.
+O que o registro de risco **não** era, e continua não sendo: este modo não é
+confine SELinux, não é fronteira de host, e user namespaces rootless não isolam
+o kernel.
 
 ## Runtime Node no host
 
@@ -386,102 +385,6 @@ mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
 Nenhuma etapa deste runbook deve ser automatizada com `rm` por wildcard:
 os IDs revisados são parte do procedimento.
 
-## Postura de segurança do devcontainer (`label=disable`)
-
-Decisão registrada, que substitui a leitura deste workflow como confine
-SELinux. Resolvido em [#1](https://github.com/rvlmt/dotfiles-fedora/issues/1).
-
-### A decisão
-
-O provider Podman do Dev Container CLI em Linux injeta
-`--security-opt label=disable` quando executado por usuário regular contra
-Podman rootless. **Isso é aceito, com risco registrado.** O motivo é que a
-fronteira em que este workflow realmente repousa não é a MAC do SELinux, e
-sim o conjunto de controles abaixo. O que o `label=disable` remove é uma camada
-a mais, não a que estava segurando o caso de uso.
-
-O modo é adequado para **código de aplicação e de projeto**, que é o que roda
-nesses devcontainers. Ele **não** é adequado como fronteira para executar
-código semi-confiável ou não confiável.
-
-### O que sustenta a decisão
-
-- Podman rootless, sem privilégios: o container não roda como root no host.
-- `userns=keep-id` em `~/.config/containers/containers.conf`: o uid do container
-  é o uid real do usuário, então um bind-mount continua pertencendo a quem o
-  montou.
-- Separação por projeto: um container por workspace, com volumes nomeados
-  próprios, e nada compartilhado entre projetos.
-- Credenciais fora do workspace montado, e `GH_CONFIG_DIR`/credenciais de agente
-  nunca dentro do repositório.
-- `podman.socket` desabilitado: nada expõe a API do engine por TCP ou socket.
-
-### O que a decisão não é
-
-- Não é confine SELinux, e este modo não deve ser descrito como tal.
-- Não é fronteira de host. User namespaces rootless não isolam o kernel: um
-  escape ou um bug de kernel aterrissa no mesmo host, com o mesmo usuário.
-- Não é o mecanismo do agent sandbox. Ver
-  [a seção do template](#o-que-o-template-de-agent-sandbox-não-é) e a issue
-  [#3](https://github.com/rvlmt/dotfiles-fedora/issues/3): o sandbox não apoia
-  isolamento neste modo, e por isso ele é adiado sem implementação.
-- Não é uma afirmação de que código de terceiros possa ser executado aqui com
-  segurança. Para isso, a resposta é VM descartável ou host dedicado.
-
-### O que o template de agent sandbox não é
-
-Resposta explícita, para que ninguém herde a suposição de que o sandbox se
-apoia neste modo: **não.** O template `devcontainer-template/` **não** usa o
-modo `label=disable` como mecanismo de isolamento, e não há decisão que autorize
-a execução de código não confiável dentro dele.
-
-Os dois motivos, que independem um do outro:
-
-1. O modo não é fronteira de host, e o sandbox existe para executar código
-   escrito por agentes. Usá-lo ali seria exatamente a situação que a decisão
-   acima recusa.
-2. O template tem lacunas conhecidas que o tornam impróprio como fronteira,
-   independentemente do `label=disable`: base flutuante e antiga, instaladores de
-   CLI não pinados, auditoria que só cobre shell interativo, e credenciais
-   compartilhando volume com os logs. O levantamento está na issue
-   [#3](https://github.com/rvlmt/dotfiles-fedora/issues/3), que registra também
-   os gatilhos para retomar.
-
-Enquanto isso, o agent sandbox fica **sem execução**. As CLIs de agente que o
-`setup.sh` instala no host (módulo `ai-clis`, opt-in) são ferramenta de
-desenvolvimento do usuário, não código em isolamento: elas não rodam dentro de
-nenhum devcontainer, e por isso não se apoiam neste modo.
-
-### Precondições
-
-A decisão vale enquanto as cinco condições do bloco anterior forem verdadeiras
-para o host. Se alguma deixar de valer, a decisão precisa ser revista antes de
-continuar usando o workflow:
-
-1. Podman rootless e o CLI em `--docker-path podman`.
-2. `userns=keep-id` configurado.
-3. `podman.socket` desabilitado.
-4. Um container por projeto, sem volume compartilhado entre projetos.
-5. Nenhuma credencial de agente dentro do workspace montado.
-
-### Quando revisar
-
-Gatilhos, qualquer um basta:
-
-- o agent sandbox sair da issue #3 e passar a ser executado de verdade;
-- entrar código de terceiros não confiável neste host;
-- a etapa de usuário dedicado sem privilégios entrar em vigor — ela muda quem é
-  a vítima de um escape, e portanto o cálculo de risco, mas **não** devolve a
-  camada MAC;
-- o CLI passar a oferecer um provider que não injete `label=disable`, ou o
-  Podman passar a permitir um rótulo utilizável nesse caminho.
-
-Nessa revisão, as estratégias alternativas a considerar são: um provider do CLI
-que não desabilite o rótulo, rótulos SELinux explícitos por imagem com
-`--security-opt label=type:...`, o engine atrás de um serviço Podman com
-política de rótulo, ou migrar o caso de uso para VM. Nenhuma delas é o padrão
-hoje.
-
 ## Unidades criadas por instaladores de terceiros
 
 Duas units deste host são criadas por instaladores, não pelo `setup.sh`:
@@ -598,7 +501,7 @@ tailscale serve status
 
 A porta larga do firewalld (`1025-65535` na zona `FedoraWorkstation`) continua
 registrada como pendência em
-[#9](https://github.com/rvlmt/dotfiles-fedora/issues/9). Publicar pela tailnet
+[#10](https://github.com/rvlmt/dotfiles-fedora/issues/10). Publicar pela tailnet
 reduz a dependência dela, mas não fecha o problema para os outros serviços.
 
 ### `gh` é opcional; a base é git sobre SSH
