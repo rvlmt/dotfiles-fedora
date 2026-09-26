@@ -43,15 +43,20 @@ MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 # host novo reproduza o mesmo estado — o instalador do opencode cria a unit sem
 # consultar estas escolhas.
 #
-# `0.0.0.0` escuta em todas as interfaces, e isso inclui a interface WiFi local,
-# não só a tailnet. O acesso remoto que motiva isto é pela tailnet, mas o
-# servidor também fica alcançável por qualquer máquina da mesma rede WiFi, e o
-# que separa esse acesso é a credencial de pareamento do OpenCode. É uma escolha
-# consciente, não um default esquecido: se a exposição deixar de ser aceitável,
-# o caminho é apontar `OPENCODE_BIND` para o IP do Tailscale ou passar a expor
-# por `tailscale serve`.
-OPENCODE_BIND="0.0.0.0"
+# O servidor escuta só em loopback. O acesso remoto de outros pontos da tailnet
+# é feito por `tailscale serve` com HTTPS, declarado logo abaixo e aplicado por
+# setup_opencode_serve. A regra, válida para qualquer serviço do host que precise
+# de acesso remoto: escutar em loopback e expor pela tailnet. Escutar em
+# `0.0.0.0` foi descartado porque incluía a interface WiFi local, alcançável por
+# qualquer máquina da mesma rede, e sem TLS.
+OPENCODE_BIND="127.0.0.1"
 OPENCODE_PORT="49374"
+
+# Porta HTTPS da tailnet que publica o servidor. 443 publica na raiz do domínio
+# do nó, ou seja https://<host>.<tailnet>.ts.net/, com certificado emitido pelo
+# Tailscale. É tailnet-only: não expõe na LAN e não depende de porta aberta no
+# firewalld.
+OPENCODE_SERVE_PORT="443"
 
 # Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
 # (pré-exportados), senão pergunta com o default sugerido entre colchetes
@@ -210,6 +215,63 @@ Environment=\"PATH=$MISE_SHIMS_PATH:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/b
     echo -e "${YELLOW}  Aplique com: systemctl --user restart antigravity-cli-daemon${NC}"
 }
 
+# Declara no `tailscale serve` a publicação do servidor do OpenCode, para que o
+# acesso remoto de outros pontos da tailnet exista sem abrir porta no host.
+#
+# Idempotente por comparação de texto, e não por JSON: o formato da saída de
+# `tailscale serve status` muda entre versões do Tailscale, então a verificação
+# é deliberadamente tolerante e a função **revalida depois de agir**. Se a
+# premissa de formato estiver errada, a revalidação mostra o estado real em vez
+# de o script afirmar sucesso.
+#
+# Não sobrescreve config de outro serviço: se já houver algo publicado, o script
+# avisa e deixa a decisão para quem administra o host.
+setup_opencode_serve() {
+    local target="${OPENCODE_BIND}:${OPENCODE_PORT}"
+
+    if ! command -v tailscale &> /dev/null; then
+        echo -e "${YELLOW}Tailscale ausente; pulei a publicação do OpenCode.${NC}" >&2
+        return 1
+    fi
+    if ! tailscale status >/dev/null 2>&1; then
+        echo -e "${YELLOW}Tailscale não conectado; pulei a publicação do OpenCode.${NC}" >&2
+        return 1
+    fi
+
+    local current
+    current="$(tailscale serve status 2>/dev/null || true)"
+
+    if printf '%s' "$current" | grep -qF -- "$target"; then
+        echo -e "${GREEN}✓ OpenCode já publicado na tailnet ($target).${NC}"
+        return 0
+    fi
+    if printf '%s' "$current" | grep -qE 'https?://|:[0-9]+/'; then
+        echo -e "${YELLOW}Já existe serviço publicado no Tailscale e não é o OpenCode:${NC}"
+        printf '%s\n' "$current" | sed 's/^/    /'
+        echo -e "${YELLOW}  Não sobrescrevi. Para publicar o OpenCode, revise o que está acima.${NC}"
+        return 1
+    fi
+
+    if sudo tailscale serve --bg --https="$OPENCODE_SERVE_PORT" "http://$target"; then
+        echo -e "${GREEN}✓ OpenCode publicado na tailnet (HTTPS :$OPENCODE_SERVE_PORT → $target).${NC}"
+        echo -e "${YELLOW}  Acesse pelo nome do nó na tailnet, com certificado do Tailscale.${NC}"
+    else
+        echo -e "${YELLOW}Não consegui publicar via tailscale serve.${NC}" >&2
+        echo -e "${YELLOW}  Publicar manualmente: sudo tailscale serve --bg --https=$OPENCODE_SERVE_PORT http://$target${NC}"
+        return 1
+    fi
+
+    # Revalidação: confirma o que o Tailscale realmente passou a servir.
+    local after
+    after="$(tailscale serve status 2>/dev/null || true)"
+    if printf '%s' "$after" | grep -qF -- "$target"; then
+        printf '%s\n' "$after" | sed 's/^/    /'
+    else
+        echo -e "${YELLOW}  Revise com 'tailscale serve status': o alvo esperado ($target) não apareceu.${NC}"
+        return 1
+    fi
+}
+
 # O instalador do opencode cria a unit opencode.service. Ela é estado de host
 # sem dono no padrão: um `setup.sh` em um host novo não reproduziria o ajuste de
 # escuta, e o servidor voltaria a ficar em loopback. Por isso a escuta é
@@ -259,7 +321,6 @@ ExecStart=$new_line"
     systemctl --user daemon-reload 2>/dev/null || true
     echo -e "${GREEN}✓ Drop-in de escuta do OpenCode criado ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
     echo -e "${YELLOW}  Aplique com: systemctl --user restart opencode${NC}"
-    echo -e "${YELLOW}  $OPENCODE_BIND inclui a interface WiFi, nao so a tailnet — veja OPENCODE_BIND no setup.sh.${NC}"
 }
 
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
@@ -336,6 +397,10 @@ install_common_ai_clis() {
     # A unit do opencode é criada pelo instalador sem consultar o padrão, então a
     # escuta é declarada aqui. Ver setup_opencode_service.
     setup_opencode_service
+
+    # Publicação na tailnet depois da unit, porque o alvo do proxy tem de existir
+    # para o tailscale serve ter o que publicar. Ver setup_opencode_serve.
+    setup_opencode_serve
 }
 
 # Instala a CLI do OpenCodex (@bitkyc08/opencodex) via Bun ou npm.

@@ -457,27 +457,59 @@ instalador não desfaz o que o padrão quer, e as outras diretivas que ele defin
 | `antigravity-cli-daemon` | `…service.d/10-mise-path.conf` | o `PATH` do mise, para que o filho `npm exec` encontre o runtime |
 | `opencode` | `…service.d/10-bind.conf` | o endereço de escuta, `OPENCODE_BIND:OPENCODE_PORT` |
 
+A publicação na tailnet (`tailscale serve`) também é do padrão, e é declarada por
+`setup_opencode_serve` — com a ressalva de que ela não sobrescreve o que já
+estiver publicado.
+
 Regra para o próximo instalador que criar uma unit: ou o padrão a declara, ou ela
 vira passo manual documentado no README. O estado que ninguém possui é o que
 gera divergência silenciosa entre o host e o padrão.
 
-### Escuta do OpenCode e o que ela expõe
+### Acesso remoto a serviços do host: loopback + tailnet
 
-`OPENCODE_BIND="0.0.0.0"` — escolha consciente, e o `setup.sh` diz isso em
-comentário junto da pin. Escutar em `0.0.0.0` inclui a interface WiFi local, e
-não só a tailnet:
+Regra do host, aplicável a qualquer serviço que precise ser alcançado de fora:
 
-- **alcançável** por qualquer máquina da mesma rede WiFi, porque a zona
-  `FedoraWorkstation` do firewalld abre `1025-65535/tcp`;
-- **o que separa esse acesso** é a credencial de pareamento do OpenCode, não uma
-  barreira de rede;
-- **o alvo real** é o acesso pela tailnet, que daria para ter sem abrir para a
-  LAN: apontar `OPENCODE_BIND` para o IP do Tailscale, ou expor por
-  `tailscale serve`.
+> **Escuta em loopback, publicação pela tailnet com HTTPS.**
 
-Se a exposição deixar de ser aceitável, mude a pin e rode `./setup.sh --only=ai-clis`.
-A porta larga do firewalld está registrada como pendência em
-[#8](https://github.com/rvlmt/dotfiles-fedora/issues/8).
+`tailscale serve` faz a publicação e emite certificado para
+`https://<host>.<tailnet>.ts.net/`. Isso é tailnet-only, não abre porta no
+firewalld e não expõe na LAN.
+
+O caminho alternativo — escutar em `0.0.0.0` e alcançar o serviço pelo IP da
+tailnet — foi descartado. Além de incluir a interface WiFi local, alcançável por
+qualquer máquina da mesma rede, ele entregava o serviço sem TLS. No lugar dele, o
+OpenCode escuta em `127.0.0.1:49374` e a unit declara isso por drop-in.
+
+`setup_opencode_serve` publica o serviço e **não sobrescreve** config existente de
+outro serviço: se já houver algo publicado, ele avisa e deixa a decisão para quem
+administra o host. Aplicar mudanças de escuta ou publicação:
+
+```bash
+./setup.sh --only=ai-clis
+systemctl --user restart opencode
+tailscale serve status
+```
+
+A porta larga do firewalld (`1025-65535` na zona `FedoraWorkstation`) continua
+registrada como pendência em
+[#8](https://github.com/rvlmt/dotfiles-fedora/issues/8). Publicar pela tailnet
+reduz a dependência dela, mas não fecha o problema para os outros serviços.
+
+### `gh` é opcional; a base é git sobre SSH
+
+O padrão para agentes é `git` sobre SSH: `clone`, `fetch`, `branch`, `commit`,
+`push`, `diff` — sem token, sem keyring, sem estado que possa expirar. Push e
+pull por SSH funcionam mesmo com o `gh` inválido, e é isso que o padrão garante.
+
+O `gh` fica instalado pelo módulo `git` como **conveniência** para o que o `git`
+não faz: abrir e fechar PR, mexer em issue, rodar `gh pr checks`, `gh run`. A
+autenticação dele é interativa (`gh auth login`) e o token vive no keyring do
+GNOME, que é um serviço de usuário — se o keyring não subir, o `gh` falha em
+silêncio **sem** afetar o git.
+
+Consequência prática: um agente sem `gh` autenticado pode trabalhar em branch e
+subir código, mas **não** abre PR nem mexe em issue sem token. Se um fluxo
+depender disso, é decisão consciente e não omissão.
 
 ## Configurações Manuais Opcionais no Host (GUI ou Terminal)
 
