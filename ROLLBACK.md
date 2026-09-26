@@ -163,11 +163,39 @@ sudo dnf remove antigravity
 
 ### `ai-clis` / `opencodex` — desinstalar as CLIs
 
+As CLIs npm são instaladas pelo Bun (`bun add -g`, com fallback pra `npm install -g`
+em `setup.sh`), então `npm uninstall -g` não as remove. Confira o dono real antes de
+executar: `ls ~/.bun/install/global/node_modules` e `command -v <cli>`.
+
 ```bash
-npm uninstall -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli @github/copilot @bitkyc08/opencodex
-rm -f ~/.local/bin/agy ~/.local/bin/cursor-agent
-rm -rf ~/.opencode
+# 1. Para e remove os serviços de agente que os instaladores nativos deixaram.
+#    Sem isso o daemon do agy continua ativo e reexecuta após a remoção.
+systemctl --user disable --now antigravity-cli-daemon.service 2>/dev/null
+systemctl --user disable --now opencode.service 2>/dev/null
+rm -f ~/.config/systemd/user/antigravity-cli-daemon.service \
+      ~/.config/systemd/user/opencode.service
+systemctl --user daemon-reload
+
+# 2. CLIs npm: remove pelo Bun quando o pacote estiver no escopo global do Bun;
+#    senão ele veio do npm e o comando correto é o outro.
+for pkg in @anthropic-ai/claude-code @openai/codex @google/gemini-cli \
+           @github/copilot @bitkyc08/opencodex; do
+  if [ -d "$HOME/.bun/install/global/node_modules/$pkg" ]; then
+    bun remove -g "$pkg"
+  else
+    npm uninstall -g "$pkg"
+  fi
+done
+
+# 3. Instaladores nativos (binários próprios, fora do ecossistema npm)
+rm -f ~/.local/bin/agy ~/.local/bin/agent ~/.local/bin/cursor-agent
+rm -rf ~/.opencode ~/.cursor-agent
 ```
+
+Os symlinks em `~/.bun/bin` (`claude`, `codex`, `copilot`, `gemini`, `ocx`,
+`opencodex`) são recriados pelo Bun a partir de `~/.bun/install/global/node_modules`;
+remover os pacotes acima basta. `~/.bun/bin/bun` em si permanece — ele sai na seção
+`base`.
 
 ### `base` — pacotes instalados (geralmente inofensivo deixar)
 
@@ -176,6 +204,15 @@ sudo dnf remove git gh jq tree tmux zellij ripgrep fd-find unzip btop
 # bun e mise foram instalados via script próprio, não pelo dnf:
 rm -rf ~/.bun ~/.local/bin/mise ~/.local/share/mise
 ```
+
+Ordem importa nesta seção: remova `ai-clis` **antes** de remover o Bun e o
+`nodejs`. No Fedora 44 o runtime do sistema vem de `nodejs22-*` (é o
+`nodejs22-bin` que fornece `/usr/bin/node`), e `codex`, `gemini`, `copilot` e
+`ocx` resolvem `#!/usr/bin/env node` — além do filho `npm exec` do
+`antigravity-cli-daemon`. Remover `~/.bun` ou o `nodejs22` antes delas deixa CLIs
+quebradas. `rm -rf ~/.local/share/mise` também remove o pin do
+`devcontainer-cli 0.89.0`; reinstale com `mise use -g devcontainer-cli@0.89.0`
+se precisar do CLI.
 
 ## Autorizar/revogar dispositivos que entram via SSH
 
