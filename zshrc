@@ -48,11 +48,24 @@ setopt HIST_VERIFY               # Permite revisar histórico expandido antes de
 
 # Autocomplete nativo com cache rápido
 # Reaproveita o cache (~/.zcompdump) se ele tiver menos de 24h; caso contrário, regenera.
-# "stat -f %m" é BSD/macOS; "stat -c %Y" é GNU/Linux — tenta os dois.
+#
+# "stat -c %Y" é GNU/Linux e "stat -f %m" é BSD/macOS. Não dá para encadear os
+# dois com `||` capturando stdout: no GNU o `stat -f` imprime o status do sistema
+# de arquivos em stdout e só depois falha, então o texto dele entra na variável
+# junto com o número do fallback e a aritmética estoura ("bad math expression").
+# Por isso testamos o formato primeiro e só capturamos do que respondeu.
 autoload -Uz compinit
 ZCOMPDUMP="$HOME/.zcompdump"
-ZCOMPDUMP_MTIME=$(stat -f %m "$ZCOMPDUMP" 2>/dev/null || stat -c %Y "$ZCOMPDUMP" 2>/dev/null)
-if [[ -f "$ZCOMPDUMP" && -n "$ZCOMPDUMP_MTIME" && $(($(date +%s) - ZCOMPDUMP_MTIME)) -lt 86400 ]]; then
+ZCOMPDUMP_MTIME=""
+if stat -c %Y "$ZCOMPDUMP" >/dev/null 2>&1; then
+  ZCOMPDUMP_MTIME="$(stat -c %Y "$ZCOMPDUMP" 2>/dev/null)"
+elif stat -f %m "$ZCOMPDUMP" >/dev/null 2>&1; then
+  ZCOMPDUMP_MTIME="$(stat -f %m "$ZCOMPDUMP" 2>/dev/null)"
+fi
+# <-> é o glob numérico do zsh: a conta só acontece se o valor for mesmo um
+# número, então nenhuma plataforma consegue derrubar o startup com isso.
+if [[ -f "$ZCOMPDUMP" && "$ZCOMPDUMP_MTIME" == <-> ]] \
+    && (( $(date +%s) - ZCOMPDUMP_MTIME < 86400 )); then
   compinit -C
 else
   compinit
