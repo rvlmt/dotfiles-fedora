@@ -487,14 +487,39 @@ Cada serviço escuta em loopback e é publicado em **porta HTTPS própria**. A 4
 fica reservada: é o slot para o serviço que você quiser ter mais à mão — um painel,
 não a ferramenta mais sensível.
 
-| Serviço | Escuta | Publicação na tailnet |
-|---|---|---|
-| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` |
-| _(reservado)_ | — | `:443`, para o próximo serviço |
+| Serviço | Escuta | Publicação na tailnet | Auth da app |
+|---|---|---|---|
+| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` | nenhuma — ver abaixo |
+| _(reservado)_ | — | `:443`, para o próximo serviço | — |
 
 Ao publicar um serviço novo: acrescente a linha na tabela com uma porta livre, e
 não troque o que já existe. `setup_opencode_serve` não sobrescreve config de outro
 serviço — se já houver algo publicado, avisa e devolve a decisão.
+
+#### O OpenCode não tem senha; a fronteira é a tailnet
+
+O instalador do OpenCode sobe o servidor com `serve --service`, que gera uma senha
+aleatória, guarda em `~/.config/opencode/service.json` e liga **HTTP basic auth**
+em `/api/*`. O padrão declara o comando **sem** `--service` e faz
+`UnsetEnvironment=OPENCODE_SERVER_PASSWORD`, então a API não exige credencial.
+
+Por que remover em vez de rotacionar: a senha vazou para uma sessão de agente
+sincronizada na nuvem, e o CLI não tem como rotacioná-la — `opencode pair` só
+reexibe. Remover a auth elimina o segredo em vez de tentar gerenciar um
+comprometido.
+
+**O que isso significa em troca:** sem basic auth, quem alcança a porta da tailnet
+chega à API inteira, que inclui ler qualquer arquivo (`/api/file/content`),
+**executar shell** (`/api/session/:id/shell`) e dirigir o agente
+(`/api/session/:id/message`). A fronteira passa a ser **a membership da
+tailnet** — hoje 6 aparelhos, todos da mesma conta. Se algum dia entrar um
+dispositivo ou uma conta de terceiros na tailnet, essa pessoa ganha shell neste
+host. Reavalie antes de adicionar alguém.
+
+É por isso que o padrão declara o comando inteiro, em vez de preservar as flags do
+instalador: preservar `--service` reintroduziria a senha silenciosamente em cada
+execução do `setup.sh`. A unit é `Type=simple`, então o servidor não precisa da
+flag para ficar em foreground.
 
 #### Por que porta, e não prefixo de caminho
 

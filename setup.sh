@@ -289,7 +289,14 @@ setup_opencode_serve() {
 # escuta, e o servidor voltaria a ficar em loopback. Por isso a escuta é
 # declarada aqui, por drop-in: sobrevive a uma reescrita do instalador e não
 # encosta nas outras diretivas que ele define (PATH, Restart, TimeoutStopSec).
-# Só o valor de `--hostname` e de `--port` é reescrito, o resto das flags fica.
+#
+# Diferente das demais flags, aqui o padrão declara o comando INTEIRO em vez de
+# preservar o do instalador, porque é preciso **remover** `--service`: é essa
+# flag que faz o wrapper gerar uma senha aleatória e injetar
+# OPENCODE_SERVER_PASSWORD, o que liga basic auth em /api/*. Preservar a flag
+# reintroduziria a senha silenciosamente em cada execução do setup. A unit é
+# Type=simple, então o servidor não precisa de `--service` para ficar no
+# foreground, e sem ele não há geração de senha.
 setup_opencode_service() {
     local unit="$HOME/.config/systemd/user/opencode.service"
     local dropin_dir="$HOME/.config/systemd/user/opencode.service.d"
@@ -298,29 +305,28 @@ setup_opencode_service() {
         return 0
     fi
 
-    local exec_line
+    local exec_line bin
     exec_line="$(sed -nE 's/^ExecStart=(.*)$/\1/p' "$unit" | head -1)"
     if [ -z "$exec_line" ]; then
         echo -e "${YELLOW}Não li o ExecStart de $unit; pulei o drop-in do OpenCode.${NC}" >&2
         return 1
     fi
+    bin="${exec_line%% *}"
+    if [ ! -x "$bin" ]; then
+        echo -e "${YELLOW}Binário $bin não é executável; pulei o drop-in do OpenCode.${NC}" >&2
+        return 1
+    fi
 
-    local new_line="$exec_line"
-    if [[ "$new_line" == *"--hostname"* ]]; then
-        new_line="$(printf '%s' "$new_line" | sed -E "s/--hostname[= ][^ ]+/--hostname ${OPENCODE_BIND}/g")"
-    else
-        new_line="$new_line --hostname $OPENCODE_BIND"
-    fi
-    if [[ "$new_line" == *"--port"* ]]; then
-        new_line="$(printf '%s' "$new_line" | sed -E "s/--port[= ][^ ]+/--port ${OPENCODE_PORT}/g")"
-    else
-        new_line="$new_line --port $OPENCODE_PORT"
-    fi
+    # Sem --service: sem senha. Sem outras flags do instalador: o padrão declara
+    # o comando, então uma flag nova do instalador não entra por accidento.
+    local new_line="$bin serve --hostname $OPENCODE_BIND --port $OPENCODE_PORT"
 
     local expected="[Service]
-# Gerado por dotfiles-fedora (setup.sh): declara o endereco de escuta do servidor
-# do OpenCode, que o instalador deixa em loopback. Drop-in em vez de edicao da
-# unit para sobreviver a uma reescrita do instalador.
+# Gerado por dotfiles-fedora (setup.sh): declara escuta em loopback e a ausencia
+# de senha do OpenCode. O instalador sobe com --service, que gera uma senha
+# aleatoria e liga basic auth em /api/*; aqui o comando e declarado sem ela, e a
+# fronteira passa a ser a membership da tailnet (ver README).
+UnsetEnvironment=OPENCODE_SERVER_PASSWORD
 ExecStart=
 ExecStart=$new_line"
 
