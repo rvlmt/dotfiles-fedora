@@ -590,7 +590,7 @@ link_zshrc() {
 }
 
 # Módulos disponíveis, na ordem em que rodam.
-ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc"
+ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
 
 usage() {
     cat <<EOF
@@ -939,6 +939,56 @@ if should_run "firewalld"; then
         echo -e "${GREEN}✓ Interface tailscale0 marcada como confiável no firewalld.${NC}"
     fi
     echo -e "${YELLOW}Revise 'sudo firewall-cmd --list-all' e feche manualmente qualquer porta que não precise estar exposta na LAN/internet.${NC}"
+fi
+
+# ==============================================================================
+# Hospedeiro de VMs: libvirt + Cockpit
+# ==============================================================================
+#
+# O host hospeda a VM de agentes, e o Cockpit é onde ela é criada e gerenciada.
+# Este módulo é o **corte mínimo**: pacotes, grupo e socket. Ele não declara a
+# rede do libvirt.
+#
+# A rede fica de fora de propósito. Duas razões, e a segunda é a que pesa:
+#
+# 1. O default do libvirt resolve até existir medição, e medir exige uma VM real
+#    que ainda não existe.
+# 2. Declarar a rede exige saber **quais serviços o host vai expor**, e essa
+#    lista não está escrita. A regra do host é uma porta por serviço, então
+#    qualquer rede declarada agora seria um invariante que se quebra a cada
+#    serviço novo — e seria declarado contra um palpite.
+#
+# A postura de rede do host é pendência, não base. Ver ARQUITETURA.md.
+if should_run "vm-host"; then
+    echo -e "\n${BLUE}==> Hospedeiro de VMs (libvirt + Cockpit)${NC}"
+    sudo dnf install -y --skip-unavailable \
+        libvirt-daemon libvirt-client virt-install qemu-kvm cockpit-machines
+
+    # O grupo libvirt dá acesso à conexão de sistema do libvirt. Sem ele, o
+    # Cockpit não lista VM nenhuma e o virsh só conecta em qemu:///session.
+    # A mudança de grupo só vale no próximo login — avisar, porque a falta de
+    # efeito imediato é o que faz isso parecer um bug.
+    if id -nG "$USER" | tr ' ' '\n' | grep -qx libvirt; then
+        echo -e "${GREEN}✓ Usuário já está no grupo libvirt.${NC}"
+    else
+        sudo usermod -aG libvirt "$USER"
+        echo -e "${GREEN}✓ Usuário adicionado ao grupo libvirt.${NC}"
+        echo -e "${YELLOW}  Vale no próximo login: abra um shell novo (ou reconecte) antes de esperar ver VMs no Cockpit.${NC}"
+    fi
+
+    sudo systemctl enable --now cockpit.socket
+
+    # Pós-condição: a propriedade, não a lista de pacotes. Um host pode ter o
+    # pacote instalado, o socket ativo, e mesmo assim não conseguir listar
+    # domínio nenhum — que é o estado que interessa e o que a lista de pacotes
+    # não pegaria.
+    if timeout 30 virsh -c qemu:///system list --all >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ libvirt responde na conexão de sistema.${NC}"
+    else
+        echo -e "${YELLOW}Aviso: 'virsh -c qemu:///system' não respondeu em 30s.${NC}"
+        echo -e "${YELLOW}  Os pacotes e o socket podem estar ativos e ainda assim a conexão falhar;${NC}"
+        echo -e "${YELLOW}  o que observar primeiro: 'journalctl -u virtqemud -n 30'.${NC}"
+    fi
 fi
 
 # ==============================================================================

@@ -145,6 +145,27 @@ sudo firewall-cmd --reload
 Pra desligar o firewalld por completo (não recomendado, ele que garante que só
 o Tailscale alcança a máquina): `sudo systemctl disable --now firewalld`.
 
+## `vm-host` — remover o hospedeiro de VMs
+
+```bash
+# 1. Tirar o socket do Cockpit antes dos pacotes, senão o cockpit.socket
+#    continua ativo tentando usar um daemon que saiu.
+sudo systemctl disable --now cockpit.socket
+
+# 2. Retirar o usuário do grupo libvirt. Vale no próximo login.
+sudo gpasswd -d "$USER" libvirt
+
+# 3. Desinstalar. cockpit-machines sai junto; cockpit e qemu-kvm ficam de fora
+#    de propósito, são dependência de outra coisa.
+sudo dnf remove libvirt-daemon libvirt-client virt-install cockpit-machines
+```
+
+⚠️ O módulo **não** cria rede do libvirt, então não há o que reverter aqui. Se
+você criou uma VM pelo Cockpit, ela **continua existindo** depois deste rollback —
+o módulo cuida do hospedeiro, não do hóspede. Remova a VM pelo Cockpit antes, ou
+deixe o `virtqemud`_enabled no serviço, e o daemon vai continuar iniciando com o
+pacote fora do lugar.
+
 ## `toolbx` — desinstalar
 
 ```bash

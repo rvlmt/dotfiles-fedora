@@ -5,6 +5,37 @@ provisionamento é o [README](README.md); este documento existe para que o runbo
 tenha um alvo, e para que cada decisão fique na camada que apossui.
 
 Regra que o repo segue: **nada entra aqui como decisão sem aprovação explícita.**
+
+## Regra: o estado do host atual não é evidência
+
+**O que existe, ou não existe, na máquina de hoje não diz nada sobre o padrão.** O
+repositório descreve o estado **ideal** de um host novo. Medição de host atual não
+justifica, não corrige e não dimensiona decisão aqui — vale para disco, pacotes
+instalados, serviço ativo, VM definida, regra de firewall, senha e porta aberta.
+
+Isso já falhou mais de uma vez, e a falha tem sempre a mesma forma: um número ou um
+estado da máquina atual entra no documento como se fosse premissa do desenho, e a
+conclusão sai errada. Os casos ficam registrados aqui de propósito, para não se
+repetirem:
+
+- **O tamanho do store de container.** Um `du` em btrfs com `compress=zstd`
+  superestima, e a diferença entre `du` e `df` passou de dezenas de GB sem que
+  houvesse algo errado. O número de um host descartável não é a capacidade do
+  padrão.
+- **Se o daemon do `libvirt` estava instalado.** A pergunta certa não era essa,
+  mas a resposta dependia de qual pacote se testava, e a conclusão tirada dela
+  estava errada. Nada disso diz o que o `setup.sh` deve fazer.
+- **O que a zona do `firewalld` permite.** A conclusão "tirar a interface do
+  `trusted` resolve" veio de ler a zona, e o default amplo do Fedora faz a
+  publicação funcionar por outro caminho. O padrão declara a propriedade que
+  quer, não o que o default por acaso já faz.
+- **A senha do servidor do OpenCode.** Credencial de um host não descreve
+  comportamento de software, e foi um palpite sobre o software que quebrou.
+
+O que **é** válido medir, e é a diferença: medir o comportamento do **alvo**. Do
+`tailscaled` funcionando num guest com o filtro ativo, ou do `virsh` respondendo
+numa VM recém-criada, é medir o padrão. Medir o que a sua máquina já tem é medir
+outra coisa.
 Os pontos em aberto estão marcados como abertos, na seção
 [Em aberto](#em-aberto), e não aparecem aqui como decisão.
 
@@ -266,6 +297,36 @@ proporcional ao fato de o repo não ter verificação automática.
 Esta ordem importa num ponto: o filtro de egress é o item 7, e é o único que
 depende de uma medição que só uma VM real dá. Fazer antes seria escrever regra de
 firewall no repo sem nunca ter visto uma subir.
+
+## Pendência: a postura de rede do host
+
+Não é base, e **não é decidível agora**. Duas coisas estão erradas no host e
+nenhuma delas tem correçãoPossible antes de um dado que ainda não existe:
+
+1. `tailscale0` está na zona `trusted`, que aceita todo tráfego de toda a tailnet.
+2. A zona `FedoraWorkstation` tem `1025-65535/tcp` e `1025-65535/udp` abertos, e é
+   o **default do próprio Fedora** — está no XML do pacote, com a intenção
+   documentada de liberar portas altas para apps de desktop.
+
+O que a medição mostrou, e que é o ponto não óbvio: **tirar a interface do
+`trusted` não conserta nada.** A publicação na 8443 funciona porque a zona default
+libera toda porta alta, não porque a interface estivesse em `trusted`. A interface
+ cairia no default e a exposição continuaria idêntica.
+
+A correção na ordem certa seria: `tailscale0` sai do `trusted`; `tailscale0` ganha
+uma **zona própria** que permite só o que precisa; e só então fecha o
+`1025-65535` da `FedoraWorkstation`, que é a [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10).
+
+**Por que não agora.** O passo do meio exige saber quais portas `tailscale0`
+precisa. A regra do host é uma porta por serviço, e a lista de serviços que o host
+vai expor não está escrita — o próprio OpenCode vai migrar para a VM, e há outros
+a definir. Declarar uma zona hoje seria escrever um invariante com um conjunto
+conhecidamente incompleto, que se quebra a cada serviço novo. E o
+próprio `ARQUITETURA.md` diz que a 443 fica reservada: reserva de porta
+e uma zona com um conjunto mínimo de regras são coisas diferentes.
+
+Então o `vm-host` **não declara rede**, e a pendência fica aqui. Quando a lista de
+serviços existir, a zona própria é uma decisão de uma vez, e a #10 fecha junto.
 
 ## Em aberto
 
