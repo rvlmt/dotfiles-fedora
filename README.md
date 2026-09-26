@@ -120,6 +120,25 @@ mesmo repo pra justificar mantê-las separadas.
    confirmação coletada logo no início. `zshrc` não pergunta, exceto na
    substituição destrutiva descrita acima.
 
+   ### Imagens órfãs acumulam: prune depois dos ciclos
+
+   Cada `devcontainer up` deixa camadas intermediárias de build marked
+   `<none>`, e o runbook de cleanup desta seção remove **containers** por label,
+   nunca **images**. Num host de uso contínuo isso acumula dezenas de GB sem
+   que nada avise. Numa auditoria este store tinha 90 GB, dos quais 124 camadas
+   `<none>` respondiam pelo quase todo; as 3 imagens em uso e os volumes
+   ocupavam menos de 1 GB somados.
+
+   O cleanup de containers, quando for necessário, deve ser seguido de um prune
+   de órfãs — que não remove imagens em uso, volumes nem containers:
+
+   ```bash
+   podman image prune --force --filter dangling=true
+   ```
+
+   Acompanhe com `podman images` e `du -sh ~/.local/share/containers/storage`:
+   o store deve voltar ao tamanho das bases realmente em uso.
+
    ```bash
    ./setup.sh --only=podman,tailscale
    ./setup.sh --skip=gui-access
