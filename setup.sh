@@ -51,6 +51,7 @@ MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 # qualquer máquina da mesma rede, e sem TLS.
 OPENCODE_BIND="127.0.0.1"
 OPENCODE_PORT="49374"
+OPENCODE_BIN="$HOME/.opencode/bin/opencode"
 
 # Publicação na tailnet, em porta HTTPS dedicada.
 #
@@ -224,6 +225,47 @@ Environment=\"PATH=$MISE_SHIMS_PATH:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/b
     echo -e "${YELLOW}  Aplique com: systemctl --user restart antigravity-cli-daemon${NC}"
 }
 
+# Deixa quem administra o host escolher a senha do servidor do OpenCode, em vez
+# de depender da aleatória que o instalador gera.
+#
+# Não há como passar a senha por stdin: `opencode service set` recebe o valor em
+# argv. O histórico do shell NÃO é afetado, porque aqui o valor é lido de stdin e
+# nunca é digitado como argumento; em troca ele fica visível no `ps` por um
+# instante, para processos do mesmo usuário. Em host de usuário único isso é
+# aceitável, mas é o motivo de a leitura ser silenciosa e de o valor ser apagado
+# da variável assim que usado.
+#
+# O servidor lê a senha no start, então o serviço precisa ser reiniciado depois
+# para a troca valer.
+prompt_opencode_password() {
+    local oc="${OPENCODE_BIN:-}"
+    if [ -z "$oc" ] || [ ! -x "$oc" ]; then
+        echo -e "${YELLOW}Binário do OpenCode não encontrado; pulei a senha.${NC}" >&2
+        return 1
+    fi
+
+    echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
+    echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
+    echo -e "  Deixe em branco para manter a senha atual de ~/.config/opencode/service.json."
+    read -r -s -p "  Senha nova (vazio = manter): " opencode_pw
+    echo
+
+    if [ -z "$opencode_pw" ]; then
+        unset opencode_pw
+        echo -e "${YELLOW}Mantida a senha atual.${NC}"
+        return 0
+    fi
+
+    if ! "$oc" service set password "$opencode_pw"; then
+        unset opencode_pw
+        echo -e "${YELLOW}Não consegui definir a senha.${NC}" >&2
+        return 1
+    fi
+    unset opencode_pw
+    echo -e "${GREEN}✓ Senha do OpenCode definida.${NC}"
+    echo -e "${YELLOW}  Aplique com: systemctl --user restart opencode${NC}"
+}
+
 # Declara no `tailscale serve` a publicação do servidor do OpenCode, para que o
 # acesso remoto de outros pontos da tailnet exista sem abrir porta no host.
 #
@@ -290,13 +332,13 @@ setup_opencode_serve() {
 # declarada aqui, por drop-in: sobrevive a uma reescrita do instalador e não
 # encosta nas outras diretivas que ele define (PATH, Restart, TimeoutStopSec).
 #
-# Diferente das demais flags, aqui o padrão declara o comando INTEIRO em vez de
-# preservar o do instalador, porque é preciso **remover** `--service`: é essa
-# flag que faz o wrapper gerar uma senha aleatória e injetar
-# OPENCODE_SERVER_PASSWORD, o que liga basic auth em /api/*. Preservar a flag
-# reintroduziria a senha silenciosamente em cada execução do setup. A unit é
-# Type=simple, então o servidor não precisa de `--service` para ficar no
-# foreground, e sem ele não há geração de senha.
+# A flag `--service` é preservada de propósito, e é obrigatório que seja. A senha
+# do servidor não é opcional no OpenCode v2: com `--service` ela vem de
+# ~/.config/opencode/service.json e é estável entre restarts; sem a flag, o
+# servidor gera uma senha aleatória efêmera a cada start e a registra no journal,
+# o que invalida as credenciais já salvas no navegador a cada reinício.
+# `OPENCODE_SERVER_PASSWORD` e `UnsetEnvironment` não desligam a autenticação,
+# apenas escolhem a fonte do valor.
 setup_opencode_service() {
     local unit="$HOME/.config/systemd/user/opencode.service"
     local dropin_dir="$HOME/.config/systemd/user/opencode.service.d"
@@ -317,16 +359,24 @@ setup_opencode_service() {
         return 1
     fi
 
-    # Sem --service: sem senha. Sem outras flags do instalador: o padrão declara
-    # o comando, então uma flag nova do instalador não entra por accidento.
-    local new_line="$bin serve --hostname $OPENCODE_BIND --port $OPENCODE_PORT"
+    # Sobrescreve só --hostname e --port, preservando --service e qualquer outra
+    # flag do instalador. Trocar o comando inteiro aqui quebraria a senha.
+    local new_line="$exec_line"
+    if [[ "$new_line" == *"--hostname"* ]]; then
+        new_line="$(printf '%s' "$new_line" | sed -E "s/--hostname[= ][^ ]+/--hostname ${OPENCODE_BIND}/g")"
+    else
+        new_line="$new_line --hostname $OPENCODE_BIND"
+    fi
+    if [[ "$new_line" == *"--port"* ]]; then
+        new_line="$(printf '%s' "$new_line" | sed -E "s/--port[= ][^ ]+/--port ${OPENCODE_PORT}/g")"
+    else
+        new_line="$new_line --port $OPENCODE_PORT"
+    fi
 
     local expected="[Service]
-# Gerado por dotfiles-fedora (setup.sh): declara escuta em loopback e a ausencia
-# de senha do OpenCode. O instalador sobe com --service, que gera uma senha
-# aleatoria e liga basic auth em /api/*; aqui o comando e declarado sem ela, e a
-# fronteira passa a ser a membership da tailnet (ver README).
-UnsetEnvironment=OPENCODE_SERVER_PASSWORD
+# Gerado por dotfiles-fedora (setup.sh): declara a escuta em loopback do servidor
+# do OpenCode. Preserva --service de proposito, para que a senha continue vindo
+# de ~/.config/opencode/service.json em vez de ser regenerada a cada start.
 ExecStart=
 ExecStart=$new_line"
 
@@ -415,6 +465,12 @@ install_common_ai_clis() {
     # A unit do opencode é criada pelo instalador sem consultar o padrão, então a
     # escuta é declarada aqui. Ver setup_opencode_service.
     setup_opencode_service
+
+    # A senha do servidor é obrigatória; deixamos quem administra escolher em vez
+    # de ficar com a aleatória do instalador. Ver prompt_opencode_password.
+    if [ "${CONFIRM_OPENCODE_PASSWORD:-}" = "1" ]; then
+        prompt_opencode_password
+    fi
 
     # Publicação na tailnet depois da unit, porque o alvo do proxy tem de existir
     # para o tailscale serve ter o que publicar. Ver setup_opencode_serve.
@@ -631,6 +687,15 @@ fi
 CONFIRM_AI_CLIS=""
 if should_run "ai-clis"; then
     confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) também diretamente no host Fedora? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
+fi
+
+# A senha do servidor do OpenCode só é perguntada quando o módulo `ai-clis` roda
+# com o OpenCode instalado; o prompt do valor em si acontece no momento do uso,
+# porque segurar um segredo numa variável durante o script inteiro é pior do que
+# travar o terminal uma vez.
+CONFIRM_OPENCODE_PASSWORD=""
+if [ "$CONFIRM_AI_CLIS" = "1" ] && [ -x "$OPENCODE_BIN" ]; then
+    confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a atual)" && CONFIRM_OPENCODE_PASSWORD=1
 fi
 
 CONFIRM_ZSHRC_OVERWRITE=0
