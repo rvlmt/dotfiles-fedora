@@ -30,6 +30,15 @@ NC='\033[0m'
 DEFAULT_GIT_NAME="rvlmt"
 DEFAULT_GIT_EMAIL="80988467+rvlmt@users.noreply.github.com"
 
+# Runtime do host, pinado aqui para que setup, shell de login e devcontainers
+# concordem. Quem fornece Node/npm no host é o mise — o pacote nodejs do dnf
+# não é instalado de propósito, para que o runtime do host não dependa da
+# versão que o Fedora decidir empacotar. Ver README, "Runtime Node no host".
+MISE_NODE_VERSION="22.23.3"
+MISE_DEVCONTAINER_VERSION="0.89.0"
+MISE_BIN_PATH="$HOME/.local/bin/mise"
+MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
+
 # Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
 # (pré-exportados), senão pergunta com o default sugerido entre colchetes
 # (Enter aceita, digitar outra coisa sobrescreve só nesta execução).
@@ -49,6 +58,142 @@ confirm() {
     local reply
     read -rp "$prompt [y/N] " reply
     [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# Caminho do mise sem depender do PATH do shell que executou este script.
+mise_bin() {
+    if command -v mise &> /dev/null; then
+        command -v mise
+        return 0
+    fi
+    if [ -x "$MISE_BIN_PATH" ]; then
+        printf '%s' "$MISE_BIN_PATH"
+        return 0
+    fi
+    return 1
+}
+
+# Coloca os shims do mise no PATH do processo atual. Preferimos shims a
+# "mise activate bash" porque eles funcionam também onde não há shell
+# interativo — inclusive serviço systemd, que nunca lê ~/.bashrc. Cada shim
+# consulta a config do diretório em que é chamado, então continuam respeitando
+# um .tool-versions/mise.toml local do projeto.
+prepend_mise_shims() {
+    [ -d "$MISE_SHIMS_PATH" ] || return 0
+    case ":$PATH:" in
+        *":$MISE_SHIMS_PATH:"*) return 0 ;;
+    esac
+    export PATH="$MISE_SHIMS_PATH:$PATH"
+}
+
+# Instala o mise se faltar. Idempotente.
+ensure_mise() {
+    if mise_bin &> /dev/null; then
+        echo -e "${YELLOW}mise já instalado.${NC}"
+        return 0
+    fi
+    echo "Instalando mise (gerenciador de versões de runtime)..."
+    curl -fsSL https://mise.run | sh
+    if mise_bin &> /dev/null; then
+        echo -e "${GREEN}✓ mise instalado.${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}mise foi instalado mas não apareceu em $MISE_BIN_PATH.${NC}" >&2
+    return 1
+}
+
+# Garante mise com Node e Dev Container CLI pinados e expõe os shims no PATH do
+# processo atual. Este é o único caminho de Node/npm do host: o ai-clis tem
+# fallback pra "npm install -g" e as CLIs de agente resolvem
+# "#!/usr/bin/env node", então precisam de um Node no PATH durante a execução.
+ensure_host_node() {
+    ensure_mise
+    prepend_mise_shims
+    local mise_bin_path
+    mise_bin_path="$(mise_bin)"
+    "$mise_bin_path" install "node@$MISE_NODE_VERSION" "devcontainer-cli@$MISE_DEVCONTAINER_VERSION"
+    "$mise_bin_path" use -g --pin "node@$MISE_NODE_VERSION" "devcontainer-cli@$MISE_DEVCONTAINER_VERSION"
+    prepend_mise_shims
+    echo -e "${GREEN}✓ Runtime do host: node@$MISE_NODE_VERSION, devcontainer-cli@$MISE_DEVCONTAINER_VERSION${NC}"
+}
+
+# Link ~/.local/bin/devcontainer → shim do mise. ~/.local/bin já está no PATH
+# do shell, então isso dá um atalho curto que também funciona fora de shell
+# interativo, cenário em que "mise activate" não se aplica. Atenção: por ser
+# shim, dentro de um repositório com mise.toml/.tool-versions próprios ele
+# resolve o runtime daquele diretório — use a forma "mise exec ... --" do
+# README quando o pin do host importar.
+link_devcontainer_cli() {
+    local shim="$MISE_SHIMS_PATH/devcontainer"
+    local dest="$HOME/.local/bin/devcontainer"
+    if [ ! -x "$shim" ]; then
+        echo -e "${YELLOW}Shim do devcontainer CLI ausente em $shim; pulei o link.${NC}" >&2
+        return 1
+    fi
+    mkdir -p "$HOME/.local/bin"
+    if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$shim" ]; then
+        echo -e "${GREEN}✓ ~/.local/bin/devcontainer já aponta para o shim do mise.${NC}"
+        return 0
+    fi
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        local backup
+        backup="$dest.backup.$(date +%Y%m%d%H%M%S)"
+        mv "$dest" "$backup"
+        echo -e "${YELLOW}~/.local/bin/devcontainer anterior salvo em $backup${NC}"
+    fi
+    ln -s "$shim" "$dest"
+    echo -e "${GREEN}✓ ~/.local/bin/devcontainer → shim do mise.${NC}"
+}
+
+# Ativa o mise em shells bash interativos. Bloco idempotente, com marcador
+# próprio para não duplicar em re-execuções do setup.
+activate_mise_in_shell() {
+    local bashrc="$HOME/.bashrc"
+    local marker='# >>> mise (runtime do host) >>>'
+    if [ ! -f "$bashrc" ]; then
+        echo -e "${YELLOW}~/.bashrc não existe; pulei a ativação do mise.${NC}" >&2
+        return 1
+    fi
+    if grep -qF "$marker" "$bashrc"; then
+        echo -e "${GREEN}✓ mise já ativado em ~/.bashrc.${NC}"
+        return 0
+    fi
+    {
+        printf '\n%s\n' "$marker"
+        printf '# Node/npm do host vêm daqui (pins em setup.sh), não do dnf.\n'
+        printf 'if [ -d "%s" ]; then\n' "$MISE_SHIMS_PATH"
+        printf '    export PATH="%s:$PATH"\n' "$MISE_SHIMS_PATH"
+        printf 'fi\n'
+        printf '# <<< mise (runtime do host) <<<\n'
+    } >> "$bashrc"
+    echo -e "${GREEN}✓ mise ativado em ~/.bashrc (vale no próximo shell, ou com 'source ~/.bashrc').${NC}"
+}
+
+# O instalador do agy cria antigravity-cli-daemon.service, que executa o MCP
+# HeroUI como filho "npm exec". Serviço systemd não lê ~/.bashrc, então sem um
+# drop-in ele continuaria usando o npm do dnf — justamente o pacote que a
+# política de runtime quer remover do host. Drop-in é a forma suportada de
+# ajustar o PATH sem editar o unit, e sobrevive a atualização do instalador.
+# Não reiniciamos o serviço aqui: reiniciar pode cortar uma sessão de agente em
+# andamento, então isso fica como passo manual.
+setup_agy_service_path() {
+    local unit="$HOME/.config/systemd/user/antigravity-cli-daemon.service"
+    local dropin_dir="$HOME/.config/systemd/user/antigravity-cli-daemon.service.d"
+    local dropin="$dropin_dir/10-mise-path.conf"
+    if [ ! -f "$unit" ]; then
+        return 0
+    fi
+    local expected="[Service]
+Environment=\"PATH=$MISE_SHIMS_PATH:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\""
+    mkdir -p "$dropin_dir"
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$expected" ]; then
+        echo -e "${GREEN}✓ PATH do antigravity-cli-daemon já aponta pros shims do mise.${NC}"
+        return 0
+    fi
+    printf '%s\n' "$expected" > "$dropin"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo -e "${GREEN}✓ Drop-in de PATH do antigravity-cli-daemon criado.${NC}"
+    echo -e "${YELLOW}  Aplique com: systemctl --user restart antigravity-cli-daemon${NC}"
 }
 
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
@@ -75,7 +220,22 @@ install_npm_global() {
 
 # CLIs de IA disponíveis via npm/Bun ou script oficial (instaladas no host se confirmado).
 install_common_ai_clis() {
-    export PATH="$HOME/.bun/bin:$(npm config get prefix 2>/dev/null)/bin:$HOME/.local/bin:$PATH"
+    # Bun é o caminho primário; o mise entra como fallback de npm e como
+    # runtime das CLIs com "#!/usr/bin/env node".
+    prepend_mise_shims
+    if ! command -v bun &> /dev/null && ! mise_bin &> /dev/null; then
+        echo -e "${YELLOW}Nem Bun nem mise instalados; instalando o runtime do host.${NC}"
+        ensure_host_node
+        activate_mise_in_shell || true
+        link_devcontainer_cli || true
+        prepend_mise_shims
+    fi
+
+    local npm_prefix_bin=""
+    if command -v npm &> /dev/null; then
+        npm_prefix_bin="$(npm config get prefix 2>/dev/null)/bin"
+    fi
+    export PATH="$HOME/.bun/bin:$npm_prefix_bin:$HOME/.local/bin:$PATH"
 
     install_npm_global "@anthropic-ai/claude-code" "claude"
     install_npm_global "@openai/codex" "codex"
@@ -102,6 +262,10 @@ install_common_ai_clis() {
         curl -fsSL https://antigravity.google/cli/install.sh | bash
         echo -e "${GREEN}✓ Antigravity CLI (agy) instalado.${NC}"
     fi
+
+    # O daemon do agy roda "npm exec" fora de shell interativo, então precisa do
+    # PATH do mise explicitado no serviço. Ver setup_agy_service_path.
+    setup_agy_service_path
 }
 
 # Instala a CLI do OpenCodex (@bitkyc08/opencodex) via Bun ou npm.
@@ -117,7 +281,12 @@ install_opencodex() {
         return
     fi
 
-    export PATH="$HOME/.bun/bin:$(npm config get prefix 2>/dev/null)/bin:$PATH"
+    prepend_mise_shims
+    local npm_prefix_bin=""
+    if command -v npm &> /dev/null; then
+        npm_prefix_bin="$(npm config get prefix 2>/dev/null)/bin"
+    fi
+    export PATH="$HOME/.bun/bin:$npm_prefix_bin:$PATH"
 
     if command -v ocx &> /dev/null; then
         echo -e "${GREEN}✓ OpenCodex CLI (ocx) instalado com sucesso.${NC}"
@@ -192,7 +361,8 @@ link_zshrc() {
         echo -e "${GREEN}✓ ~/.zshrc já aponta para este repositório.${NC}"
     elif [ -e "$zshrc_dest" ] || [ -L "$zshrc_dest" ]; then
         if [ "$CONFIRM_ZSHRC_OVERWRITE" = "1" ]; then
-            local backup="$zshrc_dest.backup.$(date +%Y%m%d%H%M%S)"
+            local backup
+            backup="$zshrc_dest.backup.$(date +%Y%m%d%H%M%S)"
             mv "$zshrc_dest" "$backup"
             echo -e "${YELLOW}~/.zshrc anterior salvo em $backup${NC}"
             ln -s "$zshrc_src" "$zshrc_dest"
@@ -347,10 +517,6 @@ if should_run "base"; then
         git gh jq tree tmux zellij ripgrep fd-find unzip \
         curl wget btop \
         dnf5-plugins
-
-    # Node/npm direto via dnf: é o que install_common_ai_clis (ai-clis) usa pra
-    # instalar as CLIs de IA via npm — sem isso o módulo ai-clis não funciona.
-    sudo dnf install -y nodejs npm
     echo -e "${GREEN}✓ Pacotes base instalados.${NC}"
 
     if ! command -v bun &> /dev/null; then
@@ -360,16 +526,16 @@ if should_run "base"; then
         echo -e "${YELLOW}Bun já instalado.${NC}"
     fi
 
-    # mise fica disponível pra gerenciar versões de runtime por projeto (dentro dos
-    # devcontainers, tipicamente) — não é dependência do módulo ai-clis, que já usa
-    # o node/npm/bun instalados acima diretamente.
-    if ! command -v mise &> /dev/null; then
-        echo "Instalando mise (gerenciador de versões de runtimes por projeto)..."
-        curl -fsSL https://mise.run | sh
-        echo -e "${GREEN}✓ mise instalado (adicione 'eval \"\$(~/.local/bin/mise activate bash)\"' ao seu shell rc pra usá-lo).${NC}"
-    else
-        echo -e "${YELLOW}mise já instalado.${NC}"
-    fi
+    # Node/npm do host vêm do mise, não do dnf. O Bun já traz as CLIs de agente,
+    # mas o fallback "npm install -g" do ai-clis e as CLIs com
+    # "#!/usr/bin/env node" precisam de um Node no PATH, e o mise é o que
+    # garante esse Node com versão pinada — independente da versão que o
+    # Fedora decidir empacotar. Também é o que fornece o Dev Container CLI.
+    ensure_host_node
+    # Conveniências de ergonomia (PATH no shell e atalho do CLI): se falharem,
+    # o host continua utilizável, então não abortamos o setup por causa delas.
+    activate_mise_in_shell || true
+    link_devcontainer_cli || true
 fi
 
 # ==============================================================================

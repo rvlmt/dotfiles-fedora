@@ -87,7 +87,7 @@ mesmo repo pra justificar mantê-las separadas.
    esperando resposta no meio do caminho.
 
    Módulos (em ordem):
-   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e `mise` (gerenciador de versões de runtime). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.
+   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e o runtime do host via `mise` (Node e Dev Container CLI pinados — ver "Runtime Node no host"). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.
    2. `hostname` — Mostra o hostname atual e pergunta se quer alterá-lo, já na fase de coleta do início (`hostnamectl set-hostname` só aplica depois); cria `~/Developer`.
    3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).
    4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.
@@ -163,6 +163,68 @@ O template de devcontainer traz, por padrão:
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
 
+## Runtime Node no host
+
+O Node e o npm do host vêm do `mise`, com versão pinada — **não** do `dnf`. O
+`setup.sh` não instala mais `nodejs`/`npm` de propósito, para que o runtime do
+host não dependa da versão que o Fedora decidir empacotar a cada atualização:
+
+```bash
+mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
+```
+
+Quem consome esse Node no host:
+
+- `codex`, `gemini`, `copilot` e `ocx`/`opencodex`, instaladas pelo Bun em
+  `~/.bun/bin` com shebang `#!/usr/bin/env node` — elas resolvem o `node` do PATH.
+- O serviço `antigravity-cli-daemon` (criado pelo instalador do `agy`), que
+  executa o MCP HeroUI como filho `npm exec`.
+
+`claude`, `opencode` e `cursor-agent` são binários nativos e não usam Node. O Bun
+também não depende de Node para instalar os pacotes.
+
+O `setup.sh` cria ainda `~/.local/bin/devcontainer` apontando para o shim do
+`mise`. Isso dá um atalho curto que funciona inclusive fora de shell interativo —
+situação em que `mise activate bash` não se aplica, como em serviço systemd.
+
+### Ressalva: shim resolve por diretório
+
+Os shims consultam a configuração do diretório em que são chamados. Dentro de um
+repositório com `.tool-versions`/`mise.toml` próprios, `node` e `devcontainer`
+resolvem a versão **daquele projeto**, e não o pin do host. Esse é o comportamento
+desejado ao trabalhar em um projeto; por isso, quando o pin do host importar,
+use a forma `mise exec ... --` da seção seguinte.
+
+### Antes de remover o `nodejs22` do dnf
+
+Serviço systemd não lê `~/.bashrc`, então o daemon do `agy` continuaria usando o
+`npm` do `dnf` mesmo com o `mise` ativado no shell. O `setup.sh` resolve isso com
+um drop-in em
+`~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`.
+
+A remoção do pacote exige `sudo` e é manual, então ela fica com você:
+
+```bash
+# 1. Confirmar o drop-in e reiniciar o serviço.
+systemctl --user cat antigravity-cli-daemon.service | grep -i 'Environment'
+systemctl --user restart antigravity-cli-daemon
+
+# 2. Conferir que o serviço voltou com o PATH do mise.
+systemctl --user is-active antigravity-cli-daemon
+systemctl --user show antigravity-cli-daemon -p Environment | tr ' ' '\n' | grep mise
+
+# 3. Smoke das CLIs que resolvem `env node`.
+codex --version && gemini --version && copilot --version && ocx --version
+
+# 4. Só então remover o RPM (o glob cobre docs/i18n/bin que vieram junto).
+sudo dnf remove 'nodejs22*'
+
+# 5. Confirmar que o host ficou sem Node do dnf e que o mise assumiu.
+command -v node && node --version
+```
+
+Rollback em `ROLLBACK.md`.
+
 ## Dev Container CLI no host Fedora
 
 O Dev Container CLI é a exceção deliberada, user-scoped, ao
@@ -193,6 +255,11 @@ mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer exec \
   --workspace-folder /caminho/do/projeto \
   <comando-do-aplicativo>
 ```
+
+O atalho `devcontainer` (symlink para o shim, criado pelo `setup.sh`) é
+equivalente ao primeiro `mise exec` acima, **fora** de repositórios com
+`.tool-versions`/`mise.toml` próprios. Dentro deles, o shim resolve a versão do
+projeto — use `mise exec ... --` para não depender disso.
 
 Neste fluxo, `--docker-path podman` é uma exigência de política: torna o
 provider explícito e não depende do shim `podman-docker`, que também
