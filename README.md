@@ -216,7 +216,7 @@ O CLI `0.89.0` não oferece um `down` completo. O cleanup usa o label
 antes de remover qualquer container:
 
 ```bash
-WORKSPACE=/caminho/absolato/do/projeto
+WORKSPACE=/caminho/absoluto/do/projeto
 
 # 1. Identificar containers do projeto.
 podman ps -a \
