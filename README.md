@@ -439,6 +439,46 @@ que não desabilite o rótulo, rótulos SELinux explícitos por imagem com
 política de rótulo, ou migrar o caso de uso para VM. Nenhuma delas é o padrão
 hoje.
 
+## Unidades criadas por instaladores de terceiros
+
+Duas units deste host são criadas por instaladores, não pelo `setup.sh`:
+`antigravity-cli-daemon.service` (do `agy`) e `opencode.service` (do opencode).
+O instalador não consulta o padrão, então o que ele escrever é estado de host
+**sem dono no repositório** — foi assim que o servidor do OpenCode ended up
+divergindo do padrão, com um ajuste de escuta feito à mão e que um `setup.sh` em
+um host novo não reproduziria.
+
+O padrão declara as duas por drop-in, não editando a unit: assim uma reescrita do
+instalador não desfaz o que o padrão quer, e as outras diretivas que ele define
+(`PATH`, `Restart`, `TimeoutStopSec`) ficam intactas.
+
+| Unit | Drop-in | O que declara |
+|---|---|---|
+| `antigravity-cli-daemon` | `…service.d/10-mise-path.conf` | o `PATH` do mise, para que o filho `npm exec` encontre o runtime |
+| `opencode` | `…service.d/10-bind.conf` | o endereço de escuta, `OPENCODE_BIND:OPENCODE_PORT` |
+
+Regra para o próximo instalador que criar uma unit: ou o padrão a declara, ou ela
+vira passo manual documentado no README. O estado que ninguém possui é o que
+gera divergência silenciosa entre o host e o padrão.
+
+### Escuta do OpenCode e o que ela expõe
+
+`OPENCODE_BIND="0.0.0.0"` — escolha consciente, e o `setup.sh` diz isso em
+comentário junto da pin. Escutar em `0.0.0.0` inclui a interface WiFi local, e
+não só a tailnet:
+
+- **alcançável** por qualquer máquina da mesma rede WiFi, porque a zona
+  `FedoraWorkstation` do firewalld abre `1025-65535/tcp`;
+- **o que separa esse acesso** é a credencial de pareamento do OpenCode, não uma
+  barreira de rede;
+- **o alvo real** é o acesso pela tailnet, que daria para ter sem abrir para a
+  LAN: apontar `OPENCODE_BIND` para o IP do Tailscale, ou expor por
+  `tailscale serve`.
+
+Se a exposição deixar de ser aceitável, mude a pin e rode `./setup.sh --only=ai-clis`.
+A porta larga do firewalld está registrada como pendência em
+[#8](https://github.com/rvlmt/dotfiles-fedora/issues/8).
+
 ## Configurações Manuais Opcionais no Host (GUI ou Terminal)
 
 Caso você queira transformar o Fedora em um servidor autônomo sem intervenção física (ex.: recuperação após reboot para sessões RDP), essas configurações podem ser feitas sob demanda:

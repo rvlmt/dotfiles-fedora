@@ -201,6 +201,19 @@ rm -f ~/.local/bin/agy ~/.local/bin/agent ~/.local/bin/cursor-agent
 rm -rf ~/.opencode ~/.cursor-agent
 ```
 
+O módulo também declara a escuta do servidor do OpenCode por drop-in, então ela
+também faz parte do rollback:
+
+```bash
+# Devolve a unit ao estado que o instalador deixou (provavelmente loopback).
+rm -rf ~/.config/systemd/user/opencode.service.d
+systemctl --user daemon-reload
+```
+
+Com o drop-in removido, o servidor volta a escutar só em `127.0.0.1` no próximo
+restart. Remover a unit inteira (`rm ~/.config/systemd/user/opencode.service`)
+também a apaga do estado do usuário e precisa de `disable` antes.
+
 `claude` e `cursor-agent` não dependem de Node, mas `codex`, `gemini`, `copilot` e
 `ocx` resolvem `#!/usr/bin/env node` — por isso remova estas últimas **antes** do
 Bun e do mise (seção `base`). Os symlinks em `~/.bun/bin` são recriados pelo Bun a

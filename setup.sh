@@ -39,6 +39,20 @@ MISE_DEVCONTAINER_VERSION="0.89.0"
 MISE_BIN_PATH="$HOME/.local/bin/mise"
 MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 
+# Endereço e porta do servidor do OpenCode no host, declarados aqui para que um
+# host novo reproduza o mesmo estado — o instalador do opencode cria a unit sem
+# consultar estas escolhas.
+#
+# `0.0.0.0` escuta em todas as interfaces, e isso inclui a interface WiFi local,
+# não só a tailnet. O acesso remoto que motiva isto é pela tailnet, mas o
+# servidor também fica alcançável por qualquer máquina da mesma rede WiFi, e o
+# que separa esse acesso é a credencial de pareamento do OpenCode. É uma escolha
+# consciente, não um default esquecido: se a exposição deixar de ser aceitável,
+# o caminho é apontar `OPENCODE_BIND` para o IP do Tailscale ou passar a expor
+# por `tailscale serve`.
+OPENCODE_BIND="0.0.0.0"
+OPENCODE_PORT="49374"
+
 # Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
 # (pré-exportados), senão pergunta com o default sugerido entre colchetes
 # (Enter aceita, digitar outra coisa sobrescreve só nesta execução).
@@ -196,6 +210,58 @@ Environment=\"PATH=$MISE_SHIMS_PATH:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/b
     echo -e "${YELLOW}  Aplique com: systemctl --user restart antigravity-cli-daemon${NC}"
 }
 
+# O instalador do opencode cria a unit opencode.service. Ela é estado de host
+# sem dono no padrão: um `setup.sh` em um host novo não reproduziria o ajuste de
+# escuta, e o servidor voltaria a ficar em loopback. Por isso a escuta é
+# declarada aqui, por drop-in: sobrevive a uma reescrita do instalador e não
+# encosta nas outras diretivas que ele define (PATH, Restart, TimeoutStopSec).
+# Só o valor de `--hostname` e de `--port` é reescrito, o resto das flags fica.
+setup_opencode_service() {
+    local unit="$HOME/.config/systemd/user/opencode.service"
+    local dropin_dir="$HOME/.config/systemd/user/opencode.service.d"
+    local dropin="$dropin_dir/10-bind.conf"
+    if [ ! -f "$unit" ]; then
+        return 0
+    fi
+
+    local exec_line
+    exec_line="$(sed -nE 's/^ExecStart=(.*)$/\1/p' "$unit" | head -1)"
+    if [ -z "$exec_line" ]; then
+        echo -e "${YELLOW}Não li o ExecStart de $unit; pulei o drop-in do OpenCode.${NC}" >&2
+        return 1
+    fi
+
+    local new_line="$exec_line"
+    if [[ "$new_line" == *"--hostname"* ]]; then
+        new_line="$(printf '%s' "$new_line" | sed -E "s/--hostname[= ][^ ]+/--hostname ${OPENCODE_BIND}/g")"
+    else
+        new_line="$new_line --hostname $OPENCODE_BIND"
+    fi
+    if [[ "$new_line" == *"--port"* ]]; then
+        new_line="$(printf '%s' "$new_line" | sed -E "s/--port[= ][^ ]+/--port ${OPENCODE_PORT}/g")"
+    else
+        new_line="$new_line --port $OPENCODE_PORT"
+    fi
+
+    local expected="[Service]
+# Gerado por dotfiles-fedora (setup.sh): declara o endereco de escuta do servidor
+# do OpenCode, que o instalador deixa em loopback. Drop-in em vez de edicao da
+# unit para sobreviver a uma reescrita do instalador.
+ExecStart=
+ExecStart=$new_line"
+
+    mkdir -p "$dropin_dir"
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$expected" ]; then
+        echo -e "${GREEN}✓ Escuta do OpenCode já declarada ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
+        return 0
+    fi
+    printf '%s\n' "$expected" > "$dropin"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo -e "${GREEN}✓ Drop-in de escuta do OpenCode criado ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
+    echo -e "${YELLOW}  Aplique com: systemctl --user restart opencode${NC}"
+    echo -e "${YELLOW}  $OPENCODE_BIND inclui a interface WiFi, nao so a tailnet — veja OPENCODE_BIND no setup.sh.${NC}"
+}
+
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
 install_npm_global() {
     local package="$1" bin_name="$2"
@@ -266,6 +332,10 @@ install_common_ai_clis() {
     # O daemon do agy roda "npm exec" fora de shell interativo, então precisa do
     # PATH do mise explicitado no serviço. Ver setup_agy_service_path.
     setup_agy_service_path
+
+    # A unit do opencode é criada pelo instalador sem consultar o padrão, então a
+    # escuta é declarada aqui. Ver setup_opencode_service.
+    setup_opencode_service
 }
 
 # Instala a CLI do OpenCodex (@bitkyc08/opencodex) via Bun ou npm.
