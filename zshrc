@@ -50,7 +50,7 @@ setopt HIST_VERIFY               # Permite revisar histórico expandido antes de
 # Reaproveita o cache (~/.zcompdump) se ele tiver menos de 24h; caso contrário, regenera.
 #
 # "stat -c %Y" é GNU/Linux e "stat -f %m" é BSD/macOS. Não dá para encadear os
-# dois com `||` capturing stdout: no GNU o `stat -f` imprime o status do sistema
+# dois com `||` capturando stdout: no GNU o `stat -f` imprime o status do sistema
 # de arquivos em stdout e só depois falha, então o texto dele entra na variável
 # junto com o número do fallback e a aritmética estoura ("bad math expression").
 # Por isso testamos o formato primeiro e só capturamos do que respondeu.
