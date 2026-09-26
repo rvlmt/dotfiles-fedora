@@ -246,7 +246,11 @@ prompt_opencode_password() {
 
     echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
     echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
-    echo -e "  Deixe em branco para manter a senha atual de ~/.config/opencode/service.json."
+    if [ -f "$HOME/.config/opencode/service.json" ]; then
+        echo -e "  Em branco, mantém a senha atual de ~/.config/opencode/service.json."
+    else
+        echo -e "  Em branco, aceita a senha aleatória que o instalador vai gerar."
+    fi
     read -r -s -p "  Senha nova (vazio = manter): " opencode_pw
     echo
 
@@ -689,13 +693,17 @@ if should_run "ai-clis"; then
     confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) também diretamente no host Fedora? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
 fi
 
-# A senha do servidor do OpenCode só é perguntada quando o módulo `ai-clis` roda
-# com o OpenCode instalado; o prompt do valor em si acontece no momento do uso,
-# porque segurar um segredo numa variável durante o script inteiro é pior do que
-# travar o terminal uma vez.
+# A senha do servidor do OpenCode é perguntada sempre que o módulo `ai-clis` for
+# aprovado, inclusive numa máquina nova em que o OpenCode ainda não está
+# instalado: o instalador roda DEPOIS deste bloco, então condicionar a pergunta à
+# existência do binário a faria sumir justamente na primeira execução, e o host
+# ficaria com a senha aleatória do instalador.
+#
+# O valor em si é lido no momento do uso, porque segurar um segredo numa variável
+# durante o script inteiro é pior do que travar o terminal uma vez.
 CONFIRM_OPENCODE_PASSWORD=""
-if [ "$CONFIRM_AI_CLIS" = "1" ] && [ -x "$OPENCODE_BIN" ]; then
-    confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a atual)" && CONFIRM_OPENCODE_PASSWORD=1
+if [ "$CONFIRM_AI_CLIS" = "1" ]; then
+    confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a que o instalador gerar)" && CONFIRM_OPENCODE_PASSWORD=1
 fi
 
 CONFIRM_ZSHRC_OVERWRITE=0
