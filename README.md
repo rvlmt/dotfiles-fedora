@@ -35,9 +35,10 @@ com as CLIs de IA em si.
   IA, os módulos — tudo junto); idempotente, pode ser executado várias vezes
   sem duplicar configuração.
 - **`zshrc`** — configurações e aliases do terminal, portáveis entre macOS e
-  Fedora. Cópia independente da do repo `dotfiles`; aqui é opcional e
-  pergunta antes de aplicar (módulo `zshrc`, faz sentido agora que a máquina
-  tem sessão gráfica/RDP).
+  Fedora. Cópia independente da do repo `dotfiles`. No Fedora ele é o shell de
+  login padrão e o dono do PATH interativo (módulo `zshrc`): é ele que declara
+  mise, Bun, `~/.local/bin` e `~/.opencode/bin`, então um host novo não depende
+  de ninguém acrescentar isso à mão.
 - **`devcontainer-template/`** — template de `.devcontainer/` (Containerfile
   + devcontainer.json) para copiar em cada projeto que vai rodar isolado via
   devpod/Podman neste servidor. Também existe uma cópia no repo `dotfiles`,
@@ -109,12 +110,13 @@ mesmo repo pra justificar mantê-las separadas.
        - devpod tem binário Linux oficial, mas não é instalado aqui — ele roda do lado Mac controlando este servidor.
    12. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). Opcional no host, já que os coding agents rodam primariamente isolados dentro dos containers devpod.
    13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), router local para modelos de IA.
-   14. `zshrc` — **Pergunta antes de aplicar**: linka o `zshrc` compartilhado também neste servidor (com aliases para Git, Podman e Docker), instala `zsh`+plugins via `dnf` e troca o shell padrão.
+   14. `zshrc` — Torna o `zsh` o shell de login do host: instala `zsh`+plugins via `dnf`, linka o `zshrc` versionado deste repo e roda `chsh`. Participa da execução normal sem confirmação. A única confirmação é sobre substituir um `~/.zshrc` que já exista e não seja o link deste repo (o atual é salvo como backup).
 
    Use `--only=modulo1,modulo2` ou `--skip=modulo1,modulo2`. Só `toolbx` e
-   `gui-access` ficam de fora por padrão (precisam de `--only` explícito); os
-   demais módulos interativos (`ai-clis`, `zshrc`) participam da execução normal,
-   com a confirmação coletada logo no início.
+   `gui-access` ficam de fora por padrão (precisam de `--only` explícito);
+   `ai-clis` participa da execução normal e pergunta antes de agir, com a
+   confirmação coletada logo no início. `zshrc` não pergunta, exceto na
+   substituição destrutiva descrita acima.
 
    ```bash
    ./setup.sh --only=podman,tailscale
@@ -185,7 +187,7 @@ também não depende de Node para instalar os pacotes.
 
 O `setup.sh` cria ainda `~/.local/bin/devcontainer` apontando para o shim do
 `mise`. Isso dá um atalho curto que funciona inclusive fora de shell interativo —
-situação em que `mise activate bash` não se aplica, como em serviço systemd.
+situação em que `mise activate` não se aplica, como em serviço systemd ou script.
 
 ### Ressalva: shim resolve por diretório
 
@@ -195,35 +197,26 @@ resolvem a versão **daquele projeto**, e não o pin do host. Esse é o comporta
 desejado ao trabalhar em um projeto; por isso, quando o pin do host importar,
 use a forma `mise exec ... --` da seção seguinte.
 
-### Antes de remover o `nodejs22` do dnf
+### O host não deve ter Node do dnf
 
-Serviço systemd não lê `~/.bashrc`, então o daemon do `agy` continuaria usando o
-`npm` do `dnf` mesmo com o `mise` ativado no shell. O `setup.sh` resolve isso com
-um drop-in em
-`~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`.
+Este repositório é o padrão, não um registro do que uma máquina específica fez. O
+invariante é: **o Node do host vem do mise, e nenhum RPM `nodejs*` está
+instalado.** O `setup.sh` não instala `nodejs`/`npm` justamente para que o
+runtime não dependa da versão que o Fedora decidir empacotar.
 
-A remoção do pacote exige `sudo` e é manual, então ela fica com você:
+Se um host tiver esses pacotes por outro caminho, a remoção precisa de `sudo` e
+é de quem administra a máquina:
 
 ```bash
-# 1. Confirmar o drop-in e reiniciar o serviço.
-systemctl --user cat antigravity-cli-daemon.service | grep -i 'Environment'
-systemctl --user restart antigravity-cli-daemon
-
-# 2. Conferir que o serviço voltou com o PATH do mise.
-systemctl --user is-active antigravity-cli-daemon
-systemctl --user show antigravity-cli-daemon -p Environment | tr ' ' '\n' | grep mise
-
-# 3. Smoke das CLIs que resolvem `env node`.
-codex --version && gemini --version && copilot --version && ocx --version
-
-# 4. Só então remover o RPM (o glob cobre docs/i18n/bin que vieram junto).
 sudo dnf remove 'nodejs22*'
-
-# 5. Confirmar que o host ficou sem Node do dnf e que o mise assumiu.
-command -v node && node --version
+command -v node && node --version   # deve resolver para o shim do mise
 ```
 
-Rollback em `ROLLBACK.md`.
+Ordem importa, porque serviço systemd não lê `~/.bashrc` nem o `zshrc`: o daemon
+do `agy` executa `npm exec` e precisa do PATH do mise por um drop-in em
+`~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`, que
+o `setup.sh` cria no módulo `ai-clis`. Remover o RPM antes disso quebra o daemon.
+Rollback em [`ROLLBACK.md`](ROLLBACK.md).
 
 ## Dev Container CLI no host Fedora
 
