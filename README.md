@@ -18,15 +18,17 @@ rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
 │ Tailscale client                               │◄────►│ Tailscale (SSH só na interface tailscale0)           │
 │ devpod CLI (provider SSH → fedora via tailnet) │      │ Podman rootless                                      │
 │ VS Code + Remote-SSH/devpod extension          │      │ 1 container por projeto (.devcontainer/)             │
-│ terminal (fallback SSH direto)                 │      │   → ai-clis dentro do container (claude, codex, ...) │
+│ terminal (fallback SSH direto)                 │      │   → devcontainer do app (sem CLIs de agente)         │
 │ cliente RDP (opcional, GUI do Fedora)          │      │ GNOME Remote Desktop nativo (RDP, opcional)          │
 └──────────────────────────────────────────────────┘      └─────────────────────────────────────────────────────┘
 ```
 
 Cada projeto carrega seu próprio `.devcontainer/` (a partir do template em
-`devcontainer-template/`), então o ambiente de trabalho do agente é isolado
-e reprodutível por projeto — o host Fedora só entra com Podman/rede/SSH, não
-com as CLIs de IA em si.
+`devcontainer-template/`), então o ambiente de build e teste da aplicação é
+isolado e reprodutível por projeto. O host Fedora entra com Podman, rede e SSH —
+e, se você aceitar o módulo `ai-clis`, também com as CLIs de agente, que é uma
+escolha sua e não uma dependência do app. O devcontainer do projeto não recebe
+essas CLIs em nenhum dos casos. Ver [Papéis de host](#papéis-de-host-bare-metal-vm-e-devcontainer).
 
 ## Estrutura
 
@@ -35,9 +37,10 @@ com as CLIs de IA em si.
   IA, os módulos — tudo junto); idempotente, pode ser executado várias vezes
   sem duplicar configuração.
 - **`zshrc`** — configurações e aliases do terminal, portáveis entre macOS e
-  Fedora. Cópia independente da do repo `dotfiles`; aqui é opcional e
-  pergunta antes de aplicar (módulo `zshrc`, faz sentido agora que a máquina
-  tem sessão gráfica/RDP).
+  Fedora. Cópia independente da do repo `dotfiles`. No Fedora ele é o shell de
+  login padrão e o dono do PATH interativo (módulo `zshrc`): é ele que declara
+  mise, Bun, `~/.local/bin` e `~/.opencode/bin`, então um host novo não depende
+  de ninguém acrescentar isso à mão.
 - **`devcontainer-template/`** — template de `.devcontainer/` (Containerfile
   + devcontainer.json) para copiar em cada projeto que vai rodar isolado via
   devpod/Podman neste servidor. Também existe uma cópia no repo `dotfiles`,
@@ -87,7 +90,7 @@ mesmo repo pra justificar mantê-las separadas.
    esperando resposta no meio do caminho.
 
    Módulos (em ordem):
-   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e `mise` (gerenciador de versões de runtime). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.
+   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e o runtime do host via `mise` (Node e Dev Container CLI pinados — ver "Runtime Node no host"). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.
    2. `hostname` — Mostra o hostname atual e pergunta se quer alterá-lo, já na fase de coleta do início (`hostnamectl set-hostname` só aplica depois); cria `~/Developer`.
    3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).
    4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.
@@ -109,12 +112,13 @@ mesmo repo pra justificar mantê-las separadas.
        - devpod tem binário Linux oficial, mas não é instalado aqui — ele roda do lado Mac controlando este servidor.
    12. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). Opcional no host, já que os coding agents rodam primariamente isolados dentro dos containers devpod.
    13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), router local para modelos de IA.
-   14. `zshrc` — **Pergunta antes de aplicar**: linka o `zshrc` compartilhado também neste servidor (com aliases para Git, Podman e Docker), instala `zsh`+plugins via `dnf` e troca o shell padrão.
+   14. `zshrc` — Torna o `zsh` o shell de login do host: instala `zsh`+plugins via `dnf`, linka o `zshrc` versionado deste repo e roda `chsh`. Participa da execução normal sem confirmação. A única confirmação é sobre substituir um `~/.zshrc` que já exista e não seja o link deste repo (o atual é salvo como backup).
 
    Use `--only=modulo1,modulo2` ou `--skip=modulo1,modulo2`. Só `toolbx` e
-   `gui-access` ficam de fora por padrão (precisam de `--only` explícito); os
-   demais módulos interativos (`ai-clis`, `zshrc`) participam da execução normal,
-   com a confirmação coletada logo no início.
+   `gui-access` ficam de fora por padrão (precisam de `--only` explícito);
+   `ai-clis` participa da execução normal e pergunta antes de agir, com a
+   confirmação coletada logo no início. `zshrc` não pergunta, exceto na
+   substituição destrutiva descrita acima.
 
    ```bash
    ./setup.sh --only=podman,tailscale
@@ -163,6 +167,85 @@ O template de devcontainer traz, por padrão:
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
 
+## Papéis de host: bare metal, VM e devcontainer
+
+Antes do runtime, o que este repositório se propõe a ser:
+
+- **Bare metal** — a máquina que roda Podman, rede e SSH. É o papel deste repo.
+- **VM Fedora (agentic dev)** — opcional, uma camada a mais. Onde os agentes
+  trabalham com as CLIs instaladas.
+- **Devcontainer** — o código da aplicação, isolado dentro de qualquer um dos dois.
+
+Um bare metal descartável pode exercise os três papéis ao mesmo tempo: é o caso
+deste host, que é ao mesmo tempo a caixa de containers e a caixa agentic dev. O
+`setup.sh` não impõe essa escolha — o módulo `ai-clis` **pergunta** se as CLIs de
+agente devem ser instaladas no host, e o `devcontainer` é usado por projeto,
+independentemente dessa resposta. Adicionar a camada de VM como um perfil
+dedicado (`--profile host|vm`) é evolução futura, não um pressuposto.
+
+O que **não** muda em nenhum dos papéis: código de aplicação roda no devcontainer
+do projeto, com o toolchain pinado pelo próprio projeto. O que o host carrega é
+controller, não ambiente de aplicação.
+
+## Runtime Node no host
+
+O Node e o npm do host vêm do `mise`, com versão pinada — **não** do `dnf`. O
+`setup.sh` não instala mais `nodejs`/`npm` de propósito, para que o runtime não
+dependa da versão que o Fedora decidir empacotar a cada atualização:
+
+```bash
+mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
+```
+
+O consumo **baseline** é o Dev Container CLI, que é controller de host. O
+`setup.sh` cria ainda `~/.local/bin/devcontainer` apontando para o shim do `mise`,
+o que dá um atalho curto que funciona inclusive fora de shell interativo — situação
+em que `mise activate` não se aplica, como em serviço systemd ou script.
+
+Se você aceitou o módulo `ai-clis`, há consumo adicional, e ele é consequência
+dessa escolha, não um invariante do host:
+
+- `codex`, `gemini`, `copilot` e `ocx`/`opencodex` resolvem `#!/usr/bin/env node`,
+  ou seja, o mesmo Node do mise. `claude`, `opencode` e `cursor-agent` são
+  binários nativos e não usam Node.
+- O instalador do `agy` cria o serviço `antigravity-cli-daemon`, que executa
+  `npm exec` como filho. Serviço systemd não lê `~/.zshrc` nem o `~/.bashrc`, então
+  o `setup.sh` cria um drop-in em
+  `~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`
+  para que ele encontre o mise. **É isso que permite remover o RPM `nodejs22*` com
+  segurança** — remover antes quebraria o daemon.
+
+Rollback de cada peça em [`ROLLBACK.md`](ROLLBACK.md), seções `ai-clis` e `base`.
+
+### Ressalva: shim resolve por diretório
+
+Os shims consultam a configuração do diretório em que são chamados. Dentro de um
+repositório com `.tool-versions`/`mise.toml` próprios, `node` e `devcontainer`
+resolvem a versão **daquele projeto**, e não o pin do host. Esse é o comportamento
+desejado ao trabalhar em um projeto; por isso, quando o pin do host importar,
+use a forma `mise exec ... --` da seção seguinte.
+
+### O host não deve ter Node do dnf
+
+Este repositório é o padrão, não um registro do que uma máquina específica fez. O
+invariante é: **o Node do host vem do mise, e nenhum RPM `nodejs*` está
+instalado.** O `setup.sh` não instala `nodejs`/`npm` justamente para que o
+runtime não dependa da versão que o Fedora decidir empacotar.
+
+Se um host tiver esses pacotes por outro caminho, a remoção precisa de `sudo` e
+é de quem administra a máquina:
+
+```bash
+sudo dnf remove 'nodejs22*'
+command -v node && node --version   # deve resolver para o shim do mise
+```
+
+Ordem importa, porque serviço systemd não lê `~/.bashrc` nem o `zshrc`: o daemon
+do `agy` executa `npm exec` e precisa do PATH do mise por um drop-in em
+`~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`, que
+o `setup.sh` cria no módulo `ai-clis`. Remover o RPM antes disso quebra o daemon.
+Rollback em [`ROLLBACK.md`](ROLLBACK.md).
+
 ## Dev Container CLI no host Fedora
 
 O Dev Container CLI é a exceção deliberada, user-scoped, ao
@@ -193,6 +276,11 @@ mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer exec \
   --workspace-folder /caminho/do/projeto \
   <comando-do-aplicativo>
 ```
+
+O atalho `devcontainer` (symlink para o shim, criado pelo `setup.sh`) é
+equivalente ao primeiro `mise exec` acima, **fora** de repositórios com
+`.tool-versions`/`mise.toml` próprios. Dentro deles, o shim resolve a versão do
+projeto — use `mise exec ... --` para não depender disso.
 
 Neste fluxo, `--docker-path podman` é uma exigência de política: torna o
 provider explícito e não depende do shim `podman-docker`, que também

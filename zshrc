@@ -10,6 +10,14 @@ fi
 export BUN_INSTALL="$HOME/.bun"
 export PATH="$BUN_INSTALL/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
+# mise: dono do runtime do host (node e devcontainer CLI pinados). Shims em vez
+# de "mise activate" para o mesmo mecanismo valer no shell, no systemd e nos
+# devcontainers; o shim resolve também a config do diretório atual. No macOS o
+# mise é opcional, daí o teste de diretório.
+if [[ -d "$HOME/.local/share/mise/shims" ]]; then
+  export PATH="$HOME/.local/share/mise/shims:$PATH"
+fi
+
 # Open Code (sst/opencode) instala o binário fora do PATH padrão
 [ -d "$HOME/.opencode/bin" ] && export PATH="$HOME/.opencode/bin:$PATH"
 
