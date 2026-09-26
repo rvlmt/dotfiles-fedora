@@ -469,7 +469,8 @@ gera divergência silenciosa entre o host e o padrão.
 
 Regra do host, aplicável a qualquer serviço que precise ser alcançado de fora:
 
-> **Escuta em loopback, publicação pela tailnet com HTTPS.**
+> **Escuta em loopback, publicação pela tailnet com HTTPS, em prefixo de
+> caminho próprio.**
 
 `tailscale serve` faz a publicação e emite certificado para
 `https://<host>.<tailnet>.ts.net/`. Isso é tailnet-only, não abre porta no
@@ -480,9 +481,32 @@ tailnet — foi descartado. Além de incluir a interface WiFi local, alcançáve
 qualquer máquina da mesma rede, ele entregava o serviço sem TLS. No lugar dele, o
 OpenCode escuta em `127.0.0.1:49374` e a unit declara isso por drop-in.
 
-`setup_opencode_serve` publica o serviço e **não sobrescreve** config existente de
-outro serviço: se já houver algo publicado, ele avisa e deixa a decisão para quem
-administra o host. Aplicar mudanças de escuta ou publicação:
+#### Um serviço, um prefixo; a raiz fica reservada
+
+Nenhum serviço ocupa a raiz `/` por padrão. Cada um declara o próprio prefixo, e
+`/` fica livre para o serviço que você quiser ter mais à mão — tipicamente um
+painel, não a ferramenta mais sensível.
+
+| Serviço | Escuta | Caminho na tailnet |
+|---|---|---|
+| OpenCode | `127.0.0.1:49374` | `/opencode` |
+
+Ao publicar um serviço novo: acrescente a linha na tabela, use um prefixo
+próprio, e não troque o que já existe. `setup_opencode_serve` não sobrescreve
+config de outro serviço — se já houver algo publicado, avisa e devolve a decisão.
+
+#### Mesma origem: o que isso significa
+
+Serviços em prefixos diferentes do mesmo hostname **compartilham a origem**:
+cookies, `localStorage` e CSP valem para todos eles. Isso é aceitável quando os
+serviços são do mesmo dono e mesma confiança, que é o caso aqui.
+
+Se algum dia um serviço MENOS confiável for publicado neste nó, mova o OpenCode
+para uma **porta** própria (`--https=8443`), porque porta diferente é origem
+diferente de verdade, e o prefixo de caminho não isola. Nesse caso, atualize a
+tabela acima junto.
+
+Aplicar mudanças de escuta ou publicação:
 
 ```bash
 ./setup.sh --only=ai-clis
@@ -492,7 +516,7 @@ tailscale serve status
 
 A porta larga do firewalld (`1025-65535` na zona `FedoraWorkstation`) continua
 registrada como pendência em
-[#8](https://github.com/rvlmt/dotfiles-fedora/issues/8). Publicar pela tailnet
+[#9](https://github.com/rvlmt/dotfiles-fedora/issues/9). Publicar pela tailnet
 reduz a dependência dela, mas não fecha o problema para os outros serviços.
 
 ### `gh` é opcional; a base é git sobre SSH
