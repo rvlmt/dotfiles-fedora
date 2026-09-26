@@ -469,8 +469,8 @@ gera divergência silenciosa entre o host e o padrão.
 
 Regra do host, aplicável a qualquer serviço que precise ser alcançado de fora:
 
-> **Escuta em loopback, publicação pela tailnet com HTTPS, em prefixo de
-> caminho próprio.**
+> **Escuta em loopback, publicação pela tailnet com HTTPS, em porta
+> dedicada.**
 
 `tailscale serve` faz a publicação e emite certificado para
 `https://<host>.<tailnet>.ts.net/`. Isso é tailnet-only, não abre porta no
@@ -481,30 +481,36 @@ tailnet — foi descartado. Além de incluir a interface WiFi local, alcançáve
 qualquer máquina da mesma rede, ele entregava o serviço sem TLS. No lugar dele, o
 OpenCode escuta em `127.0.0.1:49374` e a unit declara isso por drop-in.
 
-#### Um serviço, um prefixo; a raiz fica reservada
+#### Uma porta por serviço; a 443 fica reservada
 
-Nenhum serviço ocupa a raiz `/` por padrão. Cada um declara o próprio prefixo, e
-`/` fica livre para o serviço que você quiser ter mais à mão — tipicamente um
-painel, não a ferramenta mais sensível.
+Cada serviço escuta em loopback e é publicado em **porta HTTPS própria**. A 443
+fica reservada: é o slot para o serviço que você quiser ter mais à mão — um painel,
+não a ferramenta mais sensível.
 
-| Serviço | Escuta | Caminho na tailnet |
+| Serviço | Escuta | Publicação na tailnet |
 |---|---|---|
-| OpenCode | `127.0.0.1:49374` | `/opencode` |
+| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` |
+| _(reservado)_ | — | `:443`, para o próximo serviço |
 
-Ao publicar um serviço novo: acrescente a linha na tabela, use um prefixo
-próprio, e não troque o que já existe. `setup_opencode_serve` não sobrescreve
-config de outro serviço — se já houver algo publicado, avisa e devolve a decisão.
+Ao publicar um serviço novo: acrescente a linha na tabela com uma porta livre, e
+não troque o que já existe. `setup_opencode_serve` não sobrescreve config de outro
+serviço — se já houver algo publicado, avisa e devolve a decisão.
 
-#### Mesma origem: o que isso significa
+#### Por que porta, e não prefixo de caminho
 
-Serviços em prefixos diferentes do mesmo hostname **compartilham a origem**:
-cookies, `localStorage` e CSP valem para todos eles. Isso é aceitável quando os
-serviços são do mesmo dono e mesma confiança, que é o caso aqui.
+Duas razões independentes, e as duas importam:
 
-Se algum dia um serviço MENOS confiável for publicado neste nó, mova o OpenCode
-para uma **porta** própria (`--https=8443`), porque porta diferente é origem
-diferente de verdade, e o prefixo de caminho não isola. Nesse caso, atualize a
-tabela acima junto.
+1. **Porta diferente é origem diferente.** Cookies, `localStorage` e CSP de um
+   serviço não alcançam o que está em outra porta. Prefixo de caminho no mesmo
+   hostname mantém a **mesma origem** e não isola nada — foi uma escolha
+   minha anterior, e ela estava errada.
+2. **O OpenCode não funciona fora da raiz.** A SPA é servida em qualquer path
+   (o backend responde 200 em `/opencode`), mas as chamadas de API em caminho
+   absoluto caem na raiz do host, onde não há handler, e a interface quebra com
+   `Unrecognised route!`. Só a raiz da própria origem serve.
+
+Se um dia um app tolerar prefixo e você quiser URLs sem porta, ainda assim prefira
+porta: o isolamento de origem é propriedade de segurança, não de estética.
 
 Aplicar mudanças de escuta ou publicação:
 

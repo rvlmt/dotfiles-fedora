@@ -52,13 +52,20 @@ MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 OPENCODE_BIND="127.0.0.1"
 OPENCODE_PORT="49374"
 
-# Publicação na tailnet. O serviço não fica na raiz do nó: cada serviço declara
-# o próprio prefixo de caminho, e a raiz `/` fica reservada para o serviço que
-# você quiser ter mais à mão. Publicar em `/opencode` também mantém a origem
-# separada por caminho, o que é melhor do que dividir por porta para o mesmo
-# conjunto de cookies — mas veja a nota de origem no README.
-OPENCODE_SERVE_PORT="443"
-OPENCODE_SERVE_PATH="/opencode"
+# Publicação na tailnet, em porta HTTPS dedicada.
+#
+# Porta própria, e não prefixo de caminho, por dois motivos independentes:
+#
+# 1. Isolamento de origem. Porta diferente É origem diferente, então cookies,
+#    localStorage e CSP não são compartilhados com o que estiver na 443. Prefixo
+#    de caminho mantém a mesma origem e não isola nada.
+# 2. O OpenCode não tolera ser servido fora da raiz. A SPA sobe em qualquer path,
+#    mas as chamadas de API em caminho absoluto caem na raiz do host, onde não há
+#    handler, e a interface quebra com "Unrecognised route!". Só a raiz da própria
+#    origem funciona.
+#
+# A 443 fica reservada: é o slot para o serviço que você quiser ter mais à mão.
+OPENCODE_SERVE_PORT="8443"
 
 # Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
 # (pré-exportados), senão pergunta com o default sugerido entre colchetes
@@ -243,8 +250,10 @@ setup_opencode_serve() {
     local current
     current="$(tailscale serve status 2>/dev/null || true)"
 
+    local url="https://<host>.<tailnet>.ts.net:$OPENCODE_SERVE_PORT"
+
     if printf '%s' "$current" | grep -qF -- "$target"; then
-        echo -e "${GREEN}✓ OpenCode já publicado na tailnet ($OPENCODE_SERVE_PATH → $target).${NC}"
+        echo -e "${GREEN}✓ OpenCode já publicado na tailnet (:$OPENCODE_SERVE_PORT → $target).${NC}"
         return 0
     fi
     if printf '%s' "$current" | grep -qE 'https?://|proxy'; then
@@ -254,13 +263,13 @@ setup_opencode_serve() {
         return 1
     fi
 
-    if sudo tailscale serve --bg --https="$OPENCODE_SERVE_PORT" \
-        "$OPENCODE_SERVE_PATH" "http://$target"; then
-        echo -e "${GREEN}✓ OpenCode publicado na tailnet ($OPENCODE_SERVE_PATH → $target).${NC}"
-        echo -e "${YELLOW}  Acesse por https://<host>.<tailnet>.ts.net${OPENCODE_SERVE_PATH}, com certificado do Tailscale.${NC}"
+    # Sem prefixo de caminho: o app só funciona na raiz da própria origem.
+    if sudo tailscale serve --bg --https="$OPENCODE_SERVE_PORT" "http://$target"; then
+        echo -e "${GREEN}✓ OpenCode publicado na tailnet (:$OPENCODE_SERVE_PORT → $target).${NC}"
+        echo -e "${YELLOW}  Acesse por $url, com certificado do Tailscale.${NC}"
     else
         echo -e "${YELLOW}Não consegui publicar via tailscale serve.${NC}" >&2
-        echo -e "${YELLOW}  Publicar manualmente: sudo tailscale serve --bg --https=$OPENCODE_SERVE_PORT $OPENCODE_SERVE_PATH http://$target${NC}"
+        echo -e "${YELLOW}  Publicar manualmente: sudo tailscale serve --bg --https=$OPENCODE_SERVE_PORT http://$target${NC}"
         return 1
     fi
 
