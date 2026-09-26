@@ -17,6 +17,7 @@ if [ "$EUID" -eq 0 ]; then
     exit 1
 fi
 
+
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -379,7 +380,7 @@ setup_opencode_service() {
 
     local expected="[Service]
 # Gerado por dotfiles-fedora (setup.sh): declara a escuta em loopback do servidor
-# do OpenCode. Preserva --service de proposito, para que a senha continue vindo
+# do OpenCode. Preserva --service de propósito, para que a senha continue vindo
 # de ~/.config/opencode/service.json em vez de ser regenerada a cada start.
 ExecStart=
 ExecStart=$new_line"
@@ -589,28 +590,57 @@ link_zshrc() {
     fi
 }
 
-# Módulos disponíveis, na ordem em que rodam.
+# Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
+# script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
 ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc"
+
+# Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
+# o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
+#
+#   host — workstation pessoal com GUI e hospedeiro de VMs. Tem libvirt e
+#          cockpit, e é dono do próprio firewall. Não tem container: quem roda
+#          container é o guest.
+#   vm   — a fronteira. Tem Podman rootless, as CLIs de agente e o servidor do
+#          OpenCode. É alcançada por SSH e não expõe nada na LAN.
+#
+# O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
+HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld toolbx gui-access desktop-apps opencodex zshrc"
+VM_STEPS="base ssh git tailscale sshd-hardening podman ai-clis zshrc"
+
+# Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
+OPT_IN_STEPS="toolbx gui-access"
 
 usage() {
     cat <<EOF
-Uso: ./setup.sh [--only=modulo1,modulo2] [--skip=modulo1,modulo2]
+Uso: ./setup.sh [--profile=host|vm] [--only=modulo1,modulo2] [--skip=modulo1,modulo2]
 
-Módulos disponíveis: ${ALL_STEPS// /, }
+Perfis:
+  host   Workstation pessoal com GUI e hospedeiro de VMs. Padrão.
+  vm     A VM de agentes: Podman rootless, CLIs de agente, servidor do OpenCode.
+         Use dentro da VM, não no host.
 
-  --only=podman,tailscale   Roda apenas os módulos listados.
-  --skip=gui-access          Roda tudo, exceto os módulos listados.
-  -h, --help                  Mostra esta ajuda.
+  --profile=vm            Escolhe a camada. Sem --profile, assume host.
 
-Sem argumentos, roda todos os módulos exceto os opcionais (toolbx, gui-access).
-Use --only para rodá-los explicitamente.
+Módulos:
+  --only=modulo1,modulo2   Roda apenas os módulos listados, dentro do perfil.
+  --skip=modulo1,modulo2  Roda o perfil inteiro, exceto os módulos listados.
+  -h, --help               Mostra esta ajuda.
+
+Módulos de cada perfil:
+  host: ${HOST_STEPS// /, }
+  vm:   ${VM_STEPS// /, }
+
+${OPT_IN_STEPS// / e } são opt-in: ficam fora da execução normal e só rodam
+com --only. ai-clis e opencodex são de terceiros e perguntam antes de agir.
 EOF
 }
 
+PROFILE="host"
 ONLY=""
 SKIP=""
 for arg in "$@"; do
     case "$arg" in
+        --profile=*) PROFILE="${arg#*=}" ;;
         --only=*) ONLY="${arg#*=}" ;;
         --skip=*) SKIP="${arg#*=}" ;;
         -h|--help) usage; exit 0 ;;
@@ -622,43 +652,123 @@ for arg in "$@"; do
     esac
 done
 
-validate_steps() {
-    local list="$1" label="$2" step
-    [ -z "$list" ] && return
-    for step in ${list//,/ }; do
+case "$PROFILE" in
+    host) PROFILE_STEPS="$HOST_STEPS" ;;
+    vm) PROFILE_STEPS="$VM_STEPS" ;;
+    *)
+        echo "Perfil desconhecido: '$PROFILE'. Use --profile=host ou --profile=vm." >&2
+        exit 1
+        ;;
+esac
+
+# --only é validado contra o perfil, e --skip não. A assimetria é deliberada:
+# pedir um módulo que a camada não tem é um erro de quem pediu, e falhar alto
+# evita instalar Podman no host só porque alguém typou. Pular um módulo que a
+# camada não tem é inocuo, então --skip apenas avisa.
+validate_only() {
+    local step
+    [ -z "$ONLY" ] && return
+    for step in ${ONLY//,/ }; do
         if [[ " $ALL_STEPS " != *" $step "* ]]; then
-            echo "Módulo desconhecido em $label: '$step'" >&2
+            echo "Módulo desconhecido em --only: '$step'" >&2
             usage
+            exit 1
+        fi
+        if [[ " $PROFILE_STEPS " != *" $step "* ]]; then
+            echo "'$step' não pertence ao perfil '$PROFILE'." >&2
+            echo "  No perfil '$PROFILE' existem: ${PROFILE_STEPS// /, }" >&2
+            echo "  Se você quer esta camada, rode com o outro perfil." >&2
             exit 1
         fi
     done
 }
-validate_steps "$ONLY" "--only"
-validate_steps "$SKIP" "--skip"
+validate_only
 
+validate_skip() {
+    local step
+    [ -z "$SKIP" ] && return
+    for step in ${SKIP//,/ }; do
+        if [[ " $ALL_STEPS " != *" $step "* ]]; then
+            echo "Módulo desconhecido em --skip: '$step'" >&2
+            usage
+            exit 1
+        fi
+        if [[ " $PROFILE_STEPS " != *" $step "* ]]; then
+            echo -e "${YELLOW}  Aviso: '$step' não pertence ao perfil '$PROFILE'; o --skip não tem efeito.${NC}" >&2
+        fi
+    done
+}
+validate_skip
+
+# Pertencência ao perfil vem antes de --only/--skip: um módulo que a camada não
+# tem não roda, aconteça o que acontecer com os refinamentos.
+in_profile() {
+    [[ " $PROFILE_STEPS " == *" $1 "* ]]
+}
+
+# toolbx e gui-access são opt-in dentro do perfil host: só rodam se pedidos via
+# --only. Isso NÃO é expressado como SKIP implícito. A versão anterior usava
+# `SKIP="$OPT_IN_STEPS"` com a lista separada por espaço, e o matcher de
+# should_run compara por vírgula — então o padrão nunca casava, e os dois módulos
+# rodavam num run normal, contrariando o que o README e o ARQUITETURA dizem.
+# Testar a pertencia direto remove o formato duplo, que era a origem do bug.
+is_opt_in() {
+    local step="$1" other
+    for other in $OPT_IN_STEPS; do
+        [ "$other" = "$step" ] && return 0
+    done
+    return 1
+}
+
+# Pertencência ao perfil vem antes de --only/--skip: um módulo que a camada não
+# tem não roda, aconteça o que acontecer com os refinamentos. E o opt-in só cede
+# a --only — declará-lo opcional e deixá-lo no caminho normal seria declarar uma
+# coisa e fazer outra.
 should_run() {
     local step="$1"
+    in_profile "$step" || return 1
+    # O --skip vence sempre, mesmo que o módulo também esteja no --only. Sem
+    # esta checagem antes, o `return` dentro do `if [ -n "$ONLY" ]` impedia o
+    # --skip de ser lido, e "--only=X --skip=X" rodava X. Uma exclusão explícita
+    # nunca é anulada por um refinamento de conjunto.
+    if [ -n "$SKIP" ] && [[ ",$SKIP," == *",$step,"* ]]; then
+        return 1
+    fi
     if [ -n "$ONLY" ]; then
         [[ ",$ONLY," == *",$step,"* ]]
         return $?
     fi
-    if [ -n "$SKIP" ]; then
-        [[ ",$SKIP," == *",$step,"* ]] && return 1
+    if is_opt_in "$step"; then
+        return 1
     fi
     return 0
 }
 
-# toolbx e gui-access são opcionais: só rodam se pedidos explicitamente via
-# --only, a menos que o usuário já tenha especificado um --skip próprio.
-# ai-clis participa da execução normal e pergunta antes de agir (confirm()).
-# zshrc também participa da execução normal e não pergunta: o zsh é o shell de
-# login padrão do host. A única confirmação é sobre substituir um ~/.zshrc que
-# já exista e não seja o link deste repositório.
-if [ -z "$ONLY" ] && [ -z "$SKIP" ]; then
-    SKIP="toolbx,gui-access"
+# Recusa antecipada quando o stdin não é um terminal.
+#
+# As perguntas usam `read -rp`, que o bash só imprime quando o stdin é terminal.
+# E `read` devolve 1 no fim da entrada; como algumas dessas leituras estão fora de
+# um contexto `&&`, o `set -e` aborta o script — sem mensagem, com código 1, e
+# depois do banner. Ou seja: um run por pipe morre no meio em vez de recusar.
+#
+# A escolha é recusar aqui, com mensagem, e não "seguir com o default". Seguir
+# produziria um provisionamento parcial e silencioso, que é pior que não rodar.
+if [ ! -t 0 ]; then
+    echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
+    echo "" >&2
+    echo "stdin não é um terminal (pipe, redirecionamento ou CI). Nessas condições o" >&2
+    echo "comportamento seria morrer no meio, sem aviso, em vez de recusar — por isso" >&2
+    echo "a recusa é aqui." >&2
+    echo "" >&2
+    echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
+    echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
+    exit 1
 fi
 
-echo -e "${BLUE}=== Setup do Servidor Fedora (host de execução dos coding agents) ===${NC}\n"
+case "$PROFILE" in
+    host) echo -e "${BLUE}=== Setup do Fedora Workstation: workstation pessoal + hospedeiro de VMs ===${NC}\n" ;;
+    vm) echo -e "${BLUE}=== Setup da VM de agentes: a fronteira ===${NC}\n" ;;
+esac
 
 if should_run "git" || should_run "ssh"; then
     prompt_git_identity
@@ -690,7 +800,7 @@ fi
 
 CONFIRM_AI_CLIS=""
 if should_run "ai-clis"; then
-    confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) também diretamente no host Fedora? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
+    confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) nesta máquina? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
 fi
 
 # A senha do servidor do OpenCode é perguntada sempre que o módulo `ai-clis` for
@@ -706,8 +816,21 @@ if [ "$CONFIRM_AI_CLIS" = "1" ]; then
     confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a que o instalador gerar)" && CONFIRM_OPENCODE_PASSWORD=1
 fi
 
+# O opencodex tem a própria pergunta, separada da do ai-clis, e a separação é o
+# ponto: ele não é uma CLI local como as seis do ai-clis, é um proxy universal de
+# provider que fica no caminho das requisições de modelo. Instalar em silêncio o
+# que tem mais superfície, no módulo que pergunta sobre o que tem menos, era a
+# incoerência. Também fica só no perfil host: lá serve o uso pessoal de Codex e
+# Claude Code, e os agentes dentro da VM não o recebem — cada um usa a credencial
+# do provider direto.
+CONFIRM_OPENCODEX=""
+if should_run "opencodex"; then
+    confirm "Instalar o OpenCodex (ocx), um proxy de provider de terceiros que fica no caminho das requisições de modelo? (opt-in)" && CONFIRM_OPENCODEX=1
+fi
+
 CONFIRM_ZSHRC_OVERWRITE=0
-if { [ -e "$HOME/.zshrc" ] || [ -L "$HOME/.zshrc" ]; } \
+if should_run "zshrc" \
+    && { [ -e "$HOME/.zshrc" ] || [ -L "$HOME/.zshrc" ]; } \
     && [ "$(readlink "$HOME/.zshrc" 2>/dev/null)" != "$SCRIPT_DIR/zshrc" ]; then
     confirm "Já existe um ~/.zshrc. Substituir por um link para este repositório (o atual será salvo como backup)?" && CONFIRM_ZSHRC_OVERWRITE=1
 fi
@@ -1050,14 +1173,14 @@ EOF
 fi
 
 # ==============================================================================
-# CLIs de IA (opcional no host — rodarão principalmente dentro dos devcontainers)
+# CLIs de IA (guest apenas — é onde os agentes rodam; no host elas não têm papel)
 # ==============================================================================
 if should_run "ai-clis"; then
     echo -e "\n${BLUE}==> CLIs de IA${NC}"
     if [ "$CONFIRM_AI_CLIS" = "1" ]; then
         install_common_ai_clis
     else
-        echo -e "${YELLOW}Instalação de CLIs de IA no host ignorada (rodarão dentro dos devcontainers).${NC}"
+        echo -e "${YELLOW}Instalação de CLIs de IA ignorada (rodam dentro dos devcontainers, por projeto).${NC}"
     fi
 fi
 
@@ -1066,7 +1189,11 @@ fi
 # ==============================================================================
 if should_run "opencodex"; then
     echo -e "\n${BLUE}==> OpenCodex${NC}"
-    install_opencodex
+    if [ "$CONFIRM_OPENCODEX" = "1" ]; then
+        install_opencodex
+    else
+        echo -e "${YELLOW}OpenCodex ignorado (proxy de provider de terceiros, opt-in).${NC}"
+    fi
 fi
 
 # ==============================================================================
@@ -1082,6 +1209,16 @@ if should_run "zshrc"; then
     fi
 fi
 
-echo -e "\n${GREEN}=== Configuração do servidor finalizada! ===${NC}"
-echo -e "Próximo passo no Mac: configure o devpod com este servidor como provider SSH via Tailscale."
+# A mensagem final é por perfil porque o próximo passo mudou de destino: o devpod
+# passou a mirar a VM, não o host. Dizer "configure o devpod com este servidor"
+# aqui mandaria o Mac ao lugar errado.
+if [ "$PROFILE" = "vm" ]; then
+    echo -e "\n${GREEN}=== Configuração da VM de agentes finalizada! ===${NC}"
+    echo -e "Próximo passo: tire um snapshot desta VM como baseline, e no Mac aponte o"
+    echo -e "devpod para ela por provider SSH. Ver ARQUITETURA.md."
+else
+    echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
+    echo -e "Próximo passo: crie a VM de agentes no Cockpit e rode './setup.sh --profile=vm' dentro dela."
+    echo -e "A rede do libvirt, com o filtro de egress, é declarada por este repo. Ver ARQUITETURA.md."
+fi
 
