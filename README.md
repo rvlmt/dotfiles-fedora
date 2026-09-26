@@ -439,6 +439,133 @@ que não desabilite o rótulo, rótulos SELinux explícitos por imagem com
 política de rótulo, ou migrar o caso de uso para VM. Nenhuma delas é o padrão
 hoje.
 
+## Unidades criadas por instaladores de terceiros
+
+Duas units deste host são criadas por instaladores, não pelo `setup.sh`:
+`antigravity-cli-daemon.service` (do `agy`) e `opencode.service` (do opencode).
+O instalador não consulta o padrão, então o que ele escrever é estado de host
+**sem dono no repositório** — foi assim que o servidor do OpenCode ended up
+divergindo do padrão, com um ajuste de escuta feito à mão e que um `setup.sh` em
+um host novo não reproduziria.
+
+O padrão declara as duas por drop-in, não editando a unit: assim uma reescrita do
+instalador não desfaz o que o padrão quer, e as outras diretivas que ele define
+(`PATH`, `Restart`, `TimeoutStopSec`) ficam intactas.
+
+| Unit | Drop-in | O que declara |
+|---|---|---|
+| `antigravity-cli-daemon` | `…service.d/10-mise-path.conf` | o `PATH` do mise, para que o filho `npm exec` encontre o runtime |
+| `opencode` | `…service.d/10-bind.conf` | o endereço de escuta, `OPENCODE_BIND:OPENCODE_PORT` |
+
+A publicação na tailnet (`tailscale serve`) também é do padrão, e é declarada por
+`setup_opencode_serve` — com a ressalva de que ela não sobrescreve o que já
+estiver publicado.
+
+Regra para o próximo instalador que criar uma unit: ou o padrão a declara, ou ela
+vira passo manual documentado no README. O estado que ninguém possui é o que
+gera divergência silenciosa entre o host e o padrão.
+
+### Acesso remoto a serviços do host: loopback + tailnet
+
+Regra do host, aplicável a qualquer serviço que precise ser alcançado de fora:
+
+> **Escuta em loopback, publicação pela tailnet com HTTPS, em porta
+> dedicada.**
+
+`tailscale serve` faz a publicação e emite certificado para
+`https://<host>.<tailnet>.ts.net/`. Isso é tailnet-only, não abre porta no
+firewalld e não expõe na LAN.
+
+O caminho alternativo — escutar em `0.0.0.0` e alcançar o serviço pelo IP da
+tailnet — foi descartado. Além de incluir a interface WiFi local, alcançável por
+qualquer máquina da mesma rede, ele entregava o serviço sem TLS. No lugar dele, o
+OpenCode escuta em `127.0.0.1:49374` e a unit declara isso por drop-in.
+
+#### Uma porta por serviço; a 443 fica reservada
+
+Cada serviço escuta em loopback e é publicado em **porta HTTPS própria**. A 443
+fica reservada: é o slot para o serviço que você quiser ter mais à mão — um painel,
+não a ferramenta mais sensível.
+
+| Serviço | Escuta | Publicação na tailnet | Auth da app |
+|---|---|---|---|
+| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` | nenhuma — ver abaixo |
+| _(reservado)_ | — | `:443`, para o próximo serviço | — |
+
+Ao publicar um serviço novo: acrescente a linha na tabela com uma porta livre, e
+não troque o que já existe. `setup_opencode_serve` não sobrescreve config de outro
+serviço — se já houver algo publicado, avisa e devolve a decisão.
+
+#### O OpenCode não tem senha; a fronteira é a tailnet
+
+O instalador do OpenCode sobe o servidor com `serve --service`, que gera uma senha
+aleatória, guarda em `~/.config/opencode/service.json` e liga **HTTP basic auth**
+em `/api/*`. O padrão declara o comando **sem** `--service` e faz
+`UnsetEnvironment=OPENCODE_SERVER_PASSWORD`, então a API não exige credencial.
+
+Por que remover em vez de rotacionar: a senha vazou para uma sessão de agente
+sincronizada na nuvem, e o CLI não tem como rotacioná-la — `opencode pair` só
+reexibe. Remover a auth elimina o segredo em vez de tentar gerenciar um
+comprometido.
+
+**O que isso significa em troca:** sem basic auth, quem alcança a porta da tailnet
+chega à API inteira, que inclui ler qualquer arquivo (`/api/file/content`),
+**executar shell** (`/api/session/:id/shell`) e dirigir o agente
+(`/api/session/:id/message`). A fronteira passa a ser **a membership da
+tailnet** — hoje 6 aparelhos, todos da mesma conta. Se algum dia entrar um
+dispositivo ou uma conta de terceiros na tailnet, essa pessoa ganha shell neste
+host. Reavalie antes de adicionar alguém.
+
+É por isso que o padrão declara o comando inteiro, em vez de preservar as flags do
+instalador: preservar `--service` reintroduziria a senha silenciosamente em cada
+execução do `setup.sh`. A unit é `Type=simple`, então o servidor não precisa da
+flag para ficar em foreground.
+
+#### Por que porta, e não prefixo de caminho
+
+Duas razões independentes, e as duas importam:
+
+1. **Porta diferente é origem diferente.** Cookies, `localStorage` e CSP de um
+   serviço não alcançam o que está em outra porta. Prefixo de caminho no mesmo
+   hostname mantém a **mesma origem** e não isola nada — foi uma escolha
+   minha anterior, e ela estava errada.
+2. **O OpenCode não funciona fora da raiz.** A SPA é servida em qualquer path
+   (o backend responde 200 em `/opencode`), mas as chamadas de API em caminho
+   absoluto caem na raiz do host, onde não há handler, e a interface quebra com
+   `Unrecognised route!`. Só a raiz da própria origem serve.
+
+Se um dia um app tolerar prefixo e você quiser URLs sem porta, ainda assim prefira
+porta: o isolamento de origem é propriedade de segurança, não de estética.
+
+Aplicar mudanças de escuta ou publicação:
+
+```bash
+./setup.sh --only=ai-clis
+systemctl --user restart opencode
+tailscale serve status
+```
+
+A porta larga do firewalld (`1025-65535` na zona `FedoraWorkstation`) continua
+registrada como pendência em
+[#9](https://github.com/rvlmt/dotfiles-fedora/issues/9). Publicar pela tailnet
+reduz a dependência dela, mas não fecha o problema para os outros serviços.
+
+### `gh` é opcional; a base é git sobre SSH
+
+O padrão para agentes é `git` sobre SSH: `clone`, `fetch`, `branch`, `commit`,
+`push`, `diff` — sem token, sem keyring, sem estado que possa expirar. Push e
+pull por SSH funcionam mesmo com o `gh` inválido, e é isso que o padrão garante.
+
+O `gh` fica instalado pelo módulo `git` como **conveniência** para o que o `git`
+não faz: abrir e fechar PR, mexer em issue, rodar `gh pr checks`, `gh run`. A
+autenticação dele é interativa (`gh auth login`) e o token vive no keyring do
+GNOME, que é um serviço de usuário — se o keyring não subir, o `gh` falha em
+silêncio **sem** afetar o git.
+
+Consequência prática: um agente sem `gh` autenticado pode trabalhar em branch e
+subir código, mas **não** abre PR nem mexe em issue sem token. Se um fluxo
+depender disso, é decisão consciente e não omissão.
+
 ## Configurações Manuais Opcionais no Host (GUI ou Terminal)
 
 Caso você queira transformar o Fedora em um servidor autônomo sem intervenção física (ex.: recuperação após reboot para sessões RDP), essas configurações podem ser feitas sob demanda:

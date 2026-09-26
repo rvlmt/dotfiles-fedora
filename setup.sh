@@ -39,6 +39,34 @@ MISE_DEVCONTAINER_VERSION="0.89.0"
 MISE_BIN_PATH="$HOME/.local/bin/mise"
 MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 
+# Endereço e porta do servidor do OpenCode no host, declarados aqui para que um
+# host novo reproduza o mesmo estado — o instalador do opencode cria a unit sem
+# consultar estas escolhas.
+#
+# O servidor escuta só em loopback. O acesso remoto de outros pontos da tailnet
+# é feito por `tailscale serve` com HTTPS, declarado logo abaixo e aplicado por
+# setup_opencode_serve. A regra, válida para qualquer serviço do host que precise
+# de acesso remoto: escutar em loopback e expor pela tailnet. Escutar em
+# `0.0.0.0` foi descartado porque incluía a interface WiFi local, alcançável por
+# qualquer máquina da mesma rede, e sem TLS.
+OPENCODE_BIND="127.0.0.1"
+OPENCODE_PORT="49374"
+
+# Publicação na tailnet, em porta HTTPS dedicada.
+#
+# Porta própria, e não prefixo de caminho, por dois motivos independentes:
+#
+# 1. Isolamento de origem. Porta diferente É origem diferente, então cookies,
+#    localStorage e CSP não são compartilhados com o que estiver na 443. Prefixo
+#    de caminho mantém a mesma origem e não isola nada.
+# 2. O OpenCode não tolera ser servido fora da raiz. A SPA sobe em qualquer path,
+#    mas as chamadas de API em caminho absoluto caem na raiz do host, onde não há
+#    handler, e a interface quebra com "Unrecognised route!". Só a raiz da própria
+#    origem funciona.
+#
+# A 443 fica reservada: é o slot para o serviço que você quiser ter mais à mão.
+OPENCODE_SERVE_PORT="8443"
+
 # Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
 # (pré-exportados), senão pergunta com o default sugerido entre colchetes
 # (Enter aceita, digitar outra coisa sobrescreve só nesta execução).
@@ -196,6 +224,123 @@ Environment=\"PATH=$MISE_SHIMS_PATH:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/b
     echo -e "${YELLOW}  Aplique com: systemctl --user restart antigravity-cli-daemon${NC}"
 }
 
+# Declara no `tailscale serve` a publicação do servidor do OpenCode, para que o
+# acesso remoto de outros pontos da tailnet exista sem abrir porta no host.
+#
+# Idempotente por comparação de texto, e não por JSON: o formato da saída de
+# `tailscale serve status` muda entre versões do Tailscale, então a verificação
+# é deliberadamente tolerante e a função **revalida depois de agir**. Se a
+# premissa de formato estiver errada, a revalidação mostra o estado real em vez
+# de o script afirmar sucesso.
+#
+# Não sobrescreve config de outro serviço: se já houver algo publicado, o script
+# avisa e deixa a decisão para quem administra o host.
+setup_opencode_serve() {
+    local target="${OPENCODE_BIND}:${OPENCODE_PORT}"
+
+    if ! command -v tailscale &> /dev/null; then
+        echo -e "${YELLOW}Tailscale ausente; pulei a publicação do OpenCode.${NC}" >&2
+        return 1
+    fi
+    if ! tailscale status >/dev/null 2>&1; then
+        echo -e "${YELLOW}Tailscale não conectado; pulei a publicação do OpenCode.${NC}" >&2
+        return 1
+    fi
+
+    local current
+    current="$(tailscale serve status 2>/dev/null || true)"
+
+    local url="https://<host>.<tailnet>.ts.net:$OPENCODE_SERVE_PORT"
+
+    if printf '%s' "$current" | grep -qF -- "$target"; then
+        echo -e "${GREEN}✓ OpenCode já publicado na tailnet (:$OPENCODE_SERVE_PORT → $target).${NC}"
+        return 0
+    fi
+    if printf '%s' "$current" | grep -qE 'https?://|proxy'; then
+        echo -e "${YELLOW}Já existe serviço publicado no Tailscale e não é o OpenCode:${NC}"
+        printf '%s\n' "$current" | sed 's/^/    /'
+        echo -e "${YELLOW}  Não sobrescrevi. Para publicar o OpenCode, revise o que está acima.${NC}"
+        return 1
+    fi
+
+    # Sem prefixo de caminho: o app só funciona na raiz da própria origem.
+    if sudo tailscale serve --bg --https="$OPENCODE_SERVE_PORT" "http://$target"; then
+        echo -e "${GREEN}✓ OpenCode publicado na tailnet (:$OPENCODE_SERVE_PORT → $target).${NC}"
+        echo -e "${YELLOW}  Acesse por $url, com certificado do Tailscale.${NC}"
+    else
+        echo -e "${YELLOW}Não consegui publicar via tailscale serve.${NC}" >&2
+        echo -e "${YELLOW}  Publicar manualmente: sudo tailscale serve --bg --https=$OPENCODE_SERVE_PORT http://$target${NC}"
+        return 1
+    fi
+
+    # Revalidação: confirma o que o Tailscale realmente passou a servir.
+    local after
+    after="$(tailscale serve status 2>/dev/null || true)"
+    if printf '%s' "$after" | grep -qF -- "$target"; then
+        printf '%s\n' "$after" | sed 's/^/    /'
+    else
+        echo -e "${YELLOW}  Revise com 'tailscale serve status': o alvo esperado ($target) não apareceu.${NC}"
+        return 1
+    fi
+}
+
+# O instalador do opencode cria a unit opencode.service. Ela é estado de host
+# sem dono no padrão: um `setup.sh` em um host novo não reproduziria o ajuste de
+# escuta, e o servidor voltaria a ficar em loopback. Por isso a escuta é
+# declarada aqui, por drop-in: sobrevive a uma reescrita do instalador e não
+# encosta nas outras diretivas que ele define (PATH, Restart, TimeoutStopSec).
+#
+# Diferente das demais flags, aqui o padrão declara o comando INTEIRO em vez de
+# preservar o do instalador, porque é preciso **remover** `--service`: é essa
+# flag que faz o wrapper gerar uma senha aleatória e injetar
+# OPENCODE_SERVER_PASSWORD, o que liga basic auth em /api/*. Preservar a flag
+# reintroduziria a senha silenciosamente em cada execução do setup. A unit é
+# Type=simple, então o servidor não precisa de `--service` para ficar no
+# foreground, e sem ele não há geração de senha.
+setup_opencode_service() {
+    local unit="$HOME/.config/systemd/user/opencode.service"
+    local dropin_dir="$HOME/.config/systemd/user/opencode.service.d"
+    local dropin="$dropin_dir/10-bind.conf"
+    if [ ! -f "$unit" ]; then
+        return 0
+    fi
+
+    local exec_line bin
+    exec_line="$(sed -nE 's/^ExecStart=(.*)$/\1/p' "$unit" | head -1)"
+    if [ -z "$exec_line" ]; then
+        echo -e "${YELLOW}Não li o ExecStart de $unit; pulei o drop-in do OpenCode.${NC}" >&2
+        return 1
+    fi
+    bin="${exec_line%% *}"
+    if [ ! -x "$bin" ]; then
+        echo -e "${YELLOW}Binário $bin não é executável; pulei o drop-in do OpenCode.${NC}" >&2
+        return 1
+    fi
+
+    # Sem --service: sem senha. Sem outras flags do instalador: o padrão declara
+    # o comando, então uma flag nova do instalador não entra por accidento.
+    local new_line="$bin serve --hostname $OPENCODE_BIND --port $OPENCODE_PORT"
+
+    local expected="[Service]
+# Gerado por dotfiles-fedora (setup.sh): declara escuta em loopback e a ausencia
+# de senha do OpenCode. O instalador sobe com --service, que gera uma senha
+# aleatoria e liga basic auth em /api/*; aqui o comando e declarado sem ela, e a
+# fronteira passa a ser a membership da tailnet (ver README).
+UnsetEnvironment=OPENCODE_SERVER_PASSWORD
+ExecStart=
+ExecStart=$new_line"
+
+    mkdir -p "$dropin_dir"
+    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$expected" ]; then
+        echo -e "${GREEN}✓ Escuta do OpenCode já declarada ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
+        return 0
+    fi
+    printf '%s\n' "$expected" > "$dropin"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo -e "${GREEN}✓ Drop-in de escuta do OpenCode criado ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
+    echo -e "${YELLOW}  Aplique com: systemctl --user restart opencode${NC}"
+}
+
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
 install_npm_global() {
     local package="$1" bin_name="$2"
@@ -266,6 +411,14 @@ install_common_ai_clis() {
     # O daemon do agy roda "npm exec" fora de shell interativo, então precisa do
     # PATH do mise explicitado no serviço. Ver setup_agy_service_path.
     setup_agy_service_path
+
+    # A unit do opencode é criada pelo instalador sem consultar o padrão, então a
+    # escuta é declarada aqui. Ver setup_opencode_service.
+    setup_opencode_service
+
+    # Publicação na tailnet depois da unit, porque o alvo do proxy tem de existir
+    # para o tailscale serve ter o que publicar. Ver setup_opencode_serve.
+    setup_opencode_serve
 }
 
 # Instala a CLI do OpenCodex (@bitkyc08/opencodex) via Bun ou npm.
