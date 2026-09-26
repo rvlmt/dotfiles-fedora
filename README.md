@@ -157,15 +157,24 @@ mesmo repo pra justificar mantê-las separadas.
    pros passos completos (`devpod provider add ssh`, `devpod up`, etc).
 
 **Notas de segurança**: o SSH deste servidor fica restrito à interface
-Tailscale (sem exposição pública), login por senha é desabilitado, e o
-isolamento entre projetos/tarefas acontece no nível de container (Podman
-rootless) — não é necessário um usuário Linux dedicado para isso, já que o
-boundary real é o container, não o usuário do host.
+Tailscale (sem exposição pública). O módulo `sshd-hardening` desabilita login por
+senha, mas se recusa a aplicar enquanto `~/.ssh/authorized_keys` estiver vazio —
+confirme que existe chave autorizada antes de contar com isso. O isolamento entre
+projetos é de container (Podman rootless com `userns=keep-id`), e essa é a
+fronteira real aqui: **não** há usuário Linux dedicado neste host, e há uma etapa
+planejada para introduzi-lo. A postura completa, incluindo o que ela **não**
+cobre, está em
+[Postura de segurança do devcontainer](#postura-de-segurança-do-devcontainer-labeldisable).
 
 O template de devcontainer traz, por padrão:
 - **Limite de recursos** (`runArgs: --memory=4g --cpus=2`) — um agente com bug/loop não derruba o servidor inteiro. Ajuste por projeto.
 - **Credenciais escopadas por projeto**: um volume nomeado (`<projeto>-agent-home`), não um bind-mount do seu `$HOME` — autentique `gh auth login` uma vez dentro do container; fica isolado desse projeto e nunca usa sua chave SSH/config pessoal do host.
 - **Trilha de auditoria**: toda sessão de shell interativa é gravada em `$AGENT_LOG_DIR` (dentro do mesmo volume nomeado, fora do repositório) via `script` — útil pra revisar depois o que um agente autônomo executou de fato.
+
+Os três itens acima descrevem **o que o template traz**, não o que ele garante.
+O template é um arquétipo de agent sandbox, não é fronteira de host, e não deve
+receber código não confiável — a posição explícita está em
+[O que o template de agent sandbox não é](#o-que-o-template-de-agent-sandbox-não-é).
 
 ## Papéis de host: bare metal, VM e devcontainer
 
@@ -333,6 +342,102 @@ mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
 
 Nenhuma etapa deste runbook deve ser automatizada com `rm` por wildcard:
 os IDs revisados são parte do procedimento.
+
+## Postura de segurança do devcontainer (`label=disable`)
+
+Decisão registrada, que substitui a leitura deste workflow como confine
+SELinux. Resolvido em [#1](https://github.com/rvlmt/dotfiles-fedora/issues/1).
+
+### A decisão
+
+O provider Podman do Dev Container CLI em Linux injeta
+`--security-opt label=disable` quando executado por usuário regular contra
+Podman rootless. **Isso é aceito, com risco registrado.** O motivo é que a
+fronteira em que este workflow realmente repousa não é a MAC do SELinux, e
+sim o conjunto de controles abaixo. O que o `label=disable` remove é uma camada
+a mais, não a que estava segurando o caso de uso.
+
+O modo é adequado para **código de aplicação e de projeto**, que é o que roda
+nesses devcontainers. Ele **não** é adequado como fronteira para executar
+código semi-confiável ou não confiável.
+
+### O que sustenta a decisão
+
+- Podman rootless, sem privilégios: o container não roda como root no host.
+- `userns=keep-id` em `~/.config/containers/containers.conf`: o uid do container
+  é o uid real do usuário, então um bind-mount continua pertencendo a quem o
+  montou.
+- Separação por projeto: um container por workspace, com volumes nomeados
+  próprios, e nada compartilhado entre projetos.
+- Credenciais fora do workspace montado, e `GH_CONFIG_DIR`/credenciais de agente
+  nunca dentro do repositório.
+- `podman.socket` desabilitado: nada expõe a API do engine por TCP ou socket.
+
+### O que a decisão não é
+
+- Não é confine SELinux, e este modo não deve ser descrito como tal.
+- Não é fronteira de host. User namespaces rootless não isolam o kernel: um
+  escape ou um bug de kernel aterrissa no mesmo host, com o mesmo usuário.
+- Não é o mecanismo do agent sandbox. Ver
+  [a seção do template](#o-que-o-template-de-agent-sandbox-não-é) e a issue
+  [#3](https://github.com/rvlmt/dotfiles-fedora/issues/3): o sandbox não apoia
+  isolamento neste modo, e por isso ele é adiado sem implementação.
+- Não é uma afirmação de que código de terceiros possa ser executado aqui com
+  segurança. Para isso, a resposta é VM descartável ou host dedicado.
+
+### O que o template de agent sandbox não é
+
+Resposta explícita, para que ninguém herde a suposição de que o sandbox se
+apoia neste modo: **não.** O template `devcontainer-template/` **não** usa o
+modo `label=disable` como mecanismo de isolamento, e não há decisão que autorize
+a execução de código não confiável dentro dele.
+
+Os dois motivos, que independem um do outro:
+
+1. O modo não é fronteira de host, e o sandbox existe para executar código
+   escrito por agentes. Usá-lo ali seria exatamente a situação que a decisão
+   acima recusa.
+2. O template tem lacunas conhecidas que o tornam impróprio como fronteira,
+   independentemente do `label=disable`: base flutuante e antiga, instaladores de
+   CLI não pinados, auditoria que só cobre shell interativo, e credenciais
+   compartilhando volume com os logs. O levantamento está na issue
+   [#3](https://github.com/rvlmt/dotfiles-fedora/issues/3), que registra também
+   os gatilhos para retomar.
+
+Enquanto isso, o agent sandbox fica **sem execução**. As CLIs de agente que o
+`setup.sh` instala no host (módulo `ai-clis`, opt-in) são ferramenta de
+desenvolvimento do usuário, não código em isolamento: elas não rodam dentro de
+nenhum devcontainer, e por isso não se apoiam neste modo.
+
+### Precondições
+
+A decisão vale enquanto as cinco condições do bloco anterior forem verdadeiras
+para o host. Se alguma deixar de valer, a decisão precisa ser revista antes de
+continuar usando o workflow:
+
+1. Podman rootless e o CLI em `--docker-path podman`.
+2. `userns=keep-id` configurado.
+3. `podman.socket` desabilitado.
+4. Um container por projeto, sem volume compartilhado entre projetos.
+5. Nenhuma credencial de agente dentro do workspace montado.
+
+### Quando revisar
+
+Gatilhos, qualquer um basta:
+
+- o agent sandbox sair da issue #3 e passar a ser executado de verdade;
+- entrar código de terceiros não confiável neste host;
+- a etapa de usuário dedicado sem privilégios entrar em vigor — ela muda quem é
+  a vítima de um escape, e portanto o cálculo de risco, mas **não** devolve a
+  camada MAC;
+- o CLI passar a oferecer um provider que não injete `label=disable`, ou o
+  Podman passar a permitir um rótulo utilizável nesse caminho.
+
+Nessa revisão, as estratégias alternativas a considerar são: um provider do CLI
+que não desabilite o rótulo, rótulos SELinux explícitos por imagem com
+`--security-opt label=type:...`, o engine atrás de um serviço Podman com
+política de rótulo, ou migrar o caso de uso para VM. Nenhuma delas é o padrão
+hoje.
 
 ## Configurações Manuais Opcionais no Host (GUI ou Terminal)
 
