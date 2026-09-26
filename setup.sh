@@ -437,8 +437,10 @@ should_run() {
 
 # toolbx e gui-access são opcionais: só rodam se pedidos explicitamente via
 # --only, a menos que o usuário já tenha especificado um --skip próprio.
-# ai-clis e zshrc participam da execução normal, mas cada um pergunta antes
-# de agir (confirm()) — não precisam de --only.
+# ai-clis participa da execução normal e pergunta antes de agir (confirm()).
+# zshrc também participa da execução normal e não pergunta: o zsh é o shell de
+# login padrão do host. A única confirmação é sobre substituir um ~/.zshrc que
+# já exista e não seja o link deste repositório.
 if [ -z "$ONLY" ] && [ -z "$SKIP" ]; then
     SKIP="toolbx,gui-access"
 fi
@@ -478,13 +480,8 @@ if should_run "ai-clis"; then
     confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) também diretamente no host Fedora? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
 fi
 
-CONFIRM_ZSHRC=""
-if should_run "zshrc"; then
-    confirm "Usar o zshrc compartilhado (aliases git/docker/podman/bun) também neste servidor Fedora?" && CONFIRM_ZSHRC=1
-fi
-
 CONFIRM_ZSHRC_OVERWRITE=0
-if [ "$CONFIRM_ZSHRC" = "1" ] && { [ -e "$HOME/.zshrc" ] || [ -L "$HOME/.zshrc" ]; } \
+if { [ -e "$HOME/.zshrc" ] || [ -L "$HOME/.zshrc" ]; } \
     && [ "$(readlink "$HOME/.zshrc" 2>/dev/null)" != "$SCRIPT_DIR/zshrc" ]; then
     confirm "Já existe um ~/.zshrc. Substituir por um link para este repositório (o atual será salvo como backup)?" && CONFIRM_ZSHRC_OVERWRITE=1
 fi
@@ -847,19 +844,15 @@ if should_run "opencodex"; then
 fi
 
 # ==============================================================================
-# Link do .zshrc (opcional — pergunta antes de aplicar). Faz sentido agora que
-# o servidor tem sessão gráfica/RDP (gui-access), não só SSH.
-# ==============================================================================
+# O zsh é o shell de login padrão do host, então o zshrc versionado é quem é dono
+# do PATH interativo: mise, bun, ~/.local/bin e ~/.opencode/bin. O bloco em
+# ~/.bashrc cobre apenas os contextos bash restantes (su -, shell não interativo).
 if should_run "zshrc"; then
-    echo -e "\n${BLUE}==> Link do .zshrc${NC}"
-    if [ "$CONFIRM_ZSHRC" = "1" ]; then
-        sudo dnf install -y --skip-unavailable zsh zsh-autosuggestions zsh-syntax-highlighting
-        link_zshrc
-        if [ "$SHELL" != "$(command -v zsh)" ]; then
-            sudo chsh -s "$(command -v zsh)" "$USER" && echo -e "${GREEN}✓ Shell padrão alterado para zsh (efeito no próximo login).${NC}"
-        fi
-    else
-        echo -e "${YELLOW}zshrc compartilhado ignorado.${NC}"
+    echo -e "\n${BLUE}==> zsh como shell de login${NC}"
+    sudo dnf install -y --skip-unavailable zsh zsh-autosuggestions zsh-syntax-highlighting
+    link_zshrc
+    if [ "$SHELL" != "$(command -v zsh)" ]; then
+        sudo chsh -s "$(command -v zsh)" "$USER" && echo -e "${GREEN}✓ Shell padrão alterado para zsh (efeito no próximo login).${NC}"
     fi
 fi
 
