@@ -93,6 +93,12 @@ A chave SSH adicionada ao GitHub é revertida na seção `ssh`.
 ```bash
 sudo loginctl disable-linger "$USER"   # desfaz o "sobrevive ao logout"
 
+# O módulo desabilita o podman.socket, que já vem desabilitado por padrão no
+# Fedora. O inverso de "desabilitar" seria "habilitar", e é exatamente o que
+# este rollback NÃO faz: devolver ao estado anterior significa deixar como está.
+# Só habilite se você quiser a API do engine exposta:
+# sudo systemctl enable podman.socket
+
 # Remover as faixas de subuid/subgid (edite manualmente, dnf/usermod não
 # tem um comando direto de remoção):
 sudo sed -i "/^$USER:/d" /etc/subuid /etc/subgid
@@ -102,7 +108,7 @@ sed -i '/^userns = "keep-id"/d' ~/.config/containers/containers.conf
 
 # Desinstalar de vez (cuidado: containers/imagens locais ficam em
 # ~/.local/share/containers — apague à parte se quiser limpar tudo):
-sudo dnf remove podman podman-docker slirp4netns fuse-overlayfs
+sudo dnf remove podman slirp4netns fuse-overlayfs
 ```
 
 Se o `containers.conf` existia só por causa deste módulo, remova o arquivo em vez

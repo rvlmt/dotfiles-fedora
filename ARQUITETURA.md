@@ -49,7 +49,7 @@ Os pontos em aberto estão marcados como abertos, na seção
 ┌────────────────────────────▼─────────────────────────────────┐
 │ VM de agentes — A FRONTEIRA                                    │
 │ um container por projeto · CLIs de agente · servidor OpenCode │
-│ provisionada por setup.sh --profile vm · reset por snapshot    │
+│ provisionada por setup.sh --profile=vm · reset por snapshot   │
 └────────────────────────────┬─────────────────────────────────┘
                     rede: NAT + filtro; sem rota para a LAN
 ┌────────────────────────────▼─────────────────────────────────┐
@@ -113,9 +113,9 @@ pouco amplo" e passa a ser o elo errado da cadeia. Ver
 kickstart. O fluxo é:
 
 ```bash
-./setup.sh --profile host        # no host
+./setup.sh --profile=host        # no host
 # criar a VM no Cockpit — o Cockpit baixa a ISO
-./setup.sh --profile vm          # dentro da VM
+./setup.sh --profile=vm          # dentro da VM
 virsh snapshot-create ...         # baseline de reset
 ```
 
@@ -182,7 +182,7 @@ assumir.
 
 ## O repositório
 
-**Um repo, dois perfis.** `--profile host` e `--profile vm` são um **eixo novo,
+**Um repo, dois perfis.** `--profile=host` e `--profile=vm` são um **eixo novo,
 ortogonal** ao `--only`/`--skip` que já existe: o perfil escolhe o conjunto de
 módulos, e `--only`/`--skip` refinam por dentro.
 
@@ -289,7 +289,7 @@ pertenência de cada módulo ao perfil da camada que o executa — `podman` e
 `gui-access`/`toolbx` restritos ao host, e o resto nos dois.
 
 O eixo e a pertenência entraram **no mesmo PR**, e isso é deliberado: um
-`--profile host` que ainda instalasse Podman estaria mentindo desde o primeiro
+`--profile=host` que ainda instalasse Podman estaria mentindo desde o primeiro
 commit. Separá-los produziria estados intermediários em que a flag afirma algo
 falso, que é pior do que um PR maior.
 
