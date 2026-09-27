@@ -359,6 +359,25 @@ conjunto mínimo de regras são coisas diferentes.
 Então o `vm-host` **não declara rede**, e a pendência fica aqui. Quando a lista de
 serviços existir, a zona própria é uma decisão de uma vez, e a #10 fecha junto.
 
+## O perfil escolhido é responsabilidade de quem executa
+
+O script **não** impede `--profile=vm` num host físico, nem `--profile=host`
+dentro da VM. Quem executa é soberano, e a decisão é de propósito.
+
+Na prática, `--profile=vm` num host instala o que a seção [O host](#o-host) diz
+que sai dele — Podman, `subuid`, keep-id, as CLIs de agente. E `--profile=host`
+dentro da VM instala `desktop-apps`, habilita o `firewalld` e marca `tailscale0`
+como `trusted` no guest, o que a [postura de rede](#pendência-a-postura-de-rede-do-host)
+reprova. As duas coisas são visíveis depois: o host fica com container, ou a VM
+fica com a postura de rede errada. E quem fez isso de propósito pode querer
+exatamente isso — um ambiente único que é as duas coisas, como o host era antes
+desta mudança.
+
+Por isso não há `systemd-detect-virt` recusando. Um aviso existiria e seria
+ignorado no caso legítimo, e um erro bloquearia um uso válido. O que substitui a
+recusa é a leitura do que está escrito acima: cada perfil declara o que instala, e
+a lista é pública.
+
 ## Em aberto
 
 **Uma decisão pendente, e ela tem uma pré-condição que não existe:** a postura de
