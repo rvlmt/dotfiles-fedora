@@ -83,7 +83,7 @@ git config --global --unset user.email
 git config --global --unset init.defaultBranch
 git config --global --unset pull.rebase
 
-gh auth logout        # remove o token de ~/.config/gh/hosts.yml
+gh auth logout        # remove o token de ~/.config/gh/hosts.yml; só se o login de pessoa foi feito
 ```
 
 A chave SSH adicionada ao GitHub é revertida na seção `ssh`.

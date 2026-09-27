@@ -593,6 +593,21 @@ configure_git_and_gh() {
         return
     fi
 
+    # Login de pessoa é opt-in, e a razão é concreta: a GitHub App já dá identidade
+    # de máquina para a API que os agentes usam, e quem roda o `gh` à mão pode
+    # preferir não colocar um token de conta dentro da fronteira. Quem não quiser
+    # não responde nada nesta pergunta, e o módulo segue sem autenticar o `gh`.
+    if [ "${CONFIRM_GH_LOGIN:-0}" != "1" ]; then
+        echo -e "${YELLOW}Login de pessoa não solicitado: 'gh' segue sem token próprio.${NC}"
+        echo -e "${YELLOW}  A API dos agentes continua coberta pela GitHub App, pelo wrapper 'gh-app'.${NC}"
+        echo -e "${YELLOW}  Consequência: a chave SSH desta máquina NÃO é registrada no GitHub, porque${NC}" >&2
+        echo -e "${YELLOW}  registrar chave é um endpoint de usuário (POST /user/keys) e um token de${NC}" >&2
+        echo -e "${YELLOW}  instalação da App não o alcança. Para clonar e dar push por SSH, registre a${NC}" >&2
+        echo -e "${YELLOW}  chave uma vez, de uma máquina que já tenha o 'gh' autenticado:${NC}" >&2
+        echo -e "${YELLOW}    gh ssh-key add ~/.ssh/id_ed25519.pub --title '<esta VM>'${NC}" >&2
+        return
+    fi
+
     echo -e "${YELLOW}Iniciando handshake com o GitHub via navegador...${NC}"
     gh auth login -p https -w -s admin:public_key,read:user,user:email
 
@@ -959,16 +974,15 @@ provision_tailscale() {
 # servidor do OpenCode, e o `tailscale up` (que precisa de pausa porque a URL só
 # existe quando ele roda, e roda logo abaixo, depois do `sudo -v`).
 #
-# A ÚNICA pausa que ainda acontece no meio é o `gh auth login -w`, dentro do módulo
-# `git`: ele é uma definição de função, então aparece aqui no arquivo, mas executa
-# durante o provisionamento.
+# A ÚNICA pausa condicional que sobrou é o `gh auth login -w`, dentro do módulo
+# `git`: é uma definição de função, então aparece aqui no arquivo, mas executa
+# durante o provisionamento. Ela só acontece **se** a pergunta do login de pessoa
+# for respondida com `y`. Responder nada deixa o `gh` sem token próprio, com a
+# GitHub App cobrindo a API que os agentes usam.
 #
-# O módulo `gh-app` **não** remove essa pausa, e vale ser exato: ele dá identidade
-# de máquina para a API, pelo wrapper `gh-app`, mas `configure_git_and_gh` continua
-# chamando `gh auth login -w` interativamente, e `gh auth status` não enxerga o
-# `GH_TOKEN` — que só existe dentro do wrapper. Os dois convivem: o `gh` puro tem
-# login de pessoa, o `gh-app` tem identidade de máquina. Ligar o `GH_TOKEN` no
-# módulo `git` tiraria a pausa, e não está feito.
+# Os dois convivem de propósito: o `gh` puro tem login de pessoa, o `gh-app` tem
+# identidade de máquina. Ligar o `GH_TOKEN` no módulo `git` tiraria a pausa sem
+# perguntar nada, e não está feito.
 # ==============================================================================
 CURRENT_HOSTNAME=""
 NEW_HOSTNAME=""
@@ -1028,6 +1042,15 @@ fi
 if should_run "gh-app"; then
     CONFIRM_GH_APP=0
     prompt_github_app && CONFIRM_GH_APP=1 || true
+fi
+
+# O login de pessoa do `gh` tem a MESMA semântica da App, pelo motivo oposto: lá a
+# chave é a pergunta, aqui responder nada é a resposta. A ordem importa — a
+# pergunta do login vem depois da App, porque quem só quer identidade de máquina
+# não deve ver um pedido de token de conta antes de decidir isso.
+if should_run "git"; then
+    CONFIRM_GH_LOGIN=0
+    confirm "Autenticar o 'gh' com login de pessoa? (Enter = não; a GitHub App já cobre a API dos agentes)" && CONFIRM_GH_LOGIN=1
 fi
 
 # O opencodex tem a própria pergunta, separada da do ai-clis, e a separação é o
