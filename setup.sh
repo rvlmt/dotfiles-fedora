@@ -592,7 +592,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc"
+ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -604,7 +604,7 @@ ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolb
 #          OpenCode. É alcançada por SSH e não expõe nada na LAN.
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
-HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld toolbx gui-access desktop-apps opencodex zshrc"
+HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
 VM_STEPS="base ssh git tailscale sshd-hardening podman ai-clis zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
@@ -738,6 +738,8 @@ should_run() {
         [[ ",$ONLY," == *",$step,"* ]]
         return $?
     fi
+    # Opt-in só cede a --only. Declará-lo opcional e deixá-lo no caminho normal
+    # seria declarar uma coisa e fazer outra.
     if is_opt_in "$step"; then
         return 1
     fi
@@ -1065,6 +1067,57 @@ if should_run "firewalld"; then
 fi
 
 # ==============================================================================
+# Hospedeiro de VMs: libvirt + Cockpit
+# ==============================================================================
+#
+# O host hospeda a VM de agentes, e o Cockpit é onde ela é criada e gerenciada.
+# Este módulo é o **corte mínimo**: pacotes, grupo e socket. Ele não declara a
+# rede do libvirt.
+#
+# A rede fica de fora de propósito. Duas razões, e a segunda é a que pesa:
+#
+# 1. O default do libvirt resolve até existir medição, e medir exige uma VM real
+#    que ainda não existe.
+# 2. Declarar a rede exige saber **quais serviços o host vai expor**, e essa
+#    lista não está escrita. A regra do host é uma porta por serviço, então
+#    qualquer rede declarada agora seria um invariante que se quebra a cada
+#    serviço novo — e seria declarado contra um palpite.
+#
+# A postura de rede do host é pendência, não base. Ver ARQUITETURA.md.
+if should_run "vm-host"; then
+    echo -e "\n${BLUE}==> Hospedeiro de VMs (libvirt + Cockpit)${NC}"
+    sudo dnf install -y --skip-unavailable \
+        libvirt-daemon libvirt-client virt-install qemu-kvm cockpit-machines
+
+    # O grupo libvirt dá acesso à conexão de sistema do libvirt. Sem ele, o
+    # Cockpit não lista VM nenhuma e o virsh só conecta em qemu:///session.
+    if id -nG | tr ' ' '\n' | grep -qx libvirt; then
+        echo -e "${GREEN}✓ Usuário já está no grupo libvirt.${NC}"
+    else
+        sudo usermod -aG libvirt "$USER"
+        echo -e "${GREEN}✓ Usuário adicionado ao grupo libvirt.${NC}"
+        echo -e "${YELLOW}  Vale no próximo login: abra um shell novo antes de esperar ver VMs no Cockpit.${NC}"
+    fi
+
+    sudo systemctl enable --now cockpit.socket
+
+    # Pós-condição: a propriedade, não a lista de pacotes nem o grupo.
+    #
+    # Uma verificação por `id -nG` diria "está no grupo" mesmo sem o grupo ter
+    # chegado ao processo — porque o grupo só vale no próximo login. E é o
+    # `getgroups()` do processo que o libvirt consulta, então o teste que vale é
+    # o de verdade, dentro do grupo: é assim que a VM aparece no Cockpit hoje, e
+    # é o que a pós-condição tem de refletir.
+    if timeout 30 sg libvirt -c 'virsh -c qemu:///system list --all' >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ libvirt responde na conexão de sistema.${NC}"
+    else
+        echo -e "${YELLOW}Aviso: 'virsh -c qemu:///system' não respondeu em 30s.${NC}"
+        echo -e "${YELLOW}  Se você acabou de entrar no grupo libvirt, reconecte e rode de novo: o grupo só vale no próximo login.${NC}"
+        echo -e "${YELLOW}  Se já está no grupo há mais tempo, o que observar primeiro: 'journalctl -u virtqemud -n 30'.${NC}"
+    fi
+fi
+
+# ==============================================================================
 # Toolbx (opcional) — sandbox Podman rápida fora do contexto de um projeto/devpod
 # ==============================================================================
 if should_run "toolbx"; then
@@ -1219,6 +1272,7 @@ if [ "$PROFILE" = "vm" ]; then
 else
     echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
     echo -e "Próximo passo: crie a VM de agentes no Cockpit e rode './setup.sh --profile=vm' dentro dela."
-    echo -e "A rede do libvirt, com o filtro de egress, é declarada por este repo. Ver ARQUITETURA.md."
+    echo -e "A rede usada é a default do libvirt; o repo ainda não declara rede, porque a lista de"
+    echo -e "serviços que o host vai expor não está escrita. Ver ARQUITETURA.md."
 fi
 

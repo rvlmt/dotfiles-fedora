@@ -5,6 +5,37 @@ provisionamento é o [README](README.md); este documento existe para que o runbo
 tenha um alvo, e para que cada decisão fique na camada que apossui.
 
 Regra que o repo segue: **nada entra aqui como decisão sem aprovação explícita.**
+
+## Regra: o estado do host atual não é evidência
+
+**O que existe, ou não existe, na máquina de hoje não diz nada sobre o padrão.** O
+repositório descreve o estado **ideal** de um host novo. Medição de host atual não
+justifica, não corrige e não dimensiona decisão aqui — vale para disco, pacotes
+instalados, serviço ativo, VM definida, regra de firewall, senha e porta aberta.
+
+Isso já falhou mais de uma vez, e a falha tem sempre a mesma forma: um número ou um
+estado da máquina atual entra no documento como se fosse premissa do desenho, e a
+conclusão sai errada. Os casos ficam registrados aqui de propósito, para não se
+repetirem:
+
+- **O tamanho do store de container.** Um `du` em btrfs com `compress=zstd`
+  superestima, e a diferença entre `du` e `df` passou de dezenas de GB sem que
+  houvesse algo errado. O número de um host descartável não é a capacidade do
+  padrão.
+- **Se o daemon do `libvirt` estava instalado.** A pergunta certa não era essa,
+  mas a resposta dependia de qual pacote se testava, e a conclusão tirada dela
+  estava errada. Nada disso diz o que o `setup.sh` deve fazer.
+- **O que a zona do `firewalld` permite.** A conclusão "tirar a interface do
+  `trusted` resolve" veio de ler a zona, e o default amplo do Fedora faz a
+  publicação funcionar por outro caminho. O padrão declara a propriedade que
+  quer, não o que o default por acaso já faz.
+- **A senha do servidor do OpenCode.** Credencial de um host não descreve
+  comportamento de software, e foi um palpite sobre o software que quebrou.
+
+O que **é** válido medir, e é a diferença: medir o comportamento do **alvo**. Do
+`tailscaled` funcionando num guest com o filtro ativo, ou do `virsh` respondendo
+numa VM recém-criada, é medir o padrão. Medir o que a sua máquina já tem é medir
+outra coisa.
 Os pontos em aberto estão marcados como abertos, na seção
 [Em aberto](#em-aberto), e não aparecem aqui como decisão.
 
@@ -201,7 +232,7 @@ mesma da seção de divisão: **um módulo mora no perfil da camada que o execut
 | `sshd-hardening` | sim | sim | Os dois são alcançáveis por SSH. |
 | `hostname` | sim | — | No guest o hostname vem do formulário do Cockpit. |
 | `firewalld` | sim | — | O host guarda o egress. O guest é NAT e não é exposto. |
-| `vm-host` *(novo)* | sim | — | `libvirt`, `cockpit-machines`, grupo `libvirt`, rede com o filtro. |
+| `vm-host` | sim | — | `libvirt`, `cockpit-machines`, grupo `libvirt`. Sem rede: pendência. |
 | `desktop-apps` | sim | — | Workstation pessoal. No guest quem edita é o devcontainer. |
 | `gui-access` | sim | — | RDP para a tela do host. |
 | `toolbx` | sim | — | Sandbox pessoal fora de projeto. No guest quem isola é o devcontainer. |
@@ -239,10 +270,11 @@ Cada perfil verifica no final o que ele mesmo deixou. Não é suíte de testes �
 afirmações que o script faz sobre o próprio resultado, e são a resposta
 proporcional ao fato de o repo não ter verificação automática.
 
-- **`host`:** daemon `libvirt` ativo; usuário no grupo `libvirt`; rede do libvirt
-  definida; `tailscale0` **fora** da zona `trusted`; e **a VM não alcança a LAN** —
-  que é a pós-condição do filtro de egress, e vale mesmo quando o default do
-  `firewalld` já cumpre, porque ela verifica a propriedade e não a implementação.
+- **`host`:** `virsh -c qemu:///system` responde, testado **dentro do grupo
+  `libvirt`** (`sg libvirt -c ...`). Testar o grupo com `id -nG` seria mentira: o
+  grupo só chega ao processo no próximo login, e é o `getgroups()` do processo que
+  o libvirt consulta. `tailscale0` fora da zona `trusted` e a VM sem rota para a LAN
+  são pós-condições **pendentes**, porque dependem da decisão de rede.
 - **`vm`:** `userns=keep-id` efetivo; `podman.socket` desabilitado;
   **`podman-docker` ausente**; cgroup v2 presente; `user.max_user_namespaces` acima
   de zero; um container por projeto, sem volume compartilhado; e o `firewalld` do
@@ -266,17 +298,18 @@ alto se o módulo não pertence à camada, porque isso é erro de quem pediu e
 silenciar poderia instalar Podman no host por engano. `--skip` de um módulo fora
 do perfil apenas avisa, porque pular o que não roda é inócuo.
 
+**Feito depois.** O módulo `vm-host` no perfil `host`, no corte mínimo: pacotes,
+grupo `libvirt` e `cockpit.socket`. Ele **não** declara a rede do libvirt — ver a
+[pendência de rede](#pendência-a-postura-de-rede-do-host).
+
 **Falta, nesta ordem.**
 
-1. `vm-host` no perfil `host`: `libvirt`, `cockpit-machines`, grupo `libvirt`, e
-   a rede com o filtro de egress — que é do repo porque o Cockpit não expressa
-   regra.
-2. As pós-condições de cada perfil.
-3. As correções no template do devcontainer, que são do guest: colisão do nome de
+1. As pós-condições de cada perfil, à parte das do `vm-host` que já existem.
+2. As correções no template do devcontainer, que são do guest: colisão do nome de
    volume, base `bullseye` com LTS encerrado, ausência de `--pids-limit`, e
    `safe.directory '*'`.
-4. Tirar `tailscale0` da zona `trusted` no host.
-5. O mecanismo do filtro de egress, **depois** de medido.
+3. Tirar `tailscale0` da zona `trusted` no host, com a zona própria.
+4. O mecanismo do filtro de egress, **depois** de medido.
 
 O filtro é o último de propósito: é o único item que depende de uma medição que
 só uma VM real dá. Fazer antes seria escrever regra de firewall no repo sem nunca
@@ -296,19 +329,41 @@ padrão, e que não foi decidido aqui: **o que uma execução verdadeiramente n�
 interativa deveria fazer** (instalar com defaults declarados? exigir flags
 explícitas? recusar?). Recusar é o comportamento seguro, não o completo.
 
+## Pendência: a postura de rede do host
+
+Não é base, e **não é decidível agora**. Duas coisas estão erradas no host e
+nenhuma delas tem correção possível antes de um dado que ainda não existe:
+
+1. `tailscale0` está na zona `trusted`, que aceita todo tráfego de toda a tailnet.
+2. A zona `FedoraWorkstation` tem `1025-65535/tcp` e `1025-65535/udp` abertos, e é
+   o **default do próprio Fedora** — está no XML do pacote, com a intenção
+   documentada de liberar portas altas para apps de desktop.
+
+O que a medição mostrou, e que é o ponto não óbvio: **tirar a interface do
+`trusted` não conserta nada.** A publicação na 8443 funciona porque a zona default
+libera toda porta alta, não porque a interface estivesse em `trusted`. A interface
+cairia no default e a exposição continuaria idêntica.
+
+A correção na ordem certa seria: `tailscale0` sai do `trusted`; `tailscale0` ganha
+uma **zona própria** que permite só o que precisa; e só então fecha o
+`1025-65535` da `FedoraWorkstation`, que é a [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10).
+
+**Por que não agora.** O passo do meio exige saber quais portas `tailscale0`
+precisa. A regra do host é uma porta por serviço, e a lista de serviços que o host
+vai expor não está escrita — o próprio OpenCode vai migrar para a VM, e há outros
+a definir. Declarar uma zona hoje seria escrever um invariante com um conjunto
+conhecidamente incompleto, que se quebra a cada serviço novo. E o
+`ARQUITETURA.md` diz que a 443 fica reservada: reserva de porta e uma zona com um
+conjunto mínimo de regras são coisas diferentes.
+
+Então o `vm-host` **não declara rede**, e a pendência fica aqui. Quando a lista de
+serviços existir, a zona própria é uma decisão de uma vez, e a #10 fecha junto.
+
 ## Em aberto
 
-Nenhuma decisão pendente. As quatro que estavam abertas foram fechadas, e o que
-sobra são **duas medições** que gates da implementação, não escolhas:
-
-1. **O default do host já bloqueia o egress da VM para a LAN?** A zona `libvirt` já
-   existe com `forward: no`, e o libvirt vai ligar o `ip_forward` e inserir as regras
-   dele quando a VM subir. Se os dois se combinarem para bloquear, o repo declara só
-   a pós-condição. Se não, entra a policy de zona para zona no `firewalld`.
-2. **O que quebra primeiro com o filtro ativo:** o DNS do guest, que passa pelo
-   host, ou o túnel do Tailscale, que precisa de saída para o servidor de
-   coordenação e para o DERP. Medir antes de declarar é o que evita descobrir isso
-   com a VM já em uso.
+**Uma decisão pendente, e ela tem uma pré-condição que não existe:** a postura de
+rede do host. Ver
+[Pendência: a postura de rede do host](#pendência-a-postura-de-rede-do-host).
 
 ## Decisões que precisaram de revisão, e por quê
 
