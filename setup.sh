@@ -45,7 +45,7 @@ MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 # São dois instaladores em URLs diferentes: a linha 1 fica em `opencode.ai/install`
 # e a linha 2 em `opencode.ai/v2/install`. O "latest" do primeiro é a linha 1.x —
 # foi o que instalou a v1 numa VM de agentes, e a v1 não tem o subcomando `service`
-# que o próprio script usa em `prompt_opencode_password` para definir a senha do
+# que o próprio script usa em `apply_opencode_password` para definir a senha do
 # servidor. Separar as duas URLs é o que impede a divergência entre máquinas.
 #
 # A versão é pinada como o mise e o Dev Container CLI: para subir o pin, altera o
@@ -252,35 +252,28 @@ Environment=\"PATH=$MISE_SHIMS_PATH:$HOME/.bun/bin:$HOME/.local/bin:/usr/local/b
 #
 # O servidor lê a senha no start, então o serviço precisa ser reiniciado depois
 # para a troca valer.
-prompt_opencode_password() {
+# Aplica a senha lida no bloco de perguntas. Só aplicar, nunca ler: a leitura
+# acontece uma vez, no começo, para que o script não pare no meio do caminho. Ver o
+# bloco de confirmações antecipadas.
+apply_opencode_password() {
     local oc="${OPENCODE_BIN:-}"
     if [ -z "$oc" ] || [ ! -x "$oc" ]; then
         echo -e "${YELLOW}Binário do OpenCode não encontrado; pulei a senha.${NC}" >&2
         return 1
     fi
 
-    echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
-    echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
-    if [ -f "$HOME/.config/opencode/service.json" ]; then
-        echo -e "  Em branco, mantém a senha atual de ~/.config/opencode/service.json."
-    else
-        echo -e "  Em branco, aceita a senha aleatória que o instalador vai gerar."
-    fi
-    read -r -s -p "  Senha nova (vazio = manter): " opencode_pw
-    echo
-
-    if [ -z "$opencode_pw" ]; then
-        unset opencode_pw
+    if [ "${OPENCODE_PASSWORD_SET:-}" != "1" ] || [ -z "${OPENCODE_PASSWORD:-}" ]; then
         echo -e "${YELLOW}Mantida a senha atual.${NC}"
+        unset OPENCODE_PASSWORD
         return 0
     fi
 
-    if ! "$oc" service set password "$opencode_pw"; then
-        unset opencode_pw
+    if ! "$oc" service set password "$OPENCODE_PASSWORD"; then
+        unset OPENCODE_PASSWORD
         echo -e "${YELLOW}Não consegui definir a senha.${NC}" >&2
         return 1
     fi
-    unset opencode_pw
+    unset OPENCODE_PASSWORD
     echo -e "${GREEN}✓ Senha do OpenCode definida.${NC}"
     echo -e "${YELLOW}  Aplique com: systemctl --user restart opencode${NC}"
 }
@@ -505,7 +498,7 @@ install_common_ai_clis() {
     # escuta é declarada aqui. Ver setup_opencode_service.
     # As quatro chamadas abaixo são o mesmo padrão: um passo que pode não ser
     # completável *agora*, e cujo insucesso não invalida o que já foi instalado.
-    # `prompt_opencode_password` devolve 1 quando não há binário, e
+    # `apply_opencode_password` devolve 1 quando não há binário, e
     # `setup_opencode_serve` devolve 1 quando o Tailscale ainda não está instalado —
     # o que é a situação normal de quem roda `--only=ai-clis` antes do módulo
     # `tailscale`. Sem o `||`, o `set -e` do topo do script transforma "deixei para
@@ -521,9 +514,11 @@ install_common_ai_clis() {
         || echo -e "${YELLOW}Não consegui ler o ExecStart da unit do OpenCode, ou o binário não é executável; o drop-in de escuta ficou por aplicar.${NC}" >&2
 
     # A senha do servidor é obrigatória; deixamos quem administra escolher em vez
-    # de ficar com a aleatória do instalador. Ver prompt_opencode_password.
+    # de ficar com a aleatória do instalador. O valor foi lido no bloco de
+    # perguntas, e a variável é apagada assim que é aplicada. Ver
+    # apply_opencode_password.
     if [ "${CONFIRM_OPENCODE_PASSWORD:-}" = "1" ]; then
-        prompt_opencode_password \
+        apply_opencode_password \
             || echo -e "${YELLOW}Senha do OpenCode não foi alterada; a do instalador foi mantida.${NC}" >&2
     fi
 
@@ -827,10 +822,52 @@ if should_run "git" || should_run "ssh"; then
     prompt_git_identity
 fi
 
+provision_tailscale() {
+    if ! command -v tailscale &> /dev/null; then
+        # Repo oficial + dnf install, em vez de "curl | sh": o instalador oficial
+        # da Tailscale faz exatamente isso por baixo dos panos, mas preferimos
+        # ser explícitos aqui — sem rodar um script remoto como root a cada vez,
+        # e com verificação GPG nativa do dnf nos pacotes.
+        TAILSCALE_REPO_URL="https://pkgs.tailscale.com/stable/fedora/tailscale.repo"
+        sudo dnf config-manager addrepo --from-repofile="$TAILSCALE_REPO_URL"
+        sudo dnf install -y tailscale
+        echo -e "${GREEN}✓ Tailscale instalado.${NC}"
+    else
+        echo -e "${YELLOW}Tailscale já instalado.${NC}"
+    fi
+
+    sudo systemctl enable --now tailscaled
+
+    if ! sudo tailscale status &> /dev/null; then
+        echo -e "${YELLOW}Rodando 'tailscale up' — abra o link exibido para autenticar.${NC}"
+        # Sem --ssh de propósito: o Tailscale SSH exige reautenticação
+        # interativa via navegador sempre que a política da tailnet tiver
+        # "action: check" nos grants de ssh (o default da maioria das
+        # tailnets) — quebra qualquer ferramenta que não sabe abrir um
+        # navegador (Codex Desktop, devpod não-interativo, etc.), e tem
+        # aviso oficial de incompatibilidade com SELinux enforcing no
+        # Fedora. O acesso SSH de verdade já é coberto pelo módulo
+        # sshd-hardening (só chave, sem senha) + firewalld (sshd só na
+        # interface tailscale0) — sem depender de reautenticação alguma.
+        sudo tailscale up
+    else
+        echo -e "${GREEN}✓ Tailscale já conectado.${NC}"
+    fi
+}
+
 # ==============================================================================
-# Confirmações antecipadas — tudo que pede "y/N" é perguntado aqui, no
-# começo, pra você poder sair de perto do terminal depois e o script rodar
-# até o fim sem parar no meio esperando resposta.
+# Confirmações antecipadas — tudo que pergunta é perguntado aqui, no começo, pra
+# você poder sair de perto do terminal depois e o script rodar até o fim sem parar
+# no meio esperando resposta.
+#
+# Cobre hoje: identidade Git, hostname, `sshd-hardening`, `ai-clis`, a senha do
+# servidor do OpenCode, e o `tailscale up` (que precisa de pausa porque a URL só
+# existe quando ele roda, e roda logo abaixo, depois do `sudo -v`).
+#
+# A ÚNICA pausa que ainda acontece no meio é o `gh auth login -w`, dentro do módulo
+# `git`: ele é uma definição de função, então aparece aqui no arquivo, mas executa
+# durante o provisionamento. Some quando a GitHub App entrar, porque com `GH_TOKEN`
+# vindo da App o `gh` deixa de ser interativo. Ver `configure_git_and_gh`.
 # ==============================================================================
 CURRENT_HOSTNAME=""
 NEW_HOSTNAME=""
@@ -865,8 +902,22 @@ fi
 # O valor em si é lido no momento do uso, porque segurar um segredo numa variável
 # durante o script inteiro é pior do que travar o terminal uma vez.
 CONFIRM_OPENCODE_PASSWORD=""
+OPENCODE_PASSWORD=""
+OPENCODE_PASSWORD_SET=0
 if [ "$CONFIRM_AI_CLIS" = "1" ]; then
     confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a que o instalador gerar)" && CONFIRM_OPENCODE_PASSWORD=1
+    if [ "$CONFIRM_OPENCODE_PASSWORD" = "1" ]; then
+        echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
+        echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
+        if [ -f "$HOME/.config/opencode/service.json" ]; then
+            echo -e "  Em branco, mantém a senha atual de ~/.config/opencode/service.json."
+        else
+            echo -e "  Em branco, aceita a senha aleatória que o instalador vai gerar."
+        fi
+        read -r -s -p "  Senha nova (vazio = manter): " OPENCODE_PASSWORD
+        echo
+        OPENCODE_PASSWORD_SET=1
+    fi
 fi
 
 # O opencodex tem a própria pergunta, separada da do ai-clis, e a separação é o
@@ -897,6 +948,17 @@ sudo -v
 ( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
 SUDO_KEEPALIVE_PID=$!
 trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
+
+# A única pausa do script fica aqui, imediatamente depois de `sudo -v` e antes de
+# qualquer módulo. O `tailscale up` precisa de pausa porque a URL de autenticação
+# só existe quando ele roda, e ele precisa do pacote instalado — por isso a
+# instalação vai junto, e é por isso que a chamada mora depois do `sudo -v` e não
+# no meio do bloco de perguntas. Se o módulo `tailscale` for pulado, a pausa também
+# é pulada. Em reexecução, com o nó já autenticado, `provision_tailscale` não
+# pausa. Ver provision_tailscale.
+if should_run "tailscale"; then
+    provision_tailscale
+fi
 
 # ==============================================================================
 # Base do sistema (dnf update + ferramentas essenciais de linha de comando)
@@ -1063,38 +1125,14 @@ fi
 # ==============================================================================
 # Tailscale (rede segura entre o Mac e este servidor, sem exposição pública)
 # ==============================================================================
+# Instala, habilita e autentica o Tailscale. Vive numa função porque é chamada de
+# dois lugares: do bloco de perguntas, para que a pausa do `tailscale up` aconteça
+# uma vez e cedo; e do módulo, que reexecuta por idempotência. A segunda chamada
+# encontra o nó já autenticado e não pausa.
+
 if should_run "tailscale"; then
     echo -e "\n${BLUE}==> Tailscale${NC}"
-    if ! command -v tailscale &> /dev/null; then
-        # Repo oficial + dnf install, em vez de "curl | sh": o instalador oficial
-        # da Tailscale faz exatamente isso por baixo dos panos, mas preferimos
-        # ser explícitos aqui — sem rodar um script remoto como root a cada vez,
-        # e com verificação GPG nativa do dnf nos pacotes.
-        TAILSCALE_REPO_URL="https://pkgs.tailscale.com/stable/fedora/tailscale.repo"
-        sudo dnf config-manager addrepo --from-repofile="$TAILSCALE_REPO_URL"
-        sudo dnf install -y tailscale
-        echo -e "${GREEN}✓ Tailscale instalado.${NC}"
-    else
-        echo -e "${YELLOW}Tailscale já instalado.${NC}"
-    fi
-
-    sudo systemctl enable --now tailscaled
-
-    if ! sudo tailscale status &> /dev/null; then
-        echo -e "${YELLOW}Rodando 'tailscale up' — abra o link exibido para autenticar.${NC}"
-        # Sem --ssh de propósito: o Tailscale SSH exige reautenticação
-        # interativa via navegador sempre que a política da tailnet tiver
-        # "action: check" nos grants de ssh (o default da maioria das
-        # tailnets) — quebra qualquer ferramenta que não sabe abrir um
-        # navegador (Codex Desktop, devpod não-interativo, etc.), e tem
-        # aviso oficial de incompatibilidade com SELinux enforcing no
-        # Fedora. O acesso SSH de verdade já é coberto pelo módulo
-        # sshd-hardening (só chave, sem senha) + firewalld (sshd só na
-        # interface tailscale0) — sem depender de reautenticação alguma.
-        sudo tailscale up
-    else
-        echo -e "${GREEN}✓ Tailscale já conectado.${NC}"
-    fi
+    provision_tailscale
 fi
 
 # ==============================================================================
@@ -1351,6 +1389,45 @@ if should_run "zshrc"; then
     if [ "$SHELL" != "$(command -v zsh)" ]; then
         sudo chsh -s "$(command -v zsh)" "$USER" && echo -e "${GREEN}✓ Shell padrão alterado para zsh (efeito no próximo login).${NC}"
     fi
+fi
+
+# O que falta depois do provisionamento, dito no fim e não no meio. As seis CLIs de
+# agente são instaladas pelo módulo `ai-clis` mas não são autenticadas por ele: cada
+# uma tem o próprio login, e nenhuma delas é coberta por este script.
+#
+# O que é verificado aqui é factual e restrito: o binário existe, e existe um
+# diretório de configuração. **Presença de configuração não é prova de
+# autenticação** — nenhuma CLI expõe um subcomando estável de "estado da
+# autenticação", e inventar um seria pior que dizer que não se sabe. O que o
+# relatório faz é apontar o que existe e o que não existe, e dizer onde autenticar.
+if should_run "ai-clis"; then
+    echo -e "\n${BLUE}==> CLIs de agente: o que ainda falta${NC}"
+    _falta=0
+    while IFS='|' read -r _cli _dir; do
+        [ -z "$_cli" ] && continue
+        _bin=$(command -v "$_cli" 2>/dev/null || echo "$HOME/.bun/bin/$_cli")
+        if [ ! -x "$_bin" ]; then
+            printf '  %-14s %-22s %s\n' "$_cli" "binário ausente" "rode o módulo ai-clis"
+            _falta=1
+        elif [ -e "$HOME/$_dir" ]; then
+            printf '  %-14s %-22s %s\n' "$_cli" "config presente" "confirme com: $_cli --help"
+        else
+            printf '  %-14s %-22s %s\n' "$_cli" "sem config" "autentique com: $_cli"
+            _falta=1
+        fi
+    done <<'CLI_LIST'
+claude|.claude
+codex|.codex
+gemini|.gemini
+copilot|.config/gh
+cursor-agent|.cursor-agent
+agy|.agy
+opencode|.config/opencode
+CLI_LIST
+    if [ "$_falta" = "1" ]; then
+        echo -e "${YELLOW}  As CLIs acima sem config ou sem binário ainda não estão prontas para uso.${NC}"
+    fi
+    unset _cli _dir _bin _falta
 fi
 
 # A mensagem final é por perfil porque o próximo passo mudou de destino: o devpod
