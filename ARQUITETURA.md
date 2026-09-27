@@ -253,6 +253,7 @@ mesma da seção de divisão: **um módulo mora no perfil da camada que o execut
 | `hostname` | sim | — | No guest o hostname vem do formulário do Cockpit. |
 | `firewalld` | sim | — | O host guarda o egress. O guest é NAT e não é exposto. |
 | `vm-host` | sim | — | `libvirt`, `cockpit-machines`, grupo `libvirt`. Sem rede: pendência. |
+| `gh-app` | — | sim | Identidade de máquina para a API do GitHub. A private key nunca entra no repo; fica em `~/.config/gh-app/` a `600`. |
 | `desktop-apps` | sim | — | Workstation pessoal. No guest quem edita é o devcontainer. |
 | `gui-access` | sim | — | RDP para a tela do host. |
 | `toolbx` | sim | — | Sandbox pessoal fora de projeto. No guest quem isola é o devcontainer. |
@@ -304,9 +305,9 @@ proporcional ao fato de o repo não ter verificação automática.
 ### Ordem de implementação
 
 **Feito.** O eixo `--profile` na CLI, ortogonal ao `--only`/`--skip`, e a
-pertenência de cada módulo ao perfil da camada que o executa — `podman` e
-`ai-clis` no guest, `opencodex` no host, `firewalld`/`hostname`/`desktop-apps`/
-`gui-access`/`toolbx` restritos ao host, e o resto nos dois.
+pertenência de cada módulo ao perfil da camada que o executa — `podman`,
+  `ai-clis` e `gh-app` no guest, `opencodex` no host, `firewalld`/`hostname`/
+  `desktop-apps`/`gui-access`/`toolbx` restritos ao host, e o resto nos dois.
 
 O eixo e a pertenência entraram **no mesmo PR**, e isso é deliberado: um
 `--profile=host` que ainda instalasse Podman estaria mentindo desde o primeiro

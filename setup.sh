@@ -638,7 +638,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
+ALL_STEPS="base hostname ssh git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -651,7 +651,7 @@ ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld vm-ho
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
 HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
-VM_STEPS="base ssh git tailscale sshd-hardening podman ai-clis zshrc"
+VM_STEPS="base ssh git gh-app tailscale sshd-hardening podman ai-clis zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
 OPT_IN_STEPS="toolbx gui-access"
@@ -822,6 +822,101 @@ if should_run "git" || should_run "ssh"; then
     prompt_git_identity
 fi
 
+# Pede a App ID e a private key, e grava num par de arquivos 600.
+#
+# A chave é lida linha a linha num laço, e não com um `read` único, porque um PEM
+# tem várias linhas: um `read` pegaria só a primeira e o resto viraria comando do
+# shell. O laço para no marcador `-----END ... PRIVATE KEY-----` e tem um teto de
+# linhas, para não ficar esperando para sempre se o paste vier truncado.
+#
+# A chave é guardada em arquivo, e não em variável que atravesse o script: o
+# objetivo de não travar o terminal no meio é que o operador possa sair de perto,
+# e um segredo em memória durante toda a execução seria a contrapartida disso. O
+# arquivo é 600 e nunca entra no repositório.
+GH_APP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gh-app"
+GH_APP_KEY_FILE="$GH_APP_DIR/private-key.pem"
+GH_APP_ID_FILE="$GH_APP_DIR/app-id"
+
+prompt_github_app() {
+    echo -e "${BLUE}GitHub App — identidade da máquina no GitHub${NC}"
+    echo -e "  É o que permite abrir PR, escrever issue e comentar sem token de conta."
+    echo -e "  A App precisa estar instalada nos repositórios que a VM vai tocar."
+    # Em branco mantém o que já está em disco. Sem isto toda reexecução exigiria
+    # colar a chave de novo, e o pior efeito seria silencioso: com a App já
+    # configurada e o prompt pulado, o módulo não reinstala nem revalida os
+    # executáveis, e o relatório mente sobre o estado real da máquina.
+    local app_id="" key="" linha
+    if [ -s "$GH_APP_KEY_FILE" ] && [ -s "$GH_APP_ID_FILE" ]; then
+        echo -e "  Já há uma App configurada. Em branco mantém; qualquer outro valor substitui."
+        read -r -p "  App ID: " app_id
+        if [ -z "$app_id" ]; then
+            echo -e "${GREEN}  Mantida a App já configurada em $GH_APP_DIR.${NC}"
+            return 0
+        fi
+    else
+        read -r -p "  App ID (Settings da App → General): " app_id
+        if [ -z "$app_id" ]; then
+            echo -e "${YELLOW}  Sem App ID: o módulo gh-app fica inativo e o gh exigirá login.${NC}"
+            return 1
+        fi
+    fi
+
+    echo -e "  Cole a private key inteira. O script para no marcador END; a leitura é muda, nada é ecoado."
+    echo -e "  Uma linha em branco no começo cancela e deixa o módulo inativo."
+    local limite=60
+    while IFS= read -r -s linha; do
+        # Linha em branco no primeiro passo cancela. Um PEM colado não tem linha
+        # em branco, então isso não atrapalha o caminho normal — e dá uma saída
+        # para quem digitou um App ID e mudou de ideia, porque sem isto o laço
+        # ficaria esperando 60 linhas que nunca vêm, num pty que não devolve EOF.
+        if [ -z "$key" ] && [ -z "$linha" ]; then
+            unset key linha
+            echo -e "${YELLOW}  Sem private key: o módulo gh-app fica inativo.${NC}" >&2
+            return 1
+        fi
+        key+="$linha"$'\n'
+        case "$linha" in
+            *"-----END "*"PRIVATE KEY-----") break ;;
+        esac
+        limite=$((limite - 1))
+        if [ "$limite" -le 0 ]; then
+            echo -e "${YELLOW}  A chave não chegou ao marcador END em 60 linhas; descartando.${NC}" >&2
+            unset key linha
+            return 1
+        fi
+    done
+
+    if [ -z "$key" ]; then
+        echo -e "${YELLOW}  Sem private key: o módulo gh-app vai ficar inativo.${NC}" >&2
+        return 1
+    fi
+
+    # Valida **antes** de gravar. Sem isto, um Ctrl-D no meio do paste deixaria um
+    # arquivo truncado em disco com a App marcada como configurada, e o "gravados"
+    # seria mentira. A validação é local e não usa API.
+    local PROV=$(mktemp)
+    printf '%s' "$key" > "$PROV"
+    if ! openssl pkey -in "$PROV" -noout &>/dev/null; then
+        rm -f "$PROV"; unset key app_id linha
+        echo -e "${YELLOW}  O que veio colado não é uma private key legível pelo openssl; descartando.${NC}" >&2
+        return 1
+    fi
+
+    # `umask` num subshell, e não aqui: um `umask 077` nesta função mudaria o umask
+    # do processo do setup.sh inteiro, e todo arquivo criado depois na VM nasceria
+    # 600 por efeito colateral de uma função de prompt.
+    ( umask 077
+      mkdir -p "$GH_APP_DIR"
+      install -m 600 /dev/null "$GH_APP_KEY_FILE"
+      install -m 600 /dev/null "$GH_APP_ID_FILE" )
+    printf '%s' "$key" > "$GH_APP_KEY_FILE"
+    printf '%s' "$app_id" > "$GH_APP_ID_FILE"
+    rm -f "$PROV"
+    unset key app_id linha
+    echo -e "${GREEN}  App ID e private key gravados em $GH_APP_DIR (600).${NC}"
+    return 0
+}
+
 provision_tailscale() {
     if ! command -v tailscale &> /dev/null; then
         # Repo oficial + dnf install, em vez de "curl | sh": o instalador oficial
@@ -866,8 +961,14 @@ provision_tailscale() {
 #
 # A ÚNICA pausa que ainda acontece no meio é o `gh auth login -w`, dentro do módulo
 # `git`: ele é uma definição de função, então aparece aqui no arquivo, mas executa
-# durante o provisionamento. Some quando a GitHub App entrar, porque com `GH_TOKEN`
-# vindo da App o `gh` deixa de ser interativo. Ver `configure_git_and_gh`.
+# durante o provisionamento.
+#
+# O módulo `gh-app` **não** remove essa pausa, e vale ser exato: ele dá identidade
+# de máquina para a API, pelo wrapper `gh-app`, mas `configure_git_and_gh` continua
+# chamando `gh auth login -w` interativamente, e `gh auth status` não enxerga o
+# `GH_TOKEN` — que só existe dentro do wrapper. Os dois convivem: o `gh` puro tem
+# login de pessoa, o `gh-app` tem identidade de máquina. Ligar o `GH_TOKEN` no
+# módulo `git` tiraria a pausa, e não está feito.
 # ==============================================================================
 CURRENT_HOSTNAME=""
 NEW_HOSTNAME=""
@@ -918,6 +1019,15 @@ if [ "$CONFIRM_AI_CLIS" = "1" ]; then
         echo
         OPENCODE_PASSWORD_SET=1
     fi
+fi
+
+# A App é perguntada sempre, e não com um y/N: a private key É a pergunta. Um
+# "quer configurar?" seguido de "cole a chave" é atrito em duplicidade, e a
+# resposta já está no que o operador colar. Se ele colar vazio, o módulo fica
+# inativo e o `gh` volta a pedir login — que é o mesmo desfecho de responder não.
+if should_run "gh-app"; then
+    CONFIRM_GH_APP=0
+    prompt_github_app && CONFIRM_GH_APP=1 || true
 fi
 
 # O opencodex tem a própria pergunta, separada da do ai-clis, e a separação é o
@@ -1120,6 +1230,78 @@ if should_run "podman"; then
 
     podman info &> /dev/null && echo -e "${GREEN}✓ Podman funcional.${NC}" || \
         echo -e "${YELLOW}Aviso: 'podman info' falhou — pode ser necessário reiniciar a sessão.${NC}"
+fi
+
+# ==============================================================================
+# GitHub App — identidade da máquina para a API do GitHub
+# ==============================================================================
+# Instala o helper que troca a private key por um token de instalação, e valida
+# que o par funciona chamando a API de verdade. A validação é a pós-condição:
+# helper instalado não prova nada; o que prova é a API respondendo.
+#
+# Nada de token em disco aqui. O token vive uma hora, e quem o usa é o wrapper
+# `gh-app`, que o obtém, roda um comando e o descarta. Este módulo usa o `--check`,
+# que não escreve nada e deixa o token morrer com o processo.
+if should_run "gh-app"; then
+    echo -e "\n${BLUE}==> GitHub App${NC}"
+    if [ "${CONFIRM_GH_APP:-0}" != "1" ]; then
+        echo -e "${YELLOW}Inativo: App ID ou private key não foram informados.${NC}"
+        echo -e "${YELLOW}  O 'gh' vai pedir login no navegador quando for usado.${NC}"
+    else
+        # `install` falha se o diretório não existir, e o `set -e` transforma isso
+        # em fim de script. O `base` costuma ter criado `~/.local/bin`, mas pode ter
+        # sido pulado com `--skip`.
+        mkdir -p "$HOME/.local/bin"
+        install -m 0755 "$SCRIPT_DIR/bin/gh-app-token.sh" "$HOME/.local/bin/gh-app-token"
+        echo -e "${GREEN}✓ Helper em ~/.local/bin/gh-app-token.${NC}"
+
+        # O wrapper obtém um token por comando e o descarta. Não vai para o shell rc
+        # de propósito: mintar a cada shell aberto seria uma chamada de API por
+        # terminal e manteria a credencial viva na sessão. O `--meta` deixa o
+        # wrapper reaproveitar o token enquanto ele vale, o que evita a troca a cada
+        # comando sem transformar a credencial em estado permanente.
+        cat > "$HOME/.local/bin/gh-app" <<'WRAPPER'
+#!/usr/bin/env bash
+# Roda um comando do `gh` com o token de instalação da GitHub App.
+set -euo pipefail
+# Caminho absoluto: sem ele, se `~/.local/bin` não estiver no PATH a chamada dá
+# "command not found" e a mensagem do wrapper culparia a App à toa.
+HELPER="$HOME/.local/bin/gh-app-token"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/gh-app"
+# `umask` antes do `mkdir`, para o diretório do cache não ficar 755.
+( umask 077; mkdir -p "$CACHE_DIR" )
+TOKEN="$CACHE_DIR/token"
+META="$CACHE_DIR/token.meta"
+
+if [ ! -s "$TOKEN" ] || [ ! -s "$META" ]; then
+    obtem=1
+elif [ "$(jq -r '.expires_at_epoch // 0' "$META" 2>/dev/null || echo 0)" -le "$(( $(date +%s) + 60 ))" ]; then
+    obtem=1
+else
+    obtem=0
+fi
+
+if [ "$obtem" = "1" ]; then
+    if ! "$HELPER" --out "$TOKEN" --meta "$META" >/dev/null; then
+        echo "gh-app: nao obtive token. A App esta instalada e o par App ID + chave e valido?" >&2
+        exit 69
+    fi
+fi
+
+GH_TOKEN="$(cat "$TOKEN")" command gh "$@"
+WRAPPER
+        chmod 0755 "$HOME/.local/bin/gh-app"
+
+        echo -e "${BLUE}Validando a App contra a API (não é checagem de arquivo)${NC}"
+        if GH_APP_KEY="$GH_APP_KEY_FILE" GH_APP_ID="$(cat "$GH_APP_ID_FILE")" \
+           "$HOME/.local/bin/gh-app-token" --check; then
+            echo -e "${GREEN}✓ App validada contra a API.${NC}"
+            echo -e "${YELLOW}  Use como 'gh-app pr list'. O 'gh' sem o wrapper vai pedir login.${NC}"
+        else
+            echo -e "${YELLOW}A App não respondeu como esperado. Verifique se o par App ID + chave${NC}" >&2
+            echo -e "${YELLOW}está certo e se a App está instalada em ao menos um repositório.${NC}" >&2
+        fi
+    fi
 fi
 
 # ==============================================================================
