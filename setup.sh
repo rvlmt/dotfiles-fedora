@@ -1120,21 +1120,42 @@ if should_run "vm-host"; then
         echo -e "${YELLOW}  Vale no próximo login: abra um shell novo antes de esperar ver VMs no Cockpit.${NC}"
     fi
 
+    # `libvirtd` e `virtqemud` disputam o mesmo /run/libvirt/libvirt-sock, com
+    # Conflicts= entre os sockets. Os dois vêm habilitados no Fedora, e hoje o
+    # moderno vence — mas isso é acaso de instalação, não desenho, e uma
+    # atualização pode inverter. Fica só o moderno, que é o que o Cockpit usa:
+    # o cockpit-machines fala com o libvirt pela biblioteca, não pelo binário
+    # legado, então desabilitar o libvirtd não tira o Cockpit do ar.
+    for legacy in libvirtd.socket libvirtd.service; do
+        if systemctl is-enabled --quiet "$legacy" 2>/dev/null; then
+            sudo systemctl disable --now "$legacy" 2>/dev/null || true
+            echo -e "${GREEN}✓ $legacy legado desabilitado (disputava o socket com o virtqemud).${NC}"
+        fi
+    done
+
     sudo systemctl enable --now cockpit.socket
 
-    # Pós-condição: a propriedade, não a lista de pacotes nem o grupo.
+    # Pós-condição: a propriedade, não a lista de pacotes.
     #
-    # Uma verificação por `id -nG` diria "está no grupo" mesmo sem o grupo ter
-    # chegado ao processo — porque o grupo só vale no próximo login. E é o
-    # `getgroups()` do processo que o libvirt consulta, então o teste que vale é
-    # o de verdade, dentro do grupo: é assim que a VM aparece no Cockpit hoje, e
-    # é o que a pós-condição tem de refletir.
-    if timeout 30 sg libvirt -c 'virsh -c qemu:///system list --all' >/dev/null 2>&1; then
+    # Testa **com sudo**, e essa escolha é deliberada. O caminho sem privilégio
+    # depende de o polkit conseguir autorizar, e o autorização sem diálogo só
+    # acontece para root ou para quem está no grupo `libvirt` — e o grupo só
+    # chega ao processo no login seguinte. Pior: se a sessão não tem agente
+    # polkit capaz de mostrar um diálogo, o pedido simplesmente espera e o
+    # servidor desiste. Isso faria a pós-condição acusar falha num libvirt
+    # perfeitamente saudável, por um motivo que não é do libvirt.
+    #
+    # Verificar como root testa a coisa que a pós-condição afirma: que o stack
+    # de containers do host está no ar. A question de "eu, como usuário, já
+    # tenho acesso" é real e é a nota abaixo.
+    if timeout 30 sudo virsh -c qemu:///system list --all >/dev/null 2>&1; then
         echo -e "${GREEN}✓ libvirt responde na conexão de sistema.${NC}"
     else
         echo -e "${YELLOW}Aviso: 'virsh -c qemu:///system' não respondeu em 30s.${NC}"
-        echo -e "${YELLOW}  Se você acabou de entrar no grupo libvirt, reconecte e rode de novo: o grupo só vale no próximo login.${NC}"
-        echo -e "${YELLOW}  Se já está no grupo há mais tempo, o que observar primeiro: 'journalctl -u virtqemud -n 30'.${NC}"
+        echo -e "${YELLOW}  O que observar primeiro: 'sudo journalctl -u virtqemud -n 30'.${NC}"
+        echo -e "${YELLOW}  Se ainda assim falhar só sem privilégio, provavelmente é autorização:${NC}"
+        echo -e "${YELLOW}  o grupo libvirt só vale no próximo login, e sessão sem agente polkit${NC}"
+        echo -e "${YELLOW}  capaz de diálogo não consegue autorizar nada.${NC}"
     fi
 fi
 

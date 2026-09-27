@@ -348,6 +348,16 @@ A correção na ordem certa seria: `tailscale0` sai do `trusted`; `tailscale0` g
 uma **zona própria** que permite só o que precisa; e só então fecha o
 `1025-65535` da `FedoraWorkstation`, que é a [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10).
 
+**Uma propriedade do `firewalld` que muda como isso vai ser implementado.** As
+regras do `firewalld` do Fedora exigem `subject.local == true`, e a sessão do
+Cockpit — que é por onde o host é alcançado — é uma sessão **remota**. Ou seja:
+**mudar o firewall pela sessão remota trava do mesmo jeito que o `virsh` travou**,
+e a configuração de rede vai precisar ser feita de outra forma: localmente, ou por
+um caminho que não passe por aquela regra. Isso não é defeito de um host: é como o
+`firewalld` do Fedora se comporta, e vai valer em qualquer host Fedora com Cockpit.
+Fica anotado porque muda o plano da correção, não porque seja uma pendência
+separada.
+
 **Por que não agora.** O passo do meio exige saber quais portas `tailscale0`
 precisa. A regra do host é uma porta por serviço, e a lista de serviços que o host
 vai expor não está escrita — o próprio OpenCode vai migrar para a VM, e há outros

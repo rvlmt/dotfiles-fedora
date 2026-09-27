@@ -158,6 +158,11 @@ o Tailscale alcança a máquina): `sudo systemctl disable --now firewalld`.
 #    continua ativo apontando para um daemon que saiu.
 sudo systemctl disable --now cockpit.socket
 
+# 1b. O módulo desabilita o libvirtd legado, que disputa o socket com o
+#     virtqemud. Este é o inverso: voltar a habilitá-lo. Só faça se você
+#     realmente quiser o daemon legado (ele está em conflito com o moderno).
+sudo systemctl enable libvirtd.socket libvirtd.service
+
 # 2. Retirar o usuário do grupo libvirt. Vale no próximo login.
 sudo gpasswd -d "$USER" libvirt
 
