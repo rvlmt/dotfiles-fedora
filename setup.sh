@@ -40,6 +40,20 @@ MISE_DEVCONTAINER_VERSION="0.89.0"
 MISE_BIN_PATH="$HOME/.local/bin/mise"
 MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 
+# Canal e versão do OpenCode.
+#
+# São dois instaladores em URLs diferentes: a linha 1 fica em `opencode.ai/install`
+# e a linha 2 em `opencode.ai/v2/install`. O "latest" do primeiro é a linha 1.x —
+# foi o que instalou a v1 numa VM de agente, e a v1 não tem o subcomando `service`
+# que o próprio script usa em `prompt_opencode_password` para definir a senha do
+# servidor. Separar as duas URLs é o que impede a divergência entre máquinas.
+#
+# A versão é pinada como o mise e o Dev Container CLI: para subir o pin, altera o
+# número e o commit diz por quê. A 2.0.18 é a `latest` do canal `latest` quando isto
+# foi escrito, e o instalador a busca como `@opencode/cli-linux-x64`.
+OPENCODE_INSTALL_URL="https://opencode.ai/v2/install"
+OPENCODE_VERSION="2.0.18"
+
 # Endereço e porta do servidor do OpenCode no host, declarados aqui para que um
 # host novo reproduza o mesmo estado — o instalador do opencode cria a unit sem
 # consultar estas escolhas.
@@ -449,11 +463,15 @@ install_common_ai_clis() {
         echo -e "${GREEN}✓ Cursor Agent CLI instalado.${NC}"
     fi
 
+    # A URL e o pin vêm de OPENCODE_INSTALL_URL/OPENCODE_VERSION, declarados no
+    # topo. O instalador da linha 1, noutra URL, é o que fazia a v1 ser instalada e
+    # depois faltar o subcomando `service`. O `--version` vai depois do `--`, que é
+    # como o instalador da opencode recebe os próprios argumentos.
     if command -v opencode &> /dev/null; then
         echo -e "${YELLOW}opencode já instalado, pulando.${NC}"
     else
-        curl -fsSL https://opencode.ai/install | bash
-        echo -e "${GREEN}✓ Open Code (sst/opencode) instalado.${NC}"
+        curl -fsSL "$OPENCODE_INSTALL_URL" | bash -s -- --version "$OPENCODE_VERSION"
+        echo -e "${GREEN}✓ Open Code (anomalyco/opencode, canal v2) instalado.${NC}"
     fi
 
     if command -v agy &> /dev/null; then
@@ -469,17 +487,28 @@ install_common_ai_clis() {
 
     # A unit do opencode é criada pelo instalador sem consultar o padrão, então a
     # escuta é declarada aqui. Ver setup_opencode_service.
-    setup_opencode_service
+    # As três chamadas abaixo são o mesmo padrão: um passo que pode não ser
+    # completável *agora*, e cujo insucesso não invalida o que já foi instalado.
+    # `prompt_opencode_password` devolve 1 quando não há binário, e
+    # `setup_opencode_serve` devolve 1 quando o Tailscale ainda não está instalado —
+    # o que é a situação normal de quem roda `--only=ai-clis` antes do módulo
+    # `tailscale`. Sem o `||`, o `set -e` do topo do script transforma "deixei
+    # para depois" em "abortei o módulo inteiro", e o roll de instalação das CLIs
+    # inteiro se perde por causa de um passo opcional do fim.
+    setup_opencode_service \
+        || echo -e "${YELLOW}A unit do OpenCode não foi criada; siga o módulo 'base' depois.${NC}" >&2
 
     # A senha do servidor é obrigatória; deixamos quem administra escolher em vez
     # de ficar com a aleatória do instalador. Ver prompt_opencode_password.
     if [ "${CONFIRM_OPENCODE_PASSWORD:-}" = "1" ]; then
-        prompt_opencode_password
+        prompt_opencode_password \
+            || echo -e "${YELLOW}Senha do OpenCode não foi alterada; a do instalador foi mantida.${NC}" >&2
     fi
 
     # Publicação na tailnet depois da unit, porque o alvo do proxy tem de existir
     # para o tailscale serve ter o que publicar. Ver setup_opencode_serve.
-    setup_opencode_serve
+    setup_opencode_serve \
+        || echo -e "${YELLOW}Publicação na tailnet pendente; rode o módulo 'tailscale' e depois repita.${NC}" >&2
 }
 
 # Instala a CLI do OpenCodex (@bitkyc08/opencodex) via Bun ou npm.
