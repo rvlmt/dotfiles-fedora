@@ -31,6 +31,26 @@ repetirem:
   quer, não o que o default por acaso já faz.
 - **A senha do servidor do OpenCode.** Credencial de um host não descreve
   comportamento de software, e foi um palpite sobre o software que quebrou.
+- **Se o `libvirtd` legado vinha habilitado.** Não vinha. O scriptlet de
+  desinstalação do pacote o desabilita, o preset `90-default.preset` do
+  `fedora-release-common` habilita só o `virtproxyd` moderno e não menciona o
+  legado, e o symlink que o habilitava aqui foi criado por um
+  `systemctl enable --now libvirtd` rodado à mão, **cinco meses depois** da
+  instalação do pacote. O módulo chegou a desabilitar algo que já vinha
+  desabilitado, e a mensagem dizia que ele tinha sido desabilitado — numa
+  máquina onde nunca esteve ligado. É a mesma classe dos outros quatro.
+
+**Antes de afirmar um default, verifique a procedência.** Um estado local não diz
+qualquer coisa sobre o que o sistema faz sozinho. Três coisas respondem, e as três
+são cheap:
+
+- **o scriptlet do pacote** (`rpm -q --scripts`) diz o que a instalação faz — e
+  atenção ao `preuninstall`, que é desinstalação, não instalação;
+- **o preset** (`/usr/lib/systemd/system-preset/`, mais `rpm -qf` para saber de
+  qual pacote vem) diz o que é habilitado por padrão;
+- **a data do symlink** em `/etc/systemd/system/*.wants/`, comparada com a data de
+  instalação do pacote, separa "o sistema fez" de "alguém fez". E o journal
+  (`journalctl --since`) costuma mostrar o comando, com o usuário e o horário.
 
 O que **é** válido medir, e é a diferença: medir o comportamento do **alvo**. Do
 `tailscaled` funcionando num guest com o filtro ativo, ou do `virsh` respondendo
