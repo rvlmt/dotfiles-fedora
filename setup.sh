@@ -935,7 +935,28 @@ fi
 # ==============================================================================
 if should_run "podman"; then
     echo -e "\n${BLUE}==> Podman (rootless)${NC}"
-    sudo dnf install -y --skip-unavailable podman podman-docker slirp4netns fuse-overlayfs
+    # `podman-docker` NÃO é instalado, de propósito. Ele cria um comando `docker`
+    # que é atalho para o podman, e é exatamente isso que faz uma ferramenta que
+    # espera Docker escolher o engine sem que ninguém perceba. O fluxo do repo
+    # passa o engine explícito, então o shim só adicionaria uma forma de o
+    # provider escolher errado — e a regra de não ter volume/credencial
+    # compartilhada pressupõe que o engine é o que o padrão dice que é.
+    sudo dnf install -y --skip-unavailable podman slirp4netns fuse-overlayfs
+    if rpm -q podman-docker >/dev/null 2>&1; then
+        echo -e "${YELLOW}  podman-docker está instalado e cria um atalho 'docker'.${NC}"
+        echo -e "${YELLOW}  Não é removido aqui (não é decisão deste módulo); o padrão é não tê-lo.${NC}"
+    fi
+
+    # `podman.socket` desligado: nada expõe a API do engine por TCP ou socket.
+    # É o que permite rodar o Dev Container CLI com --docker-path podman sem
+    # reabrir uma superfície de rede. Sem isto, um `podman system service` ou um
+    # cliente que procure o socket acha o caminho aberto.
+    sudo systemctl disable --now podman.socket 2>/dev/null || true
+    if systemctl is-enabled --quiet podman.socket 2>/dev/null; then
+        echo -e "${YELLOW}Aviso: podman.socket continua habilitado; a exposição de API do engine segue aberta.${NC}"
+    else
+        echo -e "${GREEN}✓ podman.socket desabilitado.${NC}"
+    fi
 
     # Garante subuid/subgid pro seu usuário (necessário pra containers rootless
     # mapearem UIDs dentro do container sem privilégio real no host).
