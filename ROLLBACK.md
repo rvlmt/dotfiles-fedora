@@ -8,9 +8,9 @@ A maioria das seções é segura de reverter isoladamente. Onde há ordem obriga
 ela está indicada — e isso importa mais neste documento do que no `setup.sh`,
 porque remover o runtime antes das ferramentas deixa as CLIs quebradas.
 
-Módulos cobertos: `base`, `hostname`, `ssh`, `git`, `podman`, `tailscale`,
-`sshd-hardening`, `firewalld`, `vm-host`, `toolbx`, `gui-access`, `desktop-apps`,
-`ai-clis`, `opencodex`, `zshrc`.
+  Módulos cobertos: `base`, `hostname`, `ssh`, `git`, `podman`, `gh-app`, `tailscale`,
+  `sshd-hardening`, `firewalld`, `vm-host`, `toolbx`, `gui-access`, `desktop-apps`,
+  `ai-clis`, `opencodex`, `zshrc`.
 
 ## `base` — runtime, ferramentas de linha de comando e pacotes
 
@@ -113,6 +113,34 @@ sudo dnf remove podman slirp4netns fuse-overlayfs
 
 Se o `containers.conf` existia só por causa deste módulo, remova o arquivo em vez
 de deixar `[containers]` vazio.
+
+## `gh-app` — desfazer a identidade da máquina no GitHub
+
+O módulo grava duas coisas: a private key e o App ID, ambos em
+`~/.config/gh-app/` com permissão `600`. Nenhum dos dois entra no repositório, e
+é por isso que esta seção não tem nenhum comando para desfazer algo versionado —
+não há nada versionado para desfazer.
+
+```bash
+# 1. Apagar a private key e o App ID, na ordem: a chave primeiro, porque um App ID
+#    sem chave é só um número, e uma chave sem App ID é segredo sem dono.
+shred -u ~/.config/gh-app/private-key.pem 2>/dev/null || rm -f ~/.config/gh-app/private-key.pem
+rm -f ~/.config/gh-app/app-id
+rmdir ~/.config/gh-app 2>/dev/null
+
+# 2. Tirar os dois executáveis.
+rm -f ~/.local/bin/gh-app-token ~/.local/bin/gh-app
+
+# 3. O cache do token, se o wrapper chegou a ser usado. Vai sozinho com a
+#    expiração de uma hora, então apagar é opcional — mas é o único lugar onde um
+#    token de verdade chegou a existir em disco.
+rm -rf ~/.cache/gh-app
+```
+
+A App em si **não** é removida: ela vive no GitHub, e o que este rollback desfaz
+é a cópia local da credencial. Para revogar do lado do GitHub, é_SETTINGS →
+_Developer settings → GitHub Apps_, e é decisão sua, porque afeta outras máquinas
+se a App estiver instalada em mais de uma.
 
 ## `tailscale` — desconectar ou remover
 
