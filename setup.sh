@@ -592,7 +592,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolbx gui-access desktop-apps ai-clis opencodex zshrc"
+ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -604,7 +604,7 @@ ALL_STEPS="base hostname ssh git podman tailscale sshd-hardening firewalld toolb
 #          OpenCode. É alcançada por SSH e não expõe nada na LAN.
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
-HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld toolbx gui-access desktop-apps opencodex zshrc"
+HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
 VM_STEPS="base ssh git tailscale sshd-hardening podman ai-clis zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
@@ -738,6 +738,8 @@ should_run() {
         [[ ",$ONLY," == *",$step,"* ]]
         return $?
     fi
+    # Opt-in só cede a --only. Declará-lo opcional e deixá-lo no caminho normal
+    # seria declarar uma coisa e fazer outra.
     if is_opt_in "$step"; then
         return 1
     fi
@@ -933,7 +935,28 @@ fi
 # ==============================================================================
 if should_run "podman"; then
     echo -e "\n${BLUE}==> Podman (rootless)${NC}"
-    sudo dnf install -y --skip-unavailable podman podman-docker slirp4netns fuse-overlayfs
+    # `podman-docker` NÃO é instalado, de propósito. Ele cria um comando `docker`
+    # que é atalho para o podman, e é exatamente isso que faz uma ferramenta que
+    # espera Docker escolher o engine sem que ninguém perceba. O fluxo do repo
+    # passa o engine explícito, então o shim só adicionaria uma forma de o
+    # provider escolher errado — e a regra de não ter volume/credencial
+    # compartilhada pressupõe que o engine é o que o padrão dice que é.
+    sudo dnf install -y --skip-unavailable podman slirp4netns fuse-overlayfs
+    if rpm -q podman-docker >/dev/null 2>&1; then
+        echo -e "${YELLOW}  podman-docker está instalado e cria um atalho 'docker'.${NC}"
+        echo -e "${YELLOW}  Não é removido aqui (não é decisão deste módulo); o padrão é não tê-lo.${NC}"
+    fi
+
+    # `podman.socket` desligado: nada expõe a API do engine por TCP ou socket.
+    # É o que permite rodar o Dev Container CLI com --docker-path podman sem
+    # reabrir uma superfície de rede. Sem isto, um `podman system service` ou um
+    # cliente que procure o socket acha o caminho aberto.
+    sudo systemctl disable --now podman.socket 2>/dev/null || true
+    if systemctl is-enabled --quiet podman.socket 2>/dev/null; then
+        echo -e "${YELLOW}Aviso: podman.socket continua habilitado; a exposição de API do engine segue aberta.${NC}"
+    else
+        echo -e "${GREEN}✓ podman.socket desabilitado.${NC}"
+    fi
 
     # Garante subuid/subgid pro seu usuário (necessário pra containers rootless
     # mapearem UIDs dentro do container sem privilégio real no host).
@@ -1062,6 +1085,65 @@ if should_run "firewalld"; then
         echo -e "${GREEN}✓ Interface tailscale0 marcada como confiável no firewalld.${NC}"
     fi
     echo -e "${YELLOW}Revise 'sudo firewall-cmd --list-all' e feche manualmente qualquer porta que não precise estar exposta na LAN/internet.${NC}"
+fi
+
+# ==============================================================================
+# Hospedeiro de VMs: libvirt + Cockpit
+# ==============================================================================
+#
+# O host hospeda a VM de agentes, e o Cockpit é onde ela é criada e gerenciada.
+# Este módulo é o **corte mínimo**: pacotes, grupo e socket. Ele não declara a
+# rede do libvirt.
+#
+# A rede fica de fora de propósito. Duas razões, e a segunda é a que pesa:
+#
+# 1. O default do libvirt resolve até existir medição, e medir exige uma VM real
+#    que ainda não existe.
+# 2. Declarar a rede exige saber **quais serviços o host vai expor**, e essa
+#    lista não está escrita. A regra do host é uma porta por serviço, então
+#    qualquer rede declarada agora seria um invariante que se quebra a cada
+#    serviço novo — e seria declarado contra um palpite.
+#
+# A postura de rede do host é pendência, não base. Ver ARQUITETURA.md.
+if should_run "vm-host"; then
+    echo -e "\n${BLUE}==> Hospedeiro de VMs (libvirt + Cockpit)${NC}"
+    sudo dnf install -y --skip-unavailable \
+        libvirt-daemon libvirt-client virt-install qemu-kvm cockpit-machines
+
+    # O grupo libvirt dá acesso à conexão de sistema do libvirt. Sem ele, o
+    # Cockpit não lista VM nenhuma e o virsh só conecta em qemu:///session.
+    if id -nG | tr ' ' '\n' | grep -qx libvirt; then
+        echo -e "${GREEN}✓ Usuário já está no grupo libvirt.${NC}"
+    else
+        sudo usermod -aG libvirt "$USER"
+        echo -e "${GREEN}✓ Usuário adicionado ao grupo libvirt.${NC}"
+        echo -e "${YELLOW}  Vale no próximo login: abra um shell novo antes de esperar ver VMs no Cockpit.${NC}"
+    fi
+
+    sudo systemctl enable --now cockpit.socket
+
+    # Pós-condição: a propriedade, não a lista de pacotes.
+    #
+    # Testa **com sudo**, e essa escolha é deliberada. O caminho sem privilégio
+    # depende de o polkit conseguir autorizar, e o autorização sem diálogo só
+    # acontece para root ou para quem está no grupo `libvirt` — e o grupo só
+    # chega ao processo no login seguinte. Pior: se a sessão não tem agente
+    # polkit capaz de mostrar um diálogo, o pedido simplesmente espera e o
+    # servidor desiste. Isso faria a pós-condição acusar falha num libvirt
+    # perfeitamente saudável, por um motivo que não é do libvirt.
+    #
+    # Verificar como root testa a coisa que a pós-condição afirma: que o stack
+    # de containers do host está no ar. A question de "eu, como usuário, já
+    # tenho acesso" é real e é a nota abaixo.
+    if timeout 30 sudo virsh -c qemu:///system list --all >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ libvirt responde na conexão de sistema.${NC}"
+    else
+        echo -e "${YELLOW}Aviso: 'virsh -c qemu:///system' não respondeu em 30s.${NC}"
+        echo -e "${YELLOW}  O que observar primeiro: 'sudo journalctl -u virtqemud -n 30'.${NC}"
+        echo -e "${YELLOW}  Se ainda assim falhar só sem privilégio, provavelmente é autorização:${NC}"
+        echo -e "${YELLOW}  o grupo libvirt só vale no próximo login, e sessão sem agente polkit${NC}"
+        echo -e "${YELLOW}  capaz de diálogo não consegue autorizar nada.${NC}"
+    fi
 fi
 
 # ==============================================================================
@@ -1219,6 +1301,7 @@ if [ "$PROFILE" = "vm" ]; then
 else
     echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
     echo -e "Próximo passo: crie a VM de agentes no Cockpit e rode './setup.sh --profile=vm' dentro dela."
-    echo -e "A rede do libvirt, com o filtro de egress, é declarada por este repo. Ver ARQUITETURA.md."
+    echo -e "A rede usada é a default do libvirt; o repo ainda não declara rede, porque a lista de"
+    echo -e "serviços que o host vai expor não está escrita. Ver ARQUITETURA.md."
 fi
 

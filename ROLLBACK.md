@@ -9,8 +9,8 @@ ela está indicada — e isso importa mais neste documento do que no `setup.sh`,
 porque remover o runtime antes das ferramentas deixa as CLIs quebradas.
 
 Módulos cobertos: `base`, `hostname`, `ssh`, `git`, `podman`, `tailscale`,
-`sshd-hardening`, `firewalld`, `toolbx`, `gui-access`, `desktop-apps`, `ai-clis`,
-`opencodex`, `zshrc`.
+`sshd-hardening`, `firewalld`, `vm-host`, `toolbx`, `gui-access`, `desktop-apps`,
+`ai-clis`, `opencodex`, `zshrc`.
 
 ## `base` — runtime, ferramentas de linha de comando e pacotes
 
@@ -93,6 +93,12 @@ A chave SSH adicionada ao GitHub é revertida na seção `ssh`.
 ```bash
 sudo loginctl disable-linger "$USER"   # desfaz o "sobrevive ao logout"
 
+# O módulo desabilita o podman.socket, que já vem desabilitado por padrão no
+# Fedora. O inverso de "desabilitar" seria "habilitar", e é exatamente o que
+# este rollback NÃO faz: devolver ao estado anterior significa deixar como está.
+# Só habilite se você quiser a API do engine exposta:
+# sudo systemctl enable podman.socket
+
 # Remover as faixas de subuid/subgid (edite manualmente, dnf/usermod não
 # tem um comando direto de remoção):
 sudo sed -i "/^$USER:/d" /etc/subuid /etc/subgid
@@ -102,7 +108,7 @@ sed -i '/^userns = "keep-id"/d' ~/.config/containers/containers.conf
 
 # Desinstalar de vez (cuidado: containers/imagens locais ficam em
 # ~/.local/share/containers — apague à parte se quiser limpar tudo):
-sudo dnf remove podman podman-docker slirp4netns fuse-overlayfs
+sudo dnf remove podman slirp4netns fuse-overlayfs
 ```
 
 Se o `containers.conf` existia só por causa deste módulo, remova o arquivo em vez
@@ -144,6 +150,32 @@ sudo firewall-cmd --reload
 
 Pra desligar o firewalld por completo (não recomendado, ele que garante que só
 o Tailscale alcança a máquina): `sudo systemctl disable --now firewalld`.
+
+## `vm-host` — remover o hospedeiro de VMs
+
+```bash
+# 1. Tirar o socket do Cockpit antes dos pacotes, senão o cockpit.socket
+#    continua ativo apontando para um daemon que saiu.
+sudo systemctl disable --now cockpit.socket
+
+
+# 2. Retirar o usuário do grupo libvirt. Vale no próximo login.
+sudo gpasswd -d "$USER" libvirt
+
+# 3. Desinstalar. `cockpit` e `qemu-kvm-core` ficam de fora porque são
+#    dependência de outra coisa; `qemu-kvm` volta porque o módulo o nomeia.
+sudo dnf remove libvirt-daemon libvirt-client virt-install qemu-kvm cockpit-machines
+```
+
+⚠️ **Assimetria de propósito:** o passo 2 remove o usuário do grupo mesmo que ele
+já estivesse lá antes do setup. Um rollback que só desfaz o que ele fez exigiria
+guardar o estado anterior, e o módulo é idempotente — roda de novo sem produzir
+diferença. Se o grupo já existia por outro motivo, reponha com
+`sudo gpasswd -a "$USER" libvirt`.
+
+⚠️ O módulo **não** cria rede do libvirt, então não há o que reverter aqui. Se
+você criou uma VM pelo Cockpit, ela **continua existindo** depois deste rollback —
+o módulo cuida do hospedeiro, não do hóspede. Remova a VM pelo Cockpit antes.
 
 ## `toolbx` — desinstalar
 

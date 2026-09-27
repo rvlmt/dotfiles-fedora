@@ -4,11 +4,11 @@ Provisiona o Fedora Workstation que é **workstation pessoal e hospedeiro de VMs
 Os agentes e os containers rodam **dentro de uma VM**, não no host: ver
 [ARQUITETURA.md](ARQUITETURA.md) para o desenho e o papel de cada camada.
 
-> **Este README documenta a implementação de hoje, não o alvo.** O
-> `setup.sh` atual ainda provisiona um host que roda os agentes diretamente, como
-> a [ARQUITETURA.md](ARQUITETURA.md) descreve que vai deixar de fazer. O perfil
-> `vm` ainda não existe. Onde os dois divergem, o README descreve o que o script
-> faz, e a ARQUITETURA descreve para onde vai.
+> **Como este README e o `ARQUITECTURA.md` se dividem.** A
+> [ARQUITETURA.md](ARQUITETURA.md) diz o que o repo **é** — as três camadas, o
+> papel de cada uma, e o que ainda está pendente. Este README diz **como
+> executar**: os módulos, os flags, e as ressalvas de cada um. Onde um passo aqui
+> diz "no host" e "na VM", o `--profile` correspondente decide o que roda.
 
 O Mac (thin client: terminal, IDE, navegador, cliente Tailscale/devpod) é
 provisionado pelo repo irmão **[dotfiles](https://github.com/rvlmt/dotfiles)**.
@@ -71,7 +71,7 @@ mesmo repo pra justificar mantê-las separadas.
    > `gh auth login` (login via navegador) seguido de
    > `gh repo clone rvlmt/dotfiles-fedora ~/dotfiles-fedora`.
 
-   O script deve ser executado como **usuário comum** (`./setup.sh`, e **NÃO** `sudo ./setup.sh`), pois ele configura o `$HOME`, chaves SSH, dotfiles e Podman rootless do seu usuário. Ele pede a senha do `sudo` uma vez logo no início e mantém o cache "quente" em background até terminar — evita travar pedindo senha de novo no meio de um `dnf upgrade` longo.
+   O script deve ser executado como **usuário comum** (`./setup.sh`, e **NÃO** `sudo ./setup.sh`), pois ele configura o `$HOME`, chaves SSH e dotfiles do seu usuário (e, no perfil `vm`, o Podman rootless). Ele pede a senha do `sudo` uma vez logo no início e mantém o cache "quente" em background até terminar — evita travar pedindo senha de novo no meio de um `dnf upgrade` longo.
 
    **Todas as perguntas de confirmação (`y/N`) acontecem logo no início**,
    antes de qualquer `dnf`/instalação — assim você responde tudo de uma vez
@@ -79,7 +79,7 @@ mesmo repo pra justificar mantê-las separadas.
    esperando resposta no meio do caminho.
 
    Módulos, por perfil (a ordem dentro de cada um é a de execução):
-   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e o runtime do host via `mise` (Node e Dev Container CLI pinados — ver "Runtime Node no host"). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.  **[ambos]**
+   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, unzip, curl, wget, btop, dnf5-plugins) e o runtime via `mise` (Node e Dev Container CLI pinados — ver "Runtime Node no host"). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.  **[ambos]**
    2. `hostname` — Mostra o hostname atual e pergunta se quer alterá-lo, já na fase de coleta do início (`hostnamectl set-hostname` só aplica depois); cria `~/Developer`.  **[host]**
    3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).  **[ambos]**
    4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.  **[ambos]**
@@ -90,18 +90,19 @@ mesmo repo pra justificar mantê-las separadas.
 
    **Por que não usar o Tailscale SSH (`tailscale up --ssh`)**: ele exige reautenticação interativa via navegador sempre que a política da tailnet tiver `action: check` nos grants de SSH (o default da maioria das tailnets) — quebra qualquer ferramenta que não sabe abrir um navegador (Codex Desktop, devpod rodando não-interativamente, cron, etc.), e o próprio Tailscale avisa incompatibilidade com SELinux enforcing no Fedora. O acesso SSH real já é coberto por `sshd-hardening` (só chave, sem senha) + `firewalld` (sshd só na interface `tailscale0`) — chave clássica, sem nenhuma reautenticação. Se você já rodou uma versão anterior deste script com `--ssh`, desative com `sudo tailscale set --ssh=false`.
 
-   9. `toolbx` *(opcional, não roda por padrão)* — Sandbox Podman rápida para mexer em algo fora do contexto de um projeto/devpod. Rode com `--only=toolbx`.  **[host]**
-   10. `gui-access` *(opcional, não roda por padrão)* — Habilita o GNOME Remote Desktop nativo (RDP via `grdctl`), já que o Fedora é uma Workstation completa (AIO dedicado) e às vezes vale controlar direto com tela. Rode com `--only=gui-access`; depois defina uma senha com `grdctl rdp set-credentials <usuario> <senha>` e conecte via um cliente RDP no Mac.  **[host]**
-   11. `desktop-apps` — Equivalente ao Brewfile do Mac. Cada app foi checado individualmente contra fonte oficial antes de decidir instalar ou não (ver `ROLLBACK.md`/comentários no script pra fontes exatas):  **[host]**
+   9. `vm-host` — Instala `libvirt-daemon`, `libvirt-client`, `virt-install`, `qemu-kvm` e `cockpit-machines`; coloca o usuário no grupo `libvirt` e habilita o `cockpit.socket`. É onde a VM de agentes vai ser criada e gerenciada. **Não declara a rede do libvirt** — ver [ARQUITETURA.md](ARQUITETURA.md), pendência de rede do host.  **[host]**
+   10. `toolbx` *(opcional, não roda por padrão)* — Sandbox Podman rápida para mexer em algo fora do contexto de um projeto/devpod. Rode com `--only=toolbx`.  **[host]**
+   11. `gui-access` *(opcional, não roda por padrão)* — Habilita o GNOME Remote Desktop nativo (RDP via `grdctl`), já que o Fedora é uma Workstation completa (AIO dedicado) e às vezes vale controlar direto com tela. Rode com `--only=gui-access`; depois defina uma senha com `grdctl rdp set-credentials <usuario> <senha>` e conecte via um cliente RDP no Mac.  **[host]**
+   12. `desktop-apps` — Equivalente ao Brewfile do Mac. Cada app foi checado individualmente contra fonte oficial antes de decidir instalar ou não (ver `ROLLBACK.md`/comentários no script pra fontes exatas):  **[host]**
        - **Instalados automaticamente** (fonte oficial confirmada, funciona no Fedora): VS Code (repo Microsoft), Google Chrome (RPM oficial), Brave (repo oficial), Zed (script oficial), Antigravity IDE (repo rpm oficial do Google), Cursor (AppImage oficial), OpenCode Desktop (RPM oficial), Transmission (repo do Fedora).
        - **Genuinamente sem versão Linux** (confirmado oficialmente, sem alternativa real): Adobe Creative Cloud, Raycast, OpenUsage, OrbStack, Rectangle (GNOME já tem tiling nativo), Arc (nunca suportou Linux), AppCleaner e Pearcleaner (resolvem um problema específico do modelo de "bundle" do macOS que não existe no Fedora).
        - **Têm app oficial pra Linux, mas sem Fedora/rpm ainda**: Claude Desktop (só .deb, Ubuntu/Debian), ChatGPT Desktop (tem rpm oficial pro Fedora, mas em preview com bug conhecido de assinatura — manual se quiser).
        - **Oficial só via Docker/Podman Compose** (não é app desktop nativo): Open Design.
        - **Sem app oficial, só opção não-oficial/não-verificada de terceiros** (não instalada automaticamente, decisão sua): GitHub Desktop, Notion, Figma, Spotify e Termius (os Flatpaks desses dois últimos são "Unverified"/não afiliados no Flathub, apesar de populares), FontBase (AppImage oficial existe, mas sem link "sempre atual" estável), Surfshark (sem suporte oficial a Fedora), Ghostty (só via COPR de terceiros).
        - devpod tem binário Linux oficial, mas não é instalado aqui — ele roda do lado Mac controlando este servidor.
-   12. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). É do guest porque é lá que os agentes rodam; dentro da VM é também onde o servidor do OpenCode, a escuta em loopback e a publicação na tailnet são declarados.  **[guest]**
-   13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), um proxy universal de provider que fica no caminho das requisições de modelo. **Pergunta antes de aplicar, com pergunta própria** — separada da do `ai-clis`, porque não é uma CLI local como as seis de lá. É do perfil `host` e serve o uso pessoal: os agentes dentro da VM não o recebem, cada um usa a credencial do provider direto.  **[host]**
-   14. `zshrc` — Torna o `zsh` o shell de login da máquina: instala `zsh`+plugins via `dnf`, linka o `zshrc` versionado deste repo e roda `chsh`. Participa da execução normal sem confirmação. A única confirmação é sobre substituir um `~/.zshrc` que já exista e não seja o link deste repo (o atual é salvo como backup).  **[ambos]**
+   13. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). É do guest porque é lá que os agentes rodam; dentro da VM é também onde o servidor do OpenCode, a escuta em loopback e a publicação na tailnet são declarados.  **[guest]**
+   14. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), um proxy universal de provider que fica no caminho das requisições de modelo. **Pergunta antes de aplicar, com pergunta própria** — separada da do `ai-clis`, porque não é uma CLI local como as seis de lá. É do perfil `host` e serve o uso pessoal: os agentes dentro da VM não o recebem, cada um usa a credencial do provider direto.  **[host]**
+   15. `zshrc` — Torna o `zsh` o shell de login da máquina: instala `zsh`+plugins via `dnf`, linka o `zshrc` versionado deste repo e roda `chsh`. Participa da execução normal sem confirmação. A única confirmação é sobre substituir um `~/.zshrc` que já exista e não seja o link deste repo (o atual é salvo como backup).  **[ambos]**
 
    **`[host]`** marca os módulos do perfil `host` (workstation pessoal e
    hospedeiro de VMs), **`[guest]`** os do perfil `vm` (a VM de agentes), e
@@ -111,7 +112,8 @@ mesmo repo pra justificar mantê-las separadas.
    ```bash
    ./setup.sh                        # perfil host (padrão)
    ./setup.sh --profile=vm           # dentro da VM de agentes
-   ./setup.sh --only=podman,tailscale
+   ./setup.sh --only=firewalld,tailscale        # no host
+   ./setup.sh --profile=vm --only=podman,ai-clis   # dentro da VM
    ./setup.sh --skip=gui-access
    ./setup.sh --help                 # lista os perfis e os módulos de cada um
    ```
@@ -209,18 +211,35 @@ mesmo repo pra justificar mantê-las separadas.
    de nenhuma conta externa (GitHub incluso) pra decidir quem entra neste
    servidor.
 
-3. No Mac, configure o devpod para usar este servidor como provider remoto
+3. Crie a VM de agentes: no Cockpit do host (**Machines → Create VM**), com a
+   imagem do Fedora Workstation. Escolha uma porta por serviço se precisar
+   exponer algo, e **deixe a rede como está** — o padrão do libvirt serve, e a
+   postura de rede do host é uma pendência documentada, não algo que este passo
+   precisa acertar.
+
+4. Dentro da VM, rode o mesmo script com o perfil de guest:
+
+   ```bash
+   ./setup.sh --profile=vm
+   ```
+
+5. No Mac, aponte o devpod para a **VM** (não para o host) como provider remoto
    via Tailscale — ver o repo [`dotfiles`](https://github.com/rvlmt/dotfiles)
    pros passos completos (`devpod provider add ssh`, `devpod up`, etc).
 
-**Notas de segurança**: o SSH deste servidor fica restrito à interface
-Tailscale (sem exposição pública). O módulo `sshd-hardening` desabilita login por
-senha, mas se recusa a aplicar enquanto `~/.ssh/authorized_keys` estiver vazio —
-confirme que existe chave autorizada antes de contar com isso. O isolamento entre
-projetos é de container (Podman rootless com `userns=keep-id`), e essa é a
-fronteira real aqui: **não** há usuário Linux dedicado neste host. A postura
-completa, e o que ela **não** cobre, está em
-[ARQUITETURA.md](ARQUITETURA.md).
+**Notas de segurança**, e elas valem por camada:
+
+- **Host** — o SSH fica restrito à interface Tailscale (sem exposição pública), e
+  o módulo `sshd-hardening` desabilita login por senha mas se recusa a aplicar
+  enquanto `~/.ssh/authorized_keys` estiver vazio. O host não roda container: ele
+  hospeda a VM.
+- **VM de agentes** — é alcançada por SSH pela tailnet, e o `firewalld` do host não
+  a governa, porque a VM vive atrás de NAT. A defesa da VM é o
+  `sshd-hardening` que roda **dentro** dela, mais a fronteira da própria VM. O
+  Podman rootless com `userns=keep-id` isola os projetos **entre si**, dentro da
+  VM — essa é a fronteira do container, e ela **não** é fronteira de host.
+- Não há usuário Linux dedicado, nem no host nem na VM. A postura completa, e o
+  que ela **não** cobre, está em [ARQUITETURA.md](ARQUITETURA.md).
 
 O template de devcontainer traz, por padrão:
 - **Limite de recursos** (`runArgs: --memory=4g --cpus=2`) — um agente com bug/loop não derruba o servidor inteiro. Ajuste por projeto.
@@ -412,12 +431,12 @@ os IDs revisados são parte do procedimento.
 
 ## Unidades criadas por instaladores de terceiros
 
-Duas units deste host são criadas por instaladores, não pelo `setup.sh`:
+Duas units da **VM de agentes** são criadas por instaladores, não pelo `setup.sh`:
 `antigravity-cli-daemon.service` (do `agy`) e `opencode.service` (do opencode).
-O instalador não consulta o padrão, então o que ele escrever é estado de host
-**sem dono no repositório** — foi assim que o servidor do OpenCode ended up
-divergindo do padrão, com um ajuste de escuta feito à mão e que um `setup.sh` em
-um host novo não reproduziria.
+O instalador não consulta o padrão, então o que ele escrever é estado **sem dono
+no repositório** — foi assim que o servidor do OpenCode ended up divergindo do
+padrão, com um ajuste de escuta feito à mão e que um `setup.sh` em uma VM nova não
+reproduziria.
 
 O padrão declara as duas por drop-in, não editando a unit: assim uma reescrita do
 instalador não desfaz o que o padrão quer, e as outras diretivas que ele define
@@ -485,7 +504,7 @@ a cada reinício. Por isso o drop-in preserva `--service` de propósito.
 Definir uma senha de sua preferência:
 
 ```bash
-./setup.sh --only=ai-clis
+./setup.sh --profile=vm --only=ai-clis
 # ou direto:
 opencode service set password <a-sua-senha>
 systemctl --user restart opencode
@@ -519,7 +538,7 @@ porta: o isolamento de origem é propriedade de segurança, não de estética.
 Aplicar mudanças de escuta ou publicação:
 
 ```bash
-./setup.sh --only=ai-clis
+./setup.sh --profile=vm --only=ai-clis
 systemctl --user restart opencode
 tailscale serve status
 ```
