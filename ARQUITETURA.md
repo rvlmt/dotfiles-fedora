@@ -450,8 +450,8 @@ projetos sozinha.
 
 ## Correções que precisam ficar registradas
 
-Três premissas falsas que já entraram em documento deste repo. Ficam porque são
-fáceis de readotar por quem não viu a discussão.
+Premissas falsas que já entraram em documento deste repo. Ficam porque são fáceis
+de readotar por quem não viu a discussão.
 
 **1. "A VM sem rota default, só o Tailscale."** Falso. Para entrar na tailnet o
 `tailscaled` fala com o servidor de coordenação, e o fallback de pareamento é um
@@ -464,7 +464,19 @@ A resposta foi manter guest mutável com imutabilidade na borda, mas a pergunta 
 elas mascaravam — imutabilidade do SO, ou provisionamento por `dnf`? — é a mesma
 do ponto 1 acima.
 
-**3. "O registro de risco do `label=disable` continua valendo."** Ele foi aceito
+**3. "O instalador do OpenCode é um só, então `curl … | install` dá a versão
+atual."** Falso, e a forma do erro é a de canal: são **dois instaladores, em URLs
+diferentes**. `opencode.ai/install` é a linha 1 e o seu `latest` é a 1.x;
+`opencode.ai/v2/install` é a linha 2, publicada no npm como `@opencode/cli`. Uma
+VM de agentes instalada pelo script ficou com `1.18.32` enquanto o host rodava
+`2.0.15`, e a v1 **não tem** o subcomando `service` que o próprio script usa em
+`prompt_opencode_password` para definir a senha do servidor. Duas consequências que
+valem mais que o sintoma: `--version` na URL antiga **passa** na checagem e morre
+no download, porque as tags `v2.0.x` existem no GitHub sem artefato de release; e
+o pacote do v2 tem nome diferente do v1, então procurar "versão 2 no npm" no
+`opencode-ai` devolve zero e parece concluir que ela não existe.
+
+**4. "O registro de risco do `label=disable` continua valendo."** Ele foi aceito
 porque o user namespace não isola kernel e a MAC era a única camada a mais. Dentro
 de uma VM o escape já é contido, então o registro não descreve mais o risco real.
 Por isso ele saiu do README, e as **exigências de operação** que estavam misturadas

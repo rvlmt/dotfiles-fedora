@@ -18,7 +18,7 @@ if [[ -d "$HOME/.local/share/mise/shims" ]]; then
   export PATH="$HOME/.local/share/mise/shims:$PATH"
 fi
 
-# Open Code (sst/opencode) instala o binário fora do PATH padrão
+# Open Code (anomalyco/opencode) instala o binário fora do PATH padrão
 [ -d "$HOME/.opencode/bin" ] && export PATH="$HOME/.opencode/bin:$PATH"
 
 # Preferência de editor padrão
