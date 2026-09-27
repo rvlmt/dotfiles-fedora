@@ -1120,19 +1120,6 @@ if should_run "vm-host"; then
         echo -e "${YELLOW}  Vale no próximo login: abra um shell novo antes de esperar ver VMs no Cockpit.${NC}"
     fi
 
-    # `libvirtd` e `virtqemud` disputam o mesmo /run/libvirt/libvirt-sock, com
-    # Conflicts= entre os sockets. Os dois vêm habilitados no Fedora, e hoje o
-    # moderno vence — mas isso é acaso de instalação, não desenho, e uma
-    # atualização pode inverter. Fica só o moderno, que é o que o Cockpit usa:
-    # o cockpit-machines fala com o libvirt pela biblioteca, não pelo binário
-    # legado, então desabilitar o libvirtd não tira o Cockpit do ar.
-    for legacy in libvirtd.socket libvirtd.service; do
-        if systemctl is-enabled --quiet "$legacy" 2>/dev/null; then
-            sudo systemctl disable --now "$legacy" 2>/dev/null || true
-            echo -e "${GREEN}✓ $legacy legado desabilitado (disputava o socket com o virtqemud).${NC}"
-        fi
-    done
-
     sudo systemctl enable --now cockpit.socket
 
     # Pós-condição: a propriedade, não a lista de pacotes.
