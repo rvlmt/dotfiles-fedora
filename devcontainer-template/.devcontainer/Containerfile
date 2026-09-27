@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 USER node
 
 # Mesmo conjunto de CLIs de IA do módulo ai-clis (setup.sh, deste repo e do repo "dotfiles" no Mac).
+#
+# DESSINCRONIZADO DE PROPÓSITO do módulo ai-clis: aqui o Open Code é da LINHA 1
+# (opencode.ai/install, sem pin), porque a linha 2 não é empacotada para este
+# caminho. A ARQUITETURA.md já aceita este template como referência nominal e não
+# sincronização — este comentário é para que a diferença não leia como erro depois.
 RUN npm install -g \
         @anthropic-ai/claude-code \
         @openai/codex \

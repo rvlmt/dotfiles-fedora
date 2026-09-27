@@ -44,7 +44,7 @@ MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 #
 # São dois instaladores em URLs diferentes: a linha 1 fica em `opencode.ai/install`
 # e a linha 2 em `opencode.ai/v2/install`. O "latest" do primeiro é a linha 1.x —
-# foi o que instalou a v1 numa VM de agente, e a v1 não tem o subcomando `service`
+# foi o que instalou a v1 numa VM de agentes, e a v1 não tem o subcomando `service`
 # que o próprio script usa em `prompt_opencode_password` para definir a senha do
 # servidor. Separar as duas URLs é o que impede a divergência entre máquinas.
 #
@@ -467,10 +467,23 @@ install_common_ai_clis() {
     # topo. O instalador da linha 1, noutra URL, é o que fazia a v1 ser instalada e
     # depois faltar o subcomando `service`. O `--version` vai depois do `--`, que é
     # como o instalador da opencode recebe os próprios argumentos.
-    if command -v opencode &> /dev/null; then
-        echo -e "${YELLOW}opencode já instalado, pulando.${NC}"
+    #
+    # A idempotência é conferida no caminho, e não com `command -v`: o binário fica
+    # em `~/.opencode/bin`, que o PATH exportado acima não inclui, então num shell
+    # não-interativo o `command -v` é falso e o instalador rodaria toda vez. Como há
+    # pin, e o instalador da v2 perdeu o early-exit que a v1 tinha, sem isto cada
+    # execução rebaixaria o tarball.
+    #
+    # O `--no-modify-path` impede o instalador de anexar
+    # `export PATH=~/.opencode/bin:$PATH` no rc. Ele casa a linha por `grep -Fxq`, e
+    # a linha do zshrc versionado tem um prefixo `[ -d … ] &&`, que não casa — então
+    # sem esta flag o instalador escreveria dentro do arquivo versionado, através do
+    # symlink. Quem é dono do PATH interativo é o zshrc do repo, não o instalador.
+    if [ -x "$OPENCODE_BIN" ]; then
+        echo -e "${YELLOW}opencode já instalado em $OPENCODE_BIN, pulando.${NC}"
     else
-        curl -fsSL "$OPENCODE_INSTALL_URL" | bash -s -- --version "$OPENCODE_VERSION"
+        curl -fsSL "$OPENCODE_INSTALL_URL" \
+            | bash -s -- --no-modify-path --version "$OPENCODE_VERSION"
         echo -e "${GREEN}✓ Open Code (anomalyco/opencode, canal v2) instalado.${NC}"
     fi
 
@@ -482,21 +495,30 @@ install_common_ai_clis() {
     fi
 
     # O daemon do agy roda "npm exec" fora de shell interativo, então precisa do
-    # PATH do mise explicitado no serviço. Ver setup_agy_service_path.
-    setup_agy_service_path
+    # PATH do mise explicitado no serviço. Ver setup_agy_service_path. Está na
+    # lista de baixo porque `mkdir -p` e a escrita do drop-in abortam o módulo sob
+    # `set -e` se falharem, e um drop-in não escrito não invalida as CLIs.
+    setup_agy_service_path \
+        || echo -e "${YELLOW}Drop-in de PATH do agy não foi escrito; o daemon pode não achar o runtime.${NC}" >&2
 
     # A unit do opencode é criada pelo instalador sem consultar o padrão, então a
     # escuta é declarada aqui. Ver setup_opencode_service.
-    # As três chamadas abaixo são o mesmo padrão: um passo que pode não ser
+    # As quatro chamadas abaixo são o mesmo padrão: um passo que pode não ser
     # completável *agora*, e cujo insucesso não invalida o que já foi instalado.
     # `prompt_opencode_password` devolve 1 quando não há binário, e
     # `setup_opencode_serve` devolve 1 quando o Tailscale ainda não está instalado —
     # o que é a situação normal de quem roda `--only=ai-clis` antes do módulo
-    # `tailscale`. Sem o `||`, o `set -e` do topo do script transforma "deixei
-    # para depois" em "abortei o módulo inteiro", e o roll de instalação das CLIs
-    # inteiro se perde por causa de um passo opcional do fim.
+    # `tailscale`. Sem o `||`, o `set -e` do topo do script transforma "deixei para
+    # depois" em "abortei o módulo inteiro". O que se perde é o resto do
+    # provisionamento — a publicação na tailnet, o módulo `zshrc` que vem depois, e a
+    # mensagem final —, não as seis CLIs, que já estão instaladas quando estas quatro
+    # rodam.
+    # Esta função só devolve 1 quando não consegue ler o `ExecStart` da unit, ou
+    # quando o binário apontado por ele não é executável. A ausência da unit
+    # devolve 0, e quem a cria é o instalador do opencode acima — não um módulo
+    # deste script.
     setup_opencode_service \
-        || echo -e "${YELLOW}A unit do OpenCode não foi criada; siga o módulo 'base' depois.${NC}" >&2
+        || echo -e "${YELLOW}Não consegui ler o ExecStart da unit do OpenCode, ou o binário não é executável; o drop-in de escuta ficou por aplicar.${NC}" >&2
 
     # A senha do servidor é obrigatória; deixamos quem administra escolher em vez
     # de ficar com a aleatória do instalador. Ver prompt_opencode_password.
