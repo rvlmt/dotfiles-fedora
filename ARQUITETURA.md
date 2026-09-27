@@ -251,21 +251,50 @@ proporcional ao fato de o repo não ter verificação automática.
 
 ### Ordem de implementação
 
-1. O eixo `--profile` na CLI, ortogonal ao `--only`/`--skip`. Pequeno e testável
-   sozinho.
-2. `vm-host` no perfil `host`.
-3. `podman`, `ai-clis` e `opencodex` movidos para o perfil `vm`.
-4. `desktop-apps`, `gui-access`, `toolbx`, `firewalld`, `hostname` e `opencodex` restritos ao
-   perfil `host`.
-5. As pós-condições de cada perfil.
-6. As correções no template do devcontainer, que são do guest: colisão do nome de
+**Feito.** O eixo `--profile` na CLI, ortogonal ao `--only`/`--skip`, e a
+pertenência de cada módulo ao perfil da camada que o executa — `podman` e
+`ai-clis` no guest, `opencodex` no host, `firewalld`/`hostname`/`desktop-apps`/
+`gui-access`/`toolbx` restritos ao host, e o resto nos dois.
+
+O eixo e a pertenência entraram **no mesmo PR**, e isso é deliberado: um
+`--profile host` que ainda instalasse Podman estaria mentindo desde o primeiro
+commit. Separá-los produziria estados intermediários em que a flag afirma algo
+falso, que é pior do que um PR maior.
+
+A validação `--only` contra o perfil é assimétrica de propósito: `--only` falha
+alto se o módulo não pertence à camada, porque isso é erro de quem pediu e
+silenciar poderia instalar Podman no host por engano. `--skip` de um módulo fora
+do perfil apenas avisa, porque pular o que não roda é inócuo.
+
+**Falta, nesta ordem.**
+
+1. `vm-host` no perfil `host`: `libvirt`, `cockpit-machines`, grupo `libvirt`, e
+   a rede com o filtro de egress — que é do repo porque o Cockpit não expressa
+   regra.
+2. As pós-condições de cada perfil.
+3. As correções no template do devcontainer, que são do guest: colisão do nome de
    volume, base `bullseye` com LTS encerrado, ausência de `--pids-limit`, e
    `safe.directory '*'`.
-7. O mecanismo do filtro de egress, **depois** de medido.
+4. Tirar `tailscale0` da zona `trusted` no host.
+5. O mecanismo do filtro de egress, **depois** de medido.
 
-Esta ordem importa num ponto: o filtro de egress é o item 7, e é o único que
-depende de uma medição que só uma VM real dá. Fazer antes seria escrever regra de
-firewall no repo sem nunca ter visto uma subir.
+O filtro é o último de propósito: é o único item que depende de uma medição que
+só uma VM real dá. Fazer antes seria escrever regra de firewall no repo sem nunca
+ter visto uma VM subir.
+
+**Um furo que o eixo expôs, e que estava pior do que parecia.** As confirmações usam
+`read -rp`, que o bash só imprime quando o stdin é terminal, e `read` devolve 1 no
+fim da entrada. Como algumas dessas leituras estão fora de um contexto `&&`, o
+`set -e` **abortava o script**: saía com código 1, depois do banner, sem mensagem,
+sem rodar módulo nenhum. Não era "recusar em silêncio" — era morrer em silêncio,
+e por isso também não dava para dizer que era seguro rodar por pipe.
+
+Corrigido na #18: o script **recusa no início**, com mensagem, quando o stdin não
+é um terminal. A alternativa seria seguir com os defaults, que produziria um
+provisionamento parcial e silencioso — pior que não rodar. O ponto que fica para o
+padrão, e que não foi decidido aqui: **o que uma execução verdadeiramente não
+interativa deveria fazer** (instalar com defaults declarados? exigir flags
+explícitas? recusar?). Recusar é o comportamento seguro, não o completo.
 
 ## Em aberto
 

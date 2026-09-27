@@ -78,36 +78,67 @@ mesmo repo pra justificar mantê-las separadas.
    e pode sair de perto do terminal, sem precisar checar se o script parou
    esperando resposta no meio do caminho.
 
-   Módulos (em ordem):
-   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e o runtime do host via `mise` (Node e Dev Container CLI pinados — ver "Runtime Node no host"). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.
-   2. `hostname` — Mostra o hostname atual e pergunta se quer alterá-lo, já na fase de coleta do início (`hostnamectl set-hostname` só aplica depois); cria `~/Developer`.
-   3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).
-   4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.
-   5. `podman` — Instala Podman rootless, configura subuid/subgid, habilita linger (containers sobrevivem ao logout/desconexão de SSH) e configura `userns=keep-id` (`~/.config/containers/containers.conf`) — sem isso, processos rodando como "root" dentro de um container não conseguem escrever em bind-mounts que pertencem ao seu usuário real.
-   6. `tailscale` — Adiciona o repo oficial da Tailscale via `dnf config-manager` e instala via `dnf` (não usa `curl | sh`), conecta com `tailscale up` (sem `--ssh` de propósito — ver nota abaixo). Assume DNF5 (padrão desde o Fedora 41).
-   7. `sshd-hardening` — Desabilita login por senha e login root via SSH. **Pede confirmação** (no início, junto com as outras). Recusa aplicar (avisa e pula) se `~/.ssh/authorized_keys` estiver vazio — ver passo 2 abaixo, senão você fica sem nenhum jeito de entrar via SSH.
-   8. `firewalld` — Garante o firewall ativo e marca a interface `tailscale0` como confiável.
+   Módulos, por perfil (a ordem dentro de cada um é a de execução):
+   1. `base` — `dnf upgrade`, ferramentas essenciais (git, gh, jq, tree, tmux, zellij, ripgrep, fd-find, btop) e o runtime do host via `mise` (Node e Dev Container CLI pinados — ver "Runtime Node no host"). Usa `dnf install --skip-unavailable`: um pacote ausente/renomeado numa versão específica do Fedora não trava a instalação dos outros.  **[ambos]**
+   2. `hostname` — Mostra o hostname atual e pergunta se quer alterá-lo, já na fase de coleta do início (`hostnamectl set-hostname` só aplica depois); cria `~/Developer`.  **[host]**
+   3. `ssh` — Gera chave SSH Ed25519 e a usa pra autenticar esta máquina no GitHub (`gh ssh-key add`) — não confundir com autorizar OUTRAS máquinas a entrar aqui via SSH, que é manual (passo 2 abaixo).  **[ambos]**
+   4. `git` — Configura `git config --global` e autentica o `gh`, enviando a chave pública.  **[ambos]**
+   5. `podman` — Instala Podman rootless, configura subuid/subgid, habilita linger (containers sobrevivem ao logout/desconexão de SSH) e configura `userns=keep-id` (`~/.config/containers/containers.conf`) — sem isso, processos rodando como "root" dentro de um container não conseguem escrever em bind-mounts que pertencem ao seu usuário real.  **[guest]**
+   6. `tailscale` — Adiciona o repo oficial da Tailscale via `dnf config-manager` e instala via `dnf` (não usa `curl | sh`), conecta com `tailscale up` (sem `--ssh` de propósito — ver nota abaixo). Assume DNF5 (padrão desde o Fedora 41).  **[ambos]**
+   7. `sshd-hardening` — Desabilita login por senha e login root via SSH. **Pede confirmação** (no início, junto com as outras). Recusa aplicar (avisa e pula) se `~/.ssh/authorized_keys` estiver vazio — ver passo 2 abaixo, senão você fica sem nenhum jeito de entrar via SSH.  **[ambos]**
+   8. `firewalld` — Garante o firewall ativo e marca a interface `tailscale0` como confiável. **Pendente:** a [ARQUITETURA.md](ARQUITETURA.md) decide que `tailscale0` sai da zona `trusted` e que a rede do libvirt é declarada por este repo com o filtro de egress. O código ainda não faz nenhum dos dois — ver "Ordem de implementação".  **[host]**
 
    **Por que não usar o Tailscale SSH (`tailscale up --ssh`)**: ele exige reautenticação interativa via navegador sempre que a política da tailnet tiver `action: check` nos grants de SSH (o default da maioria das tailnets) — quebra qualquer ferramenta que não sabe abrir um navegador (Codex Desktop, devpod rodando não-interativamente, cron, etc.), e o próprio Tailscale avisa incompatibilidade com SELinux enforcing no Fedora. O acesso SSH real já é coberto por `sshd-hardening` (só chave, sem senha) + `firewalld` (sshd só na interface `tailscale0`) — chave clássica, sem nenhuma reautenticação. Se você já rodou uma versão anterior deste script com `--ssh`, desative com `sudo tailscale set --ssh=false`.
 
-   9. `toolbx` *(opcional, não roda por padrão)* — Sandbox Podman rápida para mexer em algo fora do contexto de um projeto/devpod. Rode com `--only=toolbx`.
-   10. `gui-access` *(opcional, não roda por padrão)* — Habilita o GNOME Remote Desktop nativo (RDP via `grdctl`), já que o Fedora é uma Workstation completa (AIO dedicado) e às vezes vale controlar direto com tela. Rode com `--only=gui-access`; depois defina uma senha com `grdctl rdp set-credentials <usuario> <senha>` e conecte via um cliente RDP no Mac.
-   11. `desktop-apps` — Equivalente ao Brewfile do Mac. Cada app foi checado individualmente contra fonte oficial antes de decidir instalar ou não (ver `ROLLBACK.md`/comentários no script pra fontes exatas):
+   9. `toolbx` *(opcional, não roda por padrão)* — Sandbox Podman rápida para mexer em algo fora do contexto de um projeto/devpod. Rode com `--only=toolbx`.  **[host]**
+   10. `gui-access` *(opcional, não roda por padrão)* — Habilita o GNOME Remote Desktop nativo (RDP via `grdctl`), já que o Fedora é uma Workstation completa (AIO dedicado) e às vezes vale controlar direto com tela. Rode com `--only=gui-access`; depois defina uma senha com `grdctl rdp set-credentials <usuario> <senha>` e conecte via um cliente RDP no Mac.  **[host]**
+   11. `desktop-apps` — Equivalente ao Brewfile do Mac. Cada app foi checado individualmente contra fonte oficial antes de decidir instalar ou não (ver `ROLLBACK.md`/comentários no script pra fontes exatas):  **[host]**
        - **Instalados automaticamente** (fonte oficial confirmada, funciona no Fedora): VS Code (repo Microsoft), Google Chrome (RPM oficial), Brave (repo oficial), Zed (script oficial), Antigravity IDE (repo rpm oficial do Google), Cursor (AppImage oficial), OpenCode Desktop (RPM oficial), Transmission (repo do Fedora).
        - **Genuinamente sem versão Linux** (confirmado oficialmente, sem alternativa real): Adobe Creative Cloud, Raycast, OpenUsage, OrbStack, Rectangle (GNOME já tem tiling nativo), Arc (nunca suportou Linux), AppCleaner e Pearcleaner (resolvem um problema específico do modelo de "bundle" do macOS que não existe no Fedora).
        - **Têm app oficial pra Linux, mas sem Fedora/rpm ainda**: Claude Desktop (só .deb, Ubuntu/Debian), ChatGPT Desktop (tem rpm oficial pro Fedora, mas em preview com bug conhecido de assinatura — manual se quiser).
        - **Oficial só via Docker/Podman Compose** (não é app desktop nativo): Open Design.
        - **Sem app oficial, só opção não-oficial/não-verificada de terceiros** (não instalada automaticamente, decisão sua): GitHub Desktop, Notion, Figma, Spotify e Termius (os Flatpaks desses dois últimos são "Unverified"/não afiliados no Flathub, apesar de populares), FontBase (AppImage oficial existe, mas sem link "sempre atual" estável), Surfshark (sem suporte oficial a Fedora), Ghostty (só via COPR de terceiros).
        - devpod tem binário Linux oficial, mas não é instalado aqui — ele roda do lado Mac controlando este servidor.
-   12. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). Opcional no host, já que os coding agents rodam primariamente isolados dentro dos containers devpod.
-   13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), router local para modelos de IA.
-   14. `zshrc` — Torna o `zsh` o shell de login do host: instala `zsh`+plugins via `dnf`, linka o `zshrc` versionado deste repo e roda `chsh`. Participa da execução normal sem confirmação. A única confirmação é sobre substituir um `~/.zshrc` que já exista e não seja o link deste repo (o atual é salvo como backup).
+   12. `ai-clis` — **Pergunta antes de aplicar**: CLIs de IA (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor Agent, Open Code, Antigravity CLI). É do guest porque é lá que os agentes rodam; dentro da VM é também onde o servidor do OpenCode, a escuta em loopback e a publicação na tailnet são declarados.  **[guest]**
+   13. `opencodex` — Instala a CLI do OpenCodex (`@bitkyc08/opencodex`), um proxy universal de provider que fica no caminho das requisições de modelo. **Pergunta antes de aplicar, com pergunta própria** — separada da do `ai-clis`, porque não é uma CLI local como as seis de lá. É do perfil `host` e serve o uso pessoal: os agentes dentro da VM não o recebem, cada um usa a credencial do provider direto.  **[host]**
+   14. `zshrc` — Torna o `zsh` o shell de login da máquina: instala `zsh`+plugins via `dnf`, linka o `zshrc` versionado deste repo e roda `chsh`. Participa da execução normal sem confirmação. A única confirmação é sobre substituir um `~/.zshrc` que já exista e não seja o link deste repo (o atual é salvo como backup).  **[ambos]**
 
-   Use `--only=modulo1,modulo2` ou `--skip=modulo1,modulo2`. Só `toolbx` e
-   `gui-access` ficam de fora por padrão (precisam de `--only` explícito);
-   `ai-clis` participa da execução normal e pergunta antes de agir, com a
-   confirmação coletada logo no início. `zshrc` não pergunta, exceto na
-   substituição destrutiva descrita acima.
+   **`[host]`** marca os módulos do perfil `host` (workstation pessoal e
+   hospedeiro de VMs), **`[guest]`** os do perfil `vm` (a VM de agentes), e
+   **[ambos]** os que existem nos dois. A regra é uma só: *um módulo mora no
+   perfil da camada que o executa* — ver [ARQUITETURA.md](ARQUITETURA.md).
+
+   ```bash
+   ./setup.sh                        # perfil host (padrão)
+   ./setup.sh --profile=vm           # dentro da VM de agentes
+   ./setup.sh --only=podman,tailscale
+   ./setup.sh --skip=gui-access
+   ./setup.sh --help                 # lista os perfis e os módulos de cada um
+   ```
+
+   `--profile` é um **eixo novo, orthogonal** ao `--only`/`--skip` que já existia:
+   o perfil escolhe o conjunto de módulos, e o `--only`/`--skip` refinam por
+   dentro. `--only` é validado **contra o perfil** e falha alto se o módulo não
+   pertence à camada — pedir Podman no host é um erro, e falhar alto evita
+   instalar por engano. `--skip` de um módulo fora do perfil apenas avisa, porque
+   pular o que não roda é inócuo.
+
+   Só `toolbx` e `gui-access` ficam de fora por padrão (precisam de `--only`
+   explícito). `ai-clis` e `opencodex` são de terceiros e **perguntam antes de
+   agir**, cada um com a sua pergunta: o `opencodex` não é uma CLI local, é um
+   proxy de provider que fica no caminho das requisições de modelo, e por isso
+   tem pergunta separada. `zshrc` não pergunta, exceto na substituição destrutiva
+   descrita acima.
+
+   > **Por que o script recusa stdin não-interativo.** As perguntas usam
+   > `read -rp`, que o bash só imprime quando o stdin é um terminal, e `read`
+   > devolve 1 no fim da entrada. Como algumas dessas leituras estão fora de um
+   > contexto `&&`, o `set -e` abortava o script: saía com código 1, depois do
+   > banner, sem mensagem, sem rodar módulo nenhum e sem recusa nenhuma. Por
+   > isso o script **recusa no início**, com mensagem, quando o stdin não é um
+   > terminal. A alternativa — seguir com os defaults — produziria um
+   > provisionamento parcial e silencioso, que é pior do que não rodar. Para
+   > inspecionar sem executar: `./setup.sh --help`.
 
    ### Camadas `<none>` são cache, não lixo
 
@@ -151,12 +182,6 @@ mesmo repo pra justificar mantê-las separadas.
 
    Se não imprimir nada, o `du` é confiável nesse filesystem. Se imprimir, meça
    pelo `df`.
-
-   ```bash
-   ./setup.sh --only=podman,tailscale
-   ./setup.sh --skip=gui-access
-   ./setup.sh --help   # lista os módulos disponíveis
-   ```
 
 2. **Autorize cada dispositivo que vai entrar por SSH aqui** (Mac, Mac Mini,
    iPhone, etc). O script gera/usa uma chave SSH só pra autenticar *este
