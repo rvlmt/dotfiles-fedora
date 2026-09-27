@@ -861,9 +861,20 @@ if should_run "base"; then
     # instalação em versão anterior (DNF4), troque por dnf-plugins-core e
     # ajuste os "config-manager addrepo --from-repofile=" pra
     # "config-manager --add-repo".
+    # `tar` não é usado por este script, mas é exigido por dois dos instaladores
+    # que ele chama: o mise, logo abaixo em `ensure_host_node`, que extrai com
+    # `tar --no-same-owner -xf`; e o Zed, no módulo `desktop-apps`, que extrai com
+    # `tar -xzf`. O bun NÃO é um deles — ele descompacta com `unzip`, e `unzip`
+    # já está na lista acima.
+    #
+    # O que justifica o pacote é essa dependência, e não uma afirmação sobre o que
+    # uma imagem do Fedora traz ou não traz: o script chama instaladores que
+    # precisam de `tar`, então quem chama é quem instala. Medido numa VM de
+    # agente: o `base` morria dentro do instalador do mise, e `tar` não estava
+    # instalado.
     sudo dnf install -y --skip-unavailable \
         git gh jq tree tmux zellij ripgrep fd-find unzip \
-        curl wget btop \
+        curl wget btop tar \
         dnf5-plugins
     echo -e "${GREEN}✓ Pacotes base instalados.${NC}"
 
