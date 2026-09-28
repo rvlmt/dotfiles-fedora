@@ -40,6 +40,22 @@ DEFAULT_GIT_EMAIL="80988467+rvlmt@users.noreply.github.com"
 # A PRIVATE KEY não tem default, e não vai ter. Segredo não tem valor padrão.
 DEFAULT_GH_APP_ID="5098816"
 
+# Conta cujas chaves públicas de dispositivos são autorizadas a entrar por SSH
+# nesta máquina. A URL é derivada desta, para trocar de conta ser uma edição.
+#
+# Isto INVERTE uma decisão que o README registrava: o acesso por SSH não deve
+# depender da segurança de nenhuma conta externa. A partir daqui o GitHub entra
+# na cadeia de confiança — quem controla a conta controla a lista de quem entra.
+# O que limita o estrago: o bloco é gerenciado e reescrito a cada execução, e
+# linhas fora dele (uma chave local que o GitHub não tem) ficam intocadas. A
+# revogação passa a ser indireta e diferida: remove-se a chave no GitHub, e ela
+# perde o acesso na próxima vez que este módulo rodar. Ver o README.
+GITHUB_KEYS_USER="rvlmt"
+
+# Delimitadores do bloco gerenciado. Só o que está ENTRE eles é reescrito.
+GITHUB_KEYS_BEGIN="# >>> dotfiles-fedora: chaves de dispositivos (GitHub) >>>"
+GITHUB_KEYS_END="# <<< dotfiles-fedora: chaves de dispositivos (GitHub) <<<"
+
 # Runtime do host, pinado aqui para que setup, shell de login e devcontainers
 # concordem. Quem fornece Node/npm no host é o mise — o pacote nodejs do dnf
 # não é instalado de propósito, para que o runtime do host não dependa da
@@ -491,6 +507,176 @@ process.stdin.on("data", d => s += d).on("end", () => {
 # de posição, e este módulo já tem Node no PATH: prepend_mise_shims roda antes,
 # e ensure_host_node instala o runtime se faltar. Pedir JSON a um programa que
 # entende JSON é mais barato que torcer para o primeiro casamento ser o bom.
+# Autoriza nesta máquina as chaves públicas de dispositivos que o GitHub reúne.
+#
+# O bloco entre GITHUB_KEYS_BEGIN e GITHUB_KEYS_END é reescrito inteiro a cada
+# execução; TUDO fora dele é preservado. Isso é deliberado, e é o que impede o
+# pior modo de falha possível deste módulo. Medido: o authorized_keys do host tem
+# uma chave (`SHA256:TQzAbv1QICo`) que NÃO existe no GitHub — é a chave de um
+# Mac. Se este módulo tratasse o arquivo como espelho do GitHub, tiraria essa
+# chave e trancaria fora o aparelho que hoje entra. O GitHub é a fonte do BLOCO,
+# não do arquivo.
+#
+# A revogação é real, mas indireta e diferida: sai-se a chave da conta, e ela perde
+# o acesso na próxima execução deste módulo. Não há como remover acesso antes disso
+# por este caminho.
+sync_device_keys_from_github() {
+    local ak="$HOME/.ssh/authorized_keys"
+    local url="https://github.com/${GITHUB_KEYS_USER}.keys"
+    local feed; feed=$(mktemp) || return 1
+
+    if ! curl -fsSL --max-time 30 "$url" -o "$feed" 2>/dev/null; then
+        rm -f "$feed"
+        echo -e "${YELLOW}Não consegui baixar $url; o authorized_keys não foi tocado.${NC}" >&2
+        return 1
+    fi
+
+    # Valida ANTES de escrever. Um `>>` cego numa resposta que não é a lista de
+    # chaves — 404, html de proxy, corpo vazio, download parcial — escreveria lixo
+    # no arquivo que decide quem entra na máquina, e o sshd leria esse lixo sem
+    # reclamar de nada. O filtro é também o que separa chave de não-chave.
+    local limpo="$feed.limpo"
+    grep -E '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]+|sk-ssh-ed25519@openssh\.com) ' "$feed" \
+        > "$limpo" 2>/dev/null || true
+    if [ ! -s "$limpo" ]; then
+        rm -f "$feed" "$limpo"
+        echo -e "${YELLOW}A resposta de $url não tem nenhuma chave pública; o authorized_keys não foi tocado.${NC}" >&2
+        return 1
+    fi
+
+    # Tira as chaves que são desta própria máquina. O módulo `ssh` registra a chave
+    # do servidor no GitHub com `gh ssh-key add`, então o feed traz a chave do
+    # servidor DE VOLTA. Deixá-la seria o servidor autorizar a si mesmo a entrar
+    # nele: inofensivo, e sem propósito nenhum.
+    local blobs="" pk selfn=0
+    for pk in "$HOME"/.ssh/*.pub; do
+        [ -f "$pk" ] || continue
+        blobs="$blobs $(awk 'NF >= 2 { print $2 }' "$pk" 2>/dev/null)"
+    done
+    if [ -n "$(printf '%s' "$blobs" | tr -d ' ')" ]; then
+        local semself="$feed.semself"
+        # Duas passadas, de propósito. A versão anterior mandava o awk inteiro
+        # para stdout e tirava a contagem com `tail -1`, mas NADA era gravado em
+        # $semself — o arquivo nunca existia, a contagem dava zero, e a função
+        # caía no "nada a fazer" em toda máquina. Um módulo que faz nada e
+        # reporta sucesso é pior do que um que falha: parece configurado.
+        #
+        # A contagem vai numa passada à parte porque, na mesma, ela contaminaria o
+        # arquivo de chaves com uma linha numérica que o sshd leria sem reclamar.
+        awk -v self="$blobs" '
+            BEGIN { n = split(self, a, " "); for (i = 1; i <= n; i++) s[a[i]] = 1 }
+            $2 in s { next }
+            { print }
+        ' "$limpo" > "$semself"
+        selfn=$(awk -v self="$blobs" '
+            BEGIN { n = split(self, a, " "); for (i = 1; i <= n; i++) s[a[i]] = 1 }
+            $2 in s { r++ }
+            END { print r + 0 }
+        ' "$limpo")
+        if [ "$(grep -c '' "$semself" 2>/dev/null || echo 0)" -gt 0 ]; then
+            limpo="$semself"
+        else
+            # Sobrou nada depois de tirar a chave da própria máquina: a conta não tem
+            # chave de dispositivo. Apagar o bloco deixaria a máquina sem o que tem.
+            rm -f "$feed" "$limpo" "$semself"
+            echo -e "${YELLOW}Todas as chaves de $GITHUB_KEYS_USER são desta própria máquina; nada a fazer.${NC}"
+            return 0
+        fi
+    fi
+
+    local n_final
+    n_final=$(grep -c '' "$limpo" 2>/dev/null || echo 0)
+
+    # Bloco novo. Sem timestamp de propósito: um carimbo de data mudaria o conteúdo a
+    # cada execução, e a comparação de "já atualizado" nunca casaria — o arquivo
+    # seria reescrito à toa, a cada rodada.
+    local bloco; bloco=$(mktemp) || { rm -f "$feed" "$limpo"; return 1; }
+    {
+        printf '%s\n' "$GITHUB_KEYS_BEGIN"
+        printf '# %s chave(s) de github.com/%s. Nao edite este bloco: o modulo device-keys o reescreve.\n' \
+            "$n_final" "$GITHUB_KEYS_USER"
+        cat "$limpo"
+        printf '%s\n' "$GITHUB_KEYS_END"
+    } > "$bloco"
+
+    # Extrai o bloco atual, se existir.
+    local atual; atual=$(mktemp) || { rm -f "$feed" "$limpo" "$bloco"; return 1; }
+    if [ -e "$ak" ]; then
+        awk -v b="$GITHUB_KEYS_BEGIN" -v e="$GITHUB_KEYS_END" '
+            $0 == b { dentro = 1 }
+            dentro   { print }
+            $0 == e { dentro = 0 }
+        ' "$ak" > "$atual" 2>/dev/null || true
+    else
+        : > "$atual"
+    fi
+
+    if [ -e "$ak" ] && cmp -s "$bloco" "$atual"; then
+        rm -f "$feed" "$limpo" "$bloco" "$atual"
+        echo -e "${GREEN}✓ authorized_keys já está com as $n_final chave(s) de github.com/$GITHUB_KEYS_USER.${NC}"
+        [ "$selfn" -gt 0 ] 2>/dev/null && \
+            echo -e "${YELLOW}  $selfn chave(s) da própria máquina omitidas.${NC}"
+        return 0
+    fi
+
+    # Quem saiu. Revogação que ninguém vê não é revogação: a diferença entre o bloco
+    # antigo e o novo é o que o operador precisa ler para saber se a remoção que
+    # fez no GitHub chegou aqui.
+    local revogadas=""
+    if [ -s "$atual" ]; then
+        local fpa fpn
+        fpa=$(mktemp); fpn=$(mktemp)
+        grep -E '^(ssh-|ecdsa-|sk-)' "$atual" > "$fpa.tmp" 2>/dev/null && mv "$fpa.tmp" "$fpa" || : > "$fpa"
+        grep -E '^(ssh-|ecdsa-|sk-)' "$bloco" > "$fpn.tmp" 2>/dev/null && mv "$fpn.tmp" "$fpn" || : > "$fpn"
+        revogadas=$(ssh-keygen -lf "$fpa" 2>/dev/null | awk '{print $2}' | sort -u > "$fpa.fp"
+                    ssh-keygen -lf "$fpn" 2>/dev/null | awk '{print $2}' | sort -u > "$fpn.fp"
+                    comm -23 "$fpa.fp" "$fpn.fp" | tr '\n' ' ')
+        rm -f "$fpa" "$fpn" "$fpa.tmp" "$fpn.tmp" "$fpa.fp" "$fpn.fp"
+    fi
+
+    # Reconstrói: tudo que está fora do bloco, na ordem original, mais o bloco novo.
+    local novo; novo=$(mktemp) || { rm -f "$feed" "$limpo" "$bloco" "$atual"; return 1; }
+    if [ -e "$ak" ]; then
+        awk -v b="$GITHUB_KEYS_BEGIN" -v e="$GITHUB_KEYS_END" '
+            $0 == b { dentro = 1; next }
+            dentro   { if ($0 == e) dentro = 0; next }
+            { print }
+        ' "$ak" > "$novo" 2>/dev/null || true
+    fi
+    if [ -s "$novo" ] && [ -n "$(tail -c 1 "$novo" 2>/dev/null)" ]; then
+        printf '\n' >> "$novo"
+    fi
+    cat "$bloco" >> "$novo"
+
+    local dir="$HOME/.ssh"
+    ( umask 077; mkdir -p "$dir" )
+    if cat "$novo" > "$ak.novo" 2>/dev/null && mv "$ak.novo" "$ak" 2>/dev/null; then
+        chmod 700 "$dir" 2>/dev/null || true
+        chmod 600 "$ak" 2>/dev/null || true
+        # SELinux está Enforcing nas duas máquinas, e contexto errado no
+        # authorized_keys faz o sshd recusar a chave com "bad permissions", sem
+        # explicar o motivo. Medido: `restorecon` sem sudo relabela corretamente
+        # arquivo do próprio usuário, então este passo não precisa de privilégio.
+        # O aviso "no default label" do restorecon sai em STDOUT, nao em stderr, entao
+        # sem redirecionar os dois ele vaza para a saida do modulo.
+        command -v restorecon &> /dev/null && restorecon "$ak" > /dev/null 2>&1
+        echo -e "${GREEN}✓ authorized_keys: bloco de $n_final chave(s) de github.com/$GITHUB_KEYS_USER atualizado.${NC}"
+        if [ "$selfn" -gt 0 ] 2>/dev/null; then
+            echo -e "${YELLOW}  $selfn chave(s) da própria máquina omitidas, para o servidor não se autorizar a si mesmo.${NC}"
+        fi
+        if [ -n "$(printf '%s' "$revogadas" | tr -d ' ')" ]; then
+            echo -e "${YELLOW}  Revogadas agora (saíram do GitHub e perderam o acesso):${NC}"
+            printf '%s\n' "$revogadas" | tr ' ' '\n' | grep . | sed 's/^/    /'
+        fi
+        echo -e "${YELLOW}  Chaves fora do bloco não foram tocadas.${NC}"
+    else
+        rm -f "$ak.novo"
+        echo -e "${YELLOW}Não consegui reescrever o authorized_keys; o arquivo atual está intacto.${NC}" >&2
+    fi
+
+    rm -f "$feed" "$limpo" "$bloco" "$atual" "$novo"
+}
+
 install_npm_global() {
     local package="$1" bin_name="$2"
     if command -v "$bin_name" &> /dev/null; then
@@ -807,7 +993,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
+ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -819,8 +1005,8 @@ ALL_STEPS="base hostname ssh git podman gh-app tailscale sshd-hardening firewall
 #          OpenCode. É alcançada por SSH e não expõe nada na LAN.
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
-HOST_STEPS="base hostname ssh git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
-VM_STEPS="base ssh git gh-app tailscale sshd-hardening podman ai-clis zshrc"
+HOST_STEPS="base hostname ssh device-keys git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
+VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening podman ai-clis zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
 OPT_IN_STEPS="toolbx gui-access"
@@ -1197,6 +1383,12 @@ if should_run "hostname"; then
     fi
 fi
 
+CONFIRM_DEVICE_KEYS=""
+if should_run "device-keys"; then
+    confirm "Autorizar nesta máquina as chaves de dispositivos que o GitHub reúne (github.com/${GITHUB_KEYS_USER}.keys)? O bloco gerenciado é reescrito a cada execução, e chaves fora dele ficam intocadas" \
+        && CONFIRM_DEVICE_KEYS=1
+fi
+
 CONFIRM_SSHD_HARDENING=""
 if should_run "sshd-hardening" && [ ! -f /etc/ssh/sshd_config.d/99-dotfiles-hardening.conf ]; then
     confirm "Desabilitar login por senha via SSH (só chave pública a partir daqui)?" && CONFIRM_SSHD_HARDENING=1
@@ -1399,6 +1591,16 @@ EOF
         echo -e "${GREEN}✓ ~/.ssh/config configurado para github.com.${NC}"
     else
         echo -e "${YELLOW}~/.ssh/config já possui uma entrada para github.com.${NC}"
+    fi
+fi
+
+if should_run "device-keys"; then
+    echo -e "\n${BLUE}==> Chaves de dispositivos (GitHub)${NC}"
+    if [ "${CONFIRM_DEVICE_KEYS:-}" = "1" ]; then
+        sync_device_keys_from_github \
+            || echo -e "${YELLOW}Chaves de dispositivos pendentes; o authorized_keys ficou como estava.${NC}" >&2
+    else
+        echo -e "${YELLOW}Chaves de dispositivos: não autorizado.${NC}"
     fi
 fi
 
