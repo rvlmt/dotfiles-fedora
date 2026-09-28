@@ -923,6 +923,13 @@ prompt_github_app() {
     done
     printf '\n'
 
+    # O CR é removido aqui em bloco, e não só do fim de cada leitura. A diferença
+    # importa: quando o paste chega como UMA leitura só — bloco único do terminal —
+    # os `\r` estão no MEIO de `$linha`, e tirar a cauda não alcança nenhum deles.
+    # Aí o arquivo sai com CR no meio das linhas e o `openssl` recusa, que é
+    # exatamente o sintoma reportado.
+    key="${key//$'\r'/}"
+
     if [ -z "$key" ]; then
         echo -e "${YELLOW}  Sem private key: o módulo gh-app vai ficar inativo.${NC}" >&2
         return 1
@@ -934,8 +941,27 @@ prompt_github_app() {
     local PROV=$(mktemp)
     printf '%s' "$key" > "$PROV"
     if ! openssl pkey -in "$PROV" -noout &>/dev/null; then
+        # A primeira linha é o marcador BEGIN, que é público por definição — dizer
+        # qual marcador chegou é o que separa "chave de outro formato" de "conteúdo
+        # corrompido", e as duas exigem respostas diferentes. O resto nunca é mostrado.
+        local primeira; primeira=$(printf '%s' "$key" | head -1)
+        local linhas; linhas=$(printf '%s' "$key" | grep -c '')
+        local crs; crs=$(printf '%s' "$key" | tr -cd '\r' | wc -c)
+        # Guarda o que chegou, em 600, para QUEM ADMINISTRA olhar. O conteúdo de
+        # uma chave não sai daqui nem entra em log — a pessoa que colou é a única
+        # que precisa ver por que o terminal entregou algo diferente do que colou.
+        ( umask 077
+          mkdir -p "$GH_APP_DIR"
+          install -m 600 /dev/null "$GH_APP_DIR/rejected.pem" )
+        printf '%s' "$key" > "$GH_APP_DIR/rejected.pem"
         rm -f "$PROV"; unset key app_id linha
-        echo -e "${YELLOW}  O que veio colado não é uma private key legível pelo openssl; descartando.${NC}" >&2
+        echo -e "${YELLOW}  O que chegou não é uma private key legível pelo openssl; descartando.${NC}" >&2
+        echo -e "${YELLOW}  Guardado em $GH_APP_DIR/rejected.pem (600) para você inspecionar com${NC}" >&2
+        echo -e "${YELLOW}  'cat -A $GH_APP_DIR/rejected.pem' — o -A mostra o fim de cada linha.${NC}" >&2
+        echo -e "${YELLOW}    primeira linha: ${primeira:-<vazia>}" >&2
+        echo -e "${YELLOW}    linhas: ${linhas}   caracteres: ${#key}   CR remanescentes: ${crs}" >&2
+        echo -e "${YELLOW}  Uma chave RSA tem BEGIN/END com o mesmo nome nos dois, e nenhum CR." >&2
+        echo -e "${YELLOW}  Se a primeira linha não é o BEGIN, o paste foi para outro lugar, ou chegou com lixo junto.${NC}" >&2
         return 1
     fi
 
