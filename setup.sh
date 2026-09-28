@@ -1103,6 +1103,27 @@ if should_run "sshd-hardening" && [ ! -f /etc/ssh/sshd_config.d/99-dotfiles-hard
     confirm "Desabilitar login por senha via SSH (só chave pública a partir daqui)?" && CONFIRM_SSHD_HARDENING=1
 fi
 
+# Existe um usuário não-root que consiga entrar? Pergunta feita SEM sudo, de
+# propósito: o bloco de perguntas roda ANTES do `sudo -v` mais abaixo, e qualquer
+# leitura privilegiada aqui abriria uma segunda pausa para senha no meio do
+# roteiro — o oposto do motivo de as perguntas ficarem todas no começo.
+# `/etc/passwd` é legível por todo mundo, então a resposta sai sem privilégio.
+have_login_user() {
+    awk -F: '$3 >= 1000 && $7 !~ /(nologin|false)$/ { c++ } END { exit !(c > 0) }' /etc/passwd
+}
+
+CONFIRM_LOCK_ROOT=""
+if should_run "sshd-hardening"; then
+    if have_login_user; then
+        confirm "Travar a senha do root (passwd -l)? O root deixa de autenticar por senha. sudo a partir do seu usuário continua igual, e a volta por console continua valendo." \
+            && CONFIRM_LOCK_ROOT=1
+    else
+        # A máquina não tem por onde entrar além do root. Travar agora seria
+        # exatamente o lockout que o resto do módulo existe para evitar.
+        echo -e "${YELLOW}Travar o root: pulado, não há usuário não-root com shell de login nesta máquina.${NC}"
+    fi
+fi
+
 CONFIRM_AI_CLIS=""
 if should_run "ai-clis"; then
     confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) nesta máquina? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
@@ -1468,6 +1489,33 @@ EOF
         fi
     else
         echo -e "${YELLOW}Hardening do sshd já aplicado ($SSHD_CONFIG existe).${NC}"
+    fi
+
+    # A senha do root é uma credencial sem propósito numa máquina em que se entra
+    # por chave: ela não é caminho para nada que o sudo não cubra. Travá-la remove
+    # a credencial; deixá-la mais forte apenas a conserva, e é o que uma persistência
+    # pós-compromisso tenta primeiro.
+    #
+    # A guarda de "existe usuário que entra" foi feita no bloco de perguntas. Aqui
+    # só resta não refazer trabalho: `passwd -S` devolve L para senha travada, e
+    # essa é a única leitura privilegiada, agora que o `sudo -v` já passou.
+    if [ "${CONFIRM_LOCK_ROOT:-}" = "1" ]; then
+        _rs=$(sudo passwd -S root 2>/dev/null | awk '{print $2}')
+        if [ "$_rs" = "L" ]; then
+            echo -e "${YELLOW}Senha do root já está travada, pulando.${NC}"
+        elif [ -z "$_rs" ]; then
+            # Estado desconhecido. Assumir que está travada pouparia um trabalho, e
+            # assumir que não está travaria uma máquina sem querer. Nenhuma das duas
+            # é segura, então não se mexe.
+            echo -e "${YELLOW}Não consegui ler o estado da senha do root; nada foi alterado.${NC}" >&2
+        else
+            if sudo passwd -l root > /dev/null 2>&1; then
+                echo -e "${GREEN}✓ Senha do root travada.${NC}"
+            else
+                echo -e "${YELLOW}Não consegui travar a senha do root.${NC}" >&2
+            fi
+        fi
+        unset _rs
     fi
 fi
 
