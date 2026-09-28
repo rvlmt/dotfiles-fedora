@@ -441,12 +441,22 @@ os IDs revisados são parte do procedimento.
 
 ## Unidades criadas por instaladores de terceiros
 
-Duas units da **VM de agentes** são criadas por instaladores, não pelo `setup.sh`:
-`antigravity-cli-daemon.service` (do `agy`) e `opencode.service` (do opencode).
-O instalador não consulta o padrão, então o que ele escrever é estado **sem dono
-no repositório** — foi assim que o servidor do OpenCode ended up divergindo do
-padrão, com um ajuste de escuta feito à mão e que um `setup.sh` em uma VM nova não
-reproduziria.
+**Só uma** unit da VM de agentes é criada por instalador:
+`antigravity-cli-daemon.service`, do `agy`. O instalador não consulta o padrão,
+então o que ele escreve é estado **sem dono no repositório**.
+
+O `opencode` **não cria unit nenhuma** — e isso não é impressão. Na v2,
+`opencode service start` executa `opencode serve --service` como filho
+`detached`, com `stdio` ignorado e `unref`; não há caminho de `systemd` em todo o
+código do projeto. Medido na VM: o processo aparece com `ppid=1`, e o systemd
+responde *"PID 91628 does not belong to any loaded unit"*. **Esse processo não
+volta depois de um reboot**, e nada no padrão o recria.
+
+O caminho documentado é o oposto do que o padrão fazia: uma unit escrita à mão,
+rodando `opencode serve` em **primeiro plano**. E há uma consequência que muda o
+resto: em modo foreground o `serve` **ignora `~/.config/opencode/service.json`**,
+então `hostname` e `porta` têm de vir de flag, e a senha, de variável de ambiente.
+Ver "OpenCode em uma VM nova", abaixo.
 
 O padrão declara as duas por drop-in, não editando a unit: assim uma reescrita do
 instalador não desfaz o que o padrão quer, e as outras diretivas que ele define
@@ -455,7 +465,7 @@ instalador não desfaz o que o padrão quer, e as outras diretivas que ele defin
 | Unit | Drop-in | O que declara |
 |---|---|---|
 | `antigravity-cli-daemon` | `…service.d/10-mise-path.conf` | o `PATH` do mise, para que o filho `npm exec` encontre o runtime |
-| `opencode` | `…service.d/10-bind.conf` | o endereço de escuta, `OPENCODE_BIND:OPENCODE_PORT` |
+| ~~`opencode`~~ | ~~`10-bind.conf`~~ | **Removido, por dois motivos.** A unit não existe: a v2 não cria nenhuma. E as variáveis do drop-in também não: `OPENCODE_BIND` e `OPENCODE_PORT` têm **0 ocorrências** no binário de 203 MB, entre as 49 `OPENCODE_*` que ele de fato conhece. O padrão passa a declarar a unit e a escuta. |
 
 A publicação na tailnet (`tailscale serve`) também é do padrão, e é declarada por
 `setup_opencode_serve` — com a ressalva de que ela não sobrescreve o que já
@@ -498,18 +508,24 @@ serviço — se já houver algo publicado, avisa e devolve a decisão.
 
 #### A senha do OpenCode é obrigatória, e o padrão a mantém estável
 
-A senha do servidor **não é opcional** no OpenCode v2, apesar de a documentação
-dizer que `OPENCODE_SERVER_PASSWORD` "habilita" o basic auth. O que o binário faz
-é sempre escolher um valor:
+A senha do servidor **não é opcional** no OpenCode v2. O binário sempre escolhe um
+valor:
 
-- **com `--service`** (o que o instalador usa e o padrão preserva): a senha vem de
-  `~/.config/opencode/service.json` e é **estável** entre restarts;
-- **sem `--service`**: a senha vem de `OPENCODE_SERVER_PASSWORD` ou, se ela não
-  existir, é **gerada aleatoriamente a cada start** e registrada no journal.
+- **com `--service`**: a senha vem de `~/.config/opencode/service.json` e é
+  **estável** entre restarts — o código reutiliza a guardada e só gera 32 bytes
+  aleatórios quando não existe nenhuma. Esse é o único caminho em que a senha é
+  persistida, e é o que o padrão deve preservar;
+- **sem `--service`** (foreground): a senha vem da variável **`OPENCODE_PASSWORD`**,
+  ou é gerada aleatória a cada start e impressa no stdout.
 
-`UnsetEnvironment=OPENCODE_SERVER_PASSWORD` não desliga a autenticação — apenas
-escolhe o caminho aleatório, o que invalida as credenciais já salvas no navegador
-a cada reinício. Por isso o drop-in preserva `--service` de propósito.
+`OPENCODE_SERVER_PASSWORD` **ainda funciona**, mas é o nome **legado** — o atual
+é `OPENCODE_PASSWORD`, e o antigo é aceito como alias. Em modo `--service` a
+variável de ambiente é **ignorada por completo**: a senha vem do arquivo, e o CLI
+ainda remove as duas do ambiente que entrega ao processo que cria. Por isso não é
+`UnsetEnvironment=` com essas variáveis que mantém a senha estável — é
+`--service` que mantém, e o arquivo que guarda.
+
+Trocar a senha invalida todas as sessões abertas; elas duram 30 dias.
 
 Definir uma senha de sua preferência:
 
@@ -557,6 +573,151 @@ A porta larga do firewalld (`1025-65535` na zona `FedoraWorkstation`) continua
 registrada como pendência em
 [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10). Publicar pela tailnet
 reduz a dependência dela, mas não fecha o problema para os outros serviços.
+
+### OpenCode em uma VM nova
+
+Sequência medida numa VM real. Os caminhos de arquivo vêm do binário v2.0.18, não
+da documentação — que é onde a v1 e a v2 divergem.
+
+**0. O que o `opencode service` realmente aceita.** Cinco chaves, e nenhuma outra:
+`hostname`, `port`, `password`, `cors`, `env`. `bind`, `address` e `url` são
+rejeitados com *"Unknown service config key"*. O terceiro argumento do `set` só
+existe para `key = env`, onde o segundo argumento é o **nome** da variável e o
+terceiro o **valor**:
+
+```bash
+opencode service set env OPENCODE_LOG_LEVEL DEBUG
+```
+
+**1. Login.** A senha do servidor não é opcional, e **não se escreve em `argv`** —
+`opencode service set password "$senha"` deixa o valor no histórico do shell. O
+padrão do repo para isso já existe: ler com `read -s` e apagar a variável em
+seguida (`apply_opencode_password`). A senha é gravada em
+`~/.config/opencode/service.json` a `600` e **fica estável entre restarts**.
+
+```bash
+opencode service set hostname 127.0.0.1
+opencode service set password "<senha de verdade>"
+```
+
+**Loopback já é o default** — a doc diz que o servidor *"listens only on
+localhost"* e a porta padrão é `49374` (`0xc0de`) nos canais `latest`/`dev`/
+`beta`/`next`. Fixar `hostname` é redundância defensiva, e vale a pena mesmo
+assim: `opencode pair` **enumera endereços conforme o que está escutando**, então
+em `0.0.0.0` ele imprime um link por endereço alcançável em vez do que você
+quer. Foi exatamente isso que produziu links na LAN inúteis.
+
+**2. Publicação pela tailnet.** Não existe documentação oficial do Tailscale para
+o OpenCode — a árvore v2 não menciona `tailscale` uma vez sequer. O padrão de
+escuta em loopback e publicação por `tailscale serve` é **decisão deste projeto**,
+e é por isso que ela vale como regra e não como citação.
+
+```bash
+tailscale serve --bg --https=8443 http://127.0.0.1:49374
+tailscale serve status
+```
+
+⚠️ **A armadilha do nome defasado, medida na VM.** O `tailscale serve` guarda a
+publicação **chaveada pelo nome**, e o nó tem dois nomes: o `DNSName` (o que
+resolve) e o `HostName` (o que o tailscale ainda acredita). Medido:
+
+```
+Self DNSName:  fedora-vm.sawfish-banjo.ts.net.
+Self HostName: fedora
+config do serve: fedora.sawfish-banjo.ts.net:8443
+```
+
+Com o nó renomeado, a publicação fica chaveada no nome antigo, o `tailscaled` pede
+certificado para um nome que o nó não responde, e o TLS morre no handshake com
+`tlsv1 alert internal error (592)` — sem mensagem que aponte a causa. HTTP puro
+devolve `400`, que é só o listener dizendo "eu espero TLS". **Reiniciar o serviço
+não resolve**; o certificado não tem a ver com ele.
+
+O conserto é republicar, e é instantâneo:
+
+```bash
+tailscale serve reset
+tailscale serve --bg --https=8443 http://127.0.0.1:49374
+```
+
+E o sintoma que confirma a causa: o certificado sai correto na hora, com o `CN`
+igual ao nome novo. Reconciliar o `HostName` evita a recorrência:
+
+```bash
+sudo tailscale set --hostname=<hostname-da-maquina>
+```
+
+**3. Link de acesso.** O `pair` imprime links de uso único, que **expiram em 5
+minutos**, e um QR code do primeiro. Para acessar de outro aparelho, a URL
+publicada entra explicitamente:
+
+```bash
+opencode pair --url https://<maquina>.<tailnet>.ts.net:8443
+```
+
+Com `--url` sai **um** link, e o `pair` deixa de consultar os endereços do
+servidor. **Não "teste" o link para verificar se funciona**: ele é de uso único, e
+consumir é usar. Para verificar o caminho, use um endpoint que não queima o link:
+
+```bash
+curl -i https://<maquina>.<tailnet>.ts.net:8443/api/health   # 401 = chegou autenticado
+```
+
+**4. O que falta, e é o passo que o padrão ainda não cobre.** `opencode service
+start` **não cria unit** — spawna um filho `detached`, com `unref`, que não
+sobrevive a reboot e não pertence a nenhuma unit. Para rodar sob systemd é preciso
+escrever a unit, com `opencode serve` em **primeiro plano**, e aí muda o quadro:
+o foreground **ignora `~/.config/opencode/service.json`**, então `hostname` e
+`porta` vêm de flag (`--hostname`, `--port`) e a senha, de `OPENCODE_PASSWORD` no
+ambiente — de preferência um `EnvironmentFile` a `600`, lido no start. `serve` em
+primeiro plano bloqueia para sempre, que é o que uma unit quer.
+
+**Ordem de montagem numa VM nova**, sem nada exposto no meio: senha e loopback
+(1) → publicação (2) → unit (4) → só então `pair` (3). Pular direto ao `pair`
+deixa o processo escutando fora do loopback enquanto ninguém está olhando.
+
+### Antigravity (`agy`) em uma VM nova
+
+Três passos, e **dois são automatizáveis; o primeiro não é**.
+
+**1. Login, manual e uma vez só.** O `agy` autentica por OAuth no navegador:
+
+```bash
+agy
+```
+
+O passo de terminal do agente é só abrir o `agy`; a autenticação em si é humana.
+É a mesma natureza do login de pessoa do `gh` — automação que depende de abrir
+navegador não é automação.
+
+**2. O `remote-control`.** Para servir a interface de controle remoto:
+
+```bash
+agy remote-control start --name "$(hostname)"
+```
+
+O que roda em serviço de fundo é o `serve`:
+
+```bash
+systemctl --user cat antigravity-cli-daemon.service | grep ExecStart
+# ExecStart=/home/<user>/.local/bin/agy remote-control serve
+```
+
+**3. Habilitar no boot.** A unit é criada pelo instalador do `agy`; o papel do
+padrão é apenas habilitá-la, e é idempotente:
+
+```bash
+systemctl --user enable antigravity-cli-daemon.service
+```
+
+⚠️ **Pendência conhecida, e ela é uma divergência.** O padrão declara um drop-in
+`…antigravity-cli-daemon.service.d/10-mise-path.conf`, para que o filho `npm exec`
+encontre o runtime do mise — serviço systemd não lê o `~/.zshrc`. **Esse drop-in
+não está na VM**, e mesmo assim o daemon está `active` e servindo, porque o
+`ExecStart` atual chama o `agy` direto. Ou a premissa do drop-in ficou obsoleta
+quando o `ExecStart` mudou, ou o drop-in nunca foi escrito. **Não se sabe qual**,
+e a decisão de removê-lo ou escrevê-lo depende de resolver isso — não de escolher
+uma das duas no escuro.
 
 ### `gh` é opcional; a base é git sobre SSH
 
