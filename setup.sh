@@ -413,6 +413,135 @@ ExecStart=$new_line"
 }
 
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
+# Instala um pacote npm global acompanhando a versão publicada mais recente.
+#
+# Existe separada da install_npm_global porque aquela decide por PRESENÇA do
+# binário, e presença não é versão: uma máquina que rodou o módulo uma vez fica
+# presa na primeira versão que caiu, para sempre. Aqui a pergunta é feita ao
+# registro, e o instalador só roda quando a resposta difere do que está em disco.
+#
+# O JSON do registro tem megabytes, e `sed` sobre ele seria frágil — a chave
+# `"latest"` reaparece em outros lugares do documento, e o primeiro casamento
+# depende de onde a chave aparecer. Por isso a extração é feita com o próprio
+# Node, que este módulo já tem no PATH: prepend_mise_shims roda antes, e
+# ensure_host_node instala o runtime se faltar. Pedir JSON a um programa que
+# entende JSON é mais barato que tentar adivinhar a posição da chave.
+install_npm_global_latest() {
+    local package="$1" bin_name="$2"
+    local registry="https://registry.npmjs.org/$(printf '%s' "$package" | sed 's#/#%2F#')"
+    local latest=""
+    if command -v node &> /dev/null; then
+        latest=$(curl -fsSL --max-time 30 "$registry" 2>/dev/null | node -e '
+let s = "";
+process.stdin.on("data", d => s += d).on("end", () => {
+  try {
+    const v = JSON.parse(s)["dist-tags"] && JSON.parse(s)["dist-tags"].latest;
+    if (v) console.log(v);
+  } catch (e) {}
+});' 2>/dev/null | head -1)
+    fi
+    if [ -z "$latest" ]; then
+        # Sem o registro não há como saber se o que está instalado é o mais novo.
+        # Reaplicar o instalador às cegas rebaixaria uma instalação mais recente
+        # para uma mais antiga, e isso é pior do que estar desatualizado.
+        echo -e "${YELLOW}Não consegui consultar a versão publicada de $package; o que está instalado foi mantido.${NC}" >&2
+        echo -e "${YELLOW}  Registro: $registry${NC}" >&2
+        return 0
+    fi
+    local have=""
+    if command -v "$bin_name" &> /dev/null; then
+        have=$("$bin_name" --version 2>/dev/null | tr -d '\r' | awk '{ $1=$1; print }' || echo "")
+        have="${have##* }"
+        have="${have#v}"
+    fi
+    if [ -n "$have" ] && [ "$have" = "$latest" ]; then
+        echo -e "${YELLOW}$bin_name $have já é a versão publicada mais recente; pulando.${NC}"
+        return 0
+    fi
+    if [ -n "$have" ]; then
+        echo -e "${YELLOW}$bin_name $have instalado; a mais recente é $latest. Atualizando.${NC}"
+    fi
+    if command -v bun &> /dev/null; then
+        bun add -g "$package" || npm install -g "$package"
+    elif command -v npm &> /dev/null; then
+        npm install -g "$package"
+    else
+        echo -e "${YELLOW}Nem Bun nem npm encontrados para instalar $package.${NC}" >&2
+        return 0
+    fi
+    if command -v "$bin_name" &> /dev/null; then
+        echo -e "${GREEN}✓ $bin_name $latest.${NC}"
+    else
+        echo -e "${YELLOW}Aviso: $package instalado, mas o comando '$bin_name' não foi encontrado no PATH.${NC}" >&2
+    fi
+    unset registry latest have
+}
+
+# Instala um pacote npm global acompanhando a versão publicada mais recente.
+#
+# Existe separada da install_npm_global porque aquela decide por PRESENÇA do
+# binário, e presença não é versão: uma máquina que rodou o módulo uma vez fica
+# presa na primeira versão que caiu, para sempre. Aqui a pergunta é feita ao
+# registro, e o instalador só roda quando a resposta difere do que está em disco.
+#
+# O JSON do registro tem ~190 kB. Medido: para este pacote, o primeiro
+# casamento de `"latest":"` pelo sed hoje já é o correto, então a fragilidade
+# não é atual — é estrutural. A chave pode reaparecer aninhada em outro objeto
+# do documento, e aí um sed acerta por acidente. Extrair por Node não depende
+# de posição, e este módulo já tem Node no PATH: prepend_mise_shims roda antes,
+# e ensure_host_node instala o runtime se faltar. Pedir JSON a um programa que
+# entende JSON é mais barato que torcer para o primeiro casamento ser o bom.
+install_npm_global_latest() {
+    local package="$1" bin_name="$2"
+    local registry="https://registry.npmjs.org/$(printf '%s' "$package" | sed 's#/#%2F#')"
+    local latest=""
+    if command -v node &> /dev/null; then
+        latest=$(curl -fsSL --max-time 30 "$registry" 2>/dev/null | node -e '
+let s = "";
+process.stdin.on("data", d => s += d).on("end", () => {
+  try {
+    const v = JSON.parse(s)["dist-tags"] && JSON.parse(s)["dist-tags"].latest;
+    if (v) console.log(v);
+  } catch (e) {}
+});' 2>/dev/null | head -1)
+    fi
+    if [ -z "$latest" ]; then
+        # Sem o registro não há como saber se o que está instalado é o mais novo.
+        # Reaplicar o instalador às cegas rebaixaria uma instalação mais recente
+        # para uma mais antiga, e isso é pior do que estar desatualizado.
+        echo -e "${YELLOW}Não consegui consultar a versão publicada de $package; o que está instalado foi mantido.${NC}" >&2
+        echo -e "${YELLOW}  Registro: $registry${NC}" >&2
+        return 0
+    fi
+    local have=""
+    if command -v "$bin_name" &> /dev/null; then
+        have=$("$bin_name" --version 2>/dev/null | tr -d '\r' | awk '{ $1=$1; print }' || echo "")
+        have="${have##* }"
+        have="${have#v}"
+    fi
+    if [ -n "$have" ] && [ "$have" = "$latest" ]; then
+        echo -e "${YELLOW}$bin_name $have já é a versão publicada mais recente; pulando.${NC}"
+        return 0
+    fi
+    if [ -n "$have" ]; then
+        echo -e "${YELLOW}$bin_name $have instalado; a mais recente é $latest. Atualizando.${NC}"
+    fi
+    if command -v bun &> /dev/null; then
+        bun add -g "$package" || npm install -g "$package"
+    elif command -v npm &> /dev/null; then
+        npm install -g "$package"
+    else
+        echo -e "${YELLOW}Nem Bun nem npm encontrados para instalar $package.${NC}" >&2
+        return 0
+    fi
+    if command -v "$bin_name" &> /dev/null; then
+        echo -e "${GREEN}✓ $bin_name $latest.${NC}"
+    else
+        echo -e "${YELLOW}Aviso: $package instalado, mas o comando '$bin_name' não foi encontrado no PATH.${NC}" >&2
+    fi
+    unset registry latest have
+}
+
 install_npm_global() {
     local package="$1" bin_name="$2"
     if command -v "$bin_name" &> /dev/null; then
@@ -455,6 +584,28 @@ install_common_ai_clis() {
 
     install_npm_global "@anthropic-ai/claude-code" "claude"
     install_npm_global "@openai/codex" "codex"
+    # DeepSeek Harness. O README o descreve como developer preview com
+    # "COMPATIBILITY-BREAKING CHANGES" explícito, e a documentação oficial só
+    # mostra `npx`. O `npm install -g` abaixo é o mesmo caminho que as outras
+    # cinco usam, e é o que torna o binário `dsh` utilizável sem baixar o
+    # pacote inteiro a cada invocação. A escolha de acompanhar a versão
+    # publicada mais recente é deliberada: um pacote em preview que muda de
+    # forma incompatível entre versões é o pior candidato possível para um pin
+    # entre versões é o pior candidato possível para um pin que ninguém reverte.
+    # O pacote não declara `engines` em nenhuma das versões publicadas, então o
+    # requisito (^22.19 ou >=24) não é imposto pelo npm e depende do pin do mise.
+    install_npm_global_latest "@deepseek-ai/dsh" "dsh"
+    # DeepSeek Harness. O README o descreve como developer preview com
+    # "COMPATIBILITY-BREAKING CHANGES" explícito, e a documentação oficial só
+    # mostra `npx`. O `npm install -g` abaixo é o mesmo caminho que as outras
+    # cinco usam, e é o que torna o binário `dsh` utilizável sem baixar o
+    # pacote inteiro a cada invocação. A escolha de acompanhar a versão
+    # publicada mais recente é deliberada: um pacote em preview que muda de
+    # forma incompatível entre versões é o pior candidato possível para um pin
+    # entre versões é o pior candidato possível para um pin que ninguém reverte.
+    # O pacote não declara `engines` em nenhuma das versões publicadas, então o
+    # requisito (^22.19 ou >=24) não é imposto pelo npm e depende do pin do mise.
+    install_npm_global_latest "@deepseek-ai/dsh" "dsh"
 
     if command -v cursor-agent &> /dev/null; then
         echo -e "${YELLOW}cursor-agent já instalado, pulando.${NC}"

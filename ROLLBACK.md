@@ -244,10 +244,28 @@ sudo dnf remove antigravity
 
 ## `ai-clis` — as CLIs de agente e o daemon do agy
 
-O módulo instala as quatro CLIs de npm **pelo Bun** (`bun add -g`, com fallback
+O módulo instala as CLIs de npm **pelo Bun** (`bun add -g`, com fallback
 para npm), e por instalador nativo o Cursor Agent, o OpenCode e o `agy`. O
 instalador do `agy` ainda deixa uma unit de usuário que precisa ser parada antes
 dos binários sumirem.
+
+O `dsh` (DeepSeek Harness) entra pelo mesmo caminho, e sai pelo mesmo caminho
+dos outros: o pacote some, o binário some junto. Ele guarda estado próprio em
+`~/.dsh` — que só é criado no primeiro uso, não na instalação — então quem nunca
+rodou `dsh` não tem o que apagar aqui.
+
+```bash
+# conferir o que existe antes de apagar
+dsh --version 2>/dev/null
+ls -d ~/.dsh 2>/dev/null
+
+# remover o pacote e o binário
+bun remove -g @deepseek-ai/dsh 2>/dev/null || npm uninstall -g @deepseek-ai/dsh
+command -v dsh || echo "dsh fora do PATH"
+
+# remover o estado, se chegou a existir
+rm -rf ~/.dsh
+```
 
 ```bash
 # 1. Parar e remover as units de agente. Sem isso o daemon do agy continua
