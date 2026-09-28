@@ -72,6 +72,55 @@ rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub
 ⚠️ Remover a chave local **não** revoga outros usos dela. Se outro lugar
 depender deste par, o passo 3 quebra esse lugar também.
 
+## `device-keys` — devolver o `authorized_keys` ao estado anterior
+
+O módulo reescreve **só** o bloco entre os delimitadores
+`# >>> dotfiles-fedora: chaves de dispositivos (GitHub) >>>` e
+`# <<< … <<<`. Tudo fora do bloco nunca foi tocado e não precisa de rollback.
+
+**Antes de apagar, confira o que existe.** Um chave fora do bloco não pertence a
+este módulo — removê-la junto seria trocar o estado da máquina por outro, e não
+desfazer o que o módulo fez.
+
+```bash
+# 1. Ver o arquivo como ele está, com os blocos destacados.
+grep -nE '^(#|ssh-|ecdsa-|sk-)' ~/.ssh/authorized_keys
+
+# 2. Guardar uma cópia antes de mexer.
+cp -a ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak
+
+# 3. Remover o bloco gerenciado e as chaves que ele trazia.
+#    O awk abaixo apaga do BEGIN ao END inclusive; o resto da linha a linha
+#    sobrevive intacto, na ordem original.
+BEGIN='# >>> dotfiles-fedora: chaves de dispositivos (GitHub) >>>'
+END='# <<< dotfiles-fedora: chaves de dispositivos (GitHub) <<<'
+awk -v b="$BEGIN" -v e="$END" '
+  $0 == b { dentro = 1; next }
+  dentro   { if ($0 == e) dentro = 0; next }
+  { print }
+' ~/.ssh/authorized_keys > /tmp/ak.novo &&
+  cat /tmp/ak.novo > ~/.ssh/authorized_keys && rm -f /tmp/ak.novo
+
+chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+restorecon ~/.ssh/authorized_keys
+
+# 4. Conferir o resultado.
+ssh-keygen -lf ~/.ssh/authorized_keys
+```
+
+⚠️ **Desfazer isto revoga o acesso, não o concede.** Depois do passo acima a
+máquina só aceita as chaves que restaram fora do bloco. **Não feche a sessão de
+onde você está executando** antes de abrir outra e confirmar que ela entra — é a
+mesma armadilha do resto do hardening, e a saída já causa mais lockouts do que
+falha de configuração.
+
+E se o `authorized_keys.bak` não tiver o que esperava, resta o caminho de sempre:
+`sudo virsh console <vm>`, que não depende de SSH.
+
+**Repor o bloco do jeito do módulo**, em vez de apagar, é rodar o passo de novo
+com uma resposta afirmativa na pergunta. Ele é idempotente: mesmo feed, arquivo
+inalterado.
+
 ## `git` — identidade global e autenticação do GitHub CLI
 
 O módulo escreve quatro chaves de `git config --global` e faz `gh auth login`,
