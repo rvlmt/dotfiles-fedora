@@ -44,7 +44,7 @@ DEFAULT_GH_APP_ID="5098816"
 # concordem. Quem fornece Node/npm no host é o mise — o pacote nodejs do dnf
 # não é instalado de propósito, para que o runtime do host não dependa da
 # versão que o Fedora decidir empacotar. Ver README, "Runtime Node no host".
-MISE_NODE_VERSION="22.23.3"
+MISE_NODE_VERSION="24.21.0"
 MISE_DEVCONTAINER_VERSION="0.89.0"
 MISE_BIN_PATH="$HOME/.local/bin/mise"
 MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
