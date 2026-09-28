@@ -574,6 +574,123 @@ registrada como pendência em
 [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10). Publicar pela tailnet
 reduz a dependência dela, mas não fecha o problema para os outros serviços.
 
+### Hermes — documentado, não instalado
+
+**Nenhuma das duas rotas foi executada.** O que está aqui é a análise de custo de
+cada uma, para a decisão ser sua antes de algo entrar no host. A Nous Research
+publica os dois caminhos como pares de primeira classe, e a documentação **não
+recomenda um sobre o outro**.
+
+**O que é.** Um harness de agente autônomo, não um copilot de código: tem
+interface de terminal, memória e skills que persistem entre sessões, agendador
+`cron`, delegação a subagentes, e um gateway que o expõe em ~20 plataformas de
+mensagem. O diferencial declarado é um ciclo de aprendizado fechado, com o agente
+curando a própria memória e criando skills depois de tarefas complexas. 60+
+ferramentas, cliente MCP, e 7 backends de execução de shell. MIT, repo
+`NousResearch/hermes-agent`.
+
+#### Rota A — `install.sh` (o que a doc oferece primeiro)
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh \
+  | bash -s -- --non-interactive --verbose
+```
+
+E o que ele **de fato** faz, lido no script: **não baixa binário do agente, não
+instala por pip/npm/cargo, não puxa imagem, e não sobe serviço.** Ele faz
+`git clone --filter=tree:0` do repo, baixa um **`uv` 0.12.3 pinado com sha256
+verificado**, deixa o gerenciador do próprio projeto (`pm`, com `uv.lock`)
+resolver as dependências sobre um **Python 3.14 gerenciado**, e compila a
+fonte. Nenhuma chamada a `docker` ou `podman` no script inteiro.
+
+Quatro coisas que decidem contra ela num `setup.sh`:
+
+- ⚠️ **Bloqueia num harness com pseudo-TTY.** Os estágios `setup` e `gateway`
+  leem `/dev/tty` e só se pulam quando `/dev/tty` **não abre**. Qualquer
+  alocador de pty — `expect`, `script(1)`, `docker run -t`, alguns runners de CI
+  — faz a verificação passar e o instalador **travar para sempre** esperando o
+  assistente. O mesmo script funciona num CI e empaca noutro. Por isso
+  `--non-interactive` é obrigatório e não uma conveniência: o `setup.sh` roda sob
+  pty, e sem a flag ele não termina.
+- **Instalar não é configurar.** O install novo tem `model: ""` — um sentinela
+  explícito de "ainda não configurado" — e `LLM_MODEL` não é mais lido do `.env`.
+  É preciso `hermes config set model.provider` e `model.default`. Nenhuma flag do
+  instalador faz isso.
+- **Não é idempotente.** A segunda execução é um *update*: `git merge
+  --ff-only`, e quando não dá, `git reset --hard origin/main` — com uma ref de
+  resgate escrita antes, então nada se perde, mas seus commits saem da branch. E
+  `git stash` e as refs de backup **acumulam** a cada rodada suja.
+- **Escreve nos rc do shell.** Acrescenta uma linha de `PATH` em `~/.zshrc` (e
+  outros). Idempotente por guarda, mas o `zshrc` aqui é um symlink versionado, e
+  o detalhe merece verificação antes, não depois.
+
+O que ela **não** sobrescreve, e isso é bem feito: `~/.hermes/.env` e
+`config.yaml` só são criados se ausentes, e o instalador **para** se o
+`git stash` falhar em vez de descartar trabalho.
+
+O lado bom que existe: o instalador expõe um protocolo de estágios de verdade —
+`--manifest` imprime a lista em JSON com `needs_user_input`, `--stage NOME` roda
+um isolado, `--commit SHA` fixa a revisão (validada por ancestralidade antes do
+checkout). O cabeçalho do script diz que esse protocolo *"kept for Hermes-Setup"*,
+isto é, existe um driver externo que já o consome. **O caminho de automação
+pretendido é estágio a estágio, não o `curl | bash` de uma vez.**
+
+#### Rota B — imagem oficial
+
+**Docker Hub, não GHCR.** O caminho `ghcr.io/nousresearch/hermes-agent` que
+circula em guias de terceiros **não é publicado**; a doc oficial só menciona
+`nousresearch/hermes-agent`. Tags `latest`, `stable`, `main` e versionadas
+(`v2026.9.24`), ~950 MB, `linux/amd64` e `linux/arm64`, base `debian:13.4`, com
+`docker-compose.yml` de primeira parte no repo. A doc descreve o estado como um
+único mount em **`/opt/data`** (o `~/.hermes` do host), com `/opt/hermes`
+read-only e `hermes update` recusando alteração de código da imagem.
+
+⚠️ **O `state.db` é SQLite em modo WAL, e há uma armadilha de corrupção.** A doc
+avisa que `virtiofs` e `9p`/drvfs **deixam escritores concorrentes corromper um
+banco WAL silenciosamente, e o `PRAGMA integrity_check` ainda passa**. Num volume
+nomeado no ext4 da VM isso não se aplica; num bind mount de `~/.hermes` sobre
+`virtiofs`, sim. Vale a regra: **volume nomeado, nunca bind mount** — e por
+extensão, nunca dois containers gateway contra o mesmo diretório de dados, que não
+tem lock nem detecção.
+
+#### Autenticação
+
+Só um caminho é automatizável. **BYO API key em `~/.hermes/.env`** (a `600`, que
+o instalador cria a partir do `.env.example`), mais `model.provider` e
+`model.default` no `config.yaml`.
+
+O caminho que a doc chama de recomendado — Nous Portal por OAuth — é **device
+code**: o Hermes imprime uma URL, **uma pessoa** abre no navegador e aprova, e o
+processo faz polling. Sem túnel, mas com navegador e com gente. Não há fluxo
+documentado de device code automatizado, nem injeção de token não interativa.
+
+Duas coisas da doc que valem porque são defaults seguros: o dashboard **falha
+fechado** em bind fora do loopback sem um provedor de auth registrado — e a
+`HERMES_DASHBOARD_INSECURE` virou **no-op depreciado**, removida depois que
+*"scanners de internet alcançaram dashboards expostos e drove the agent into
+planting an SSH-key backdoor"*. E a API server é desligada por padrão, exigindo
+`API_SERVER_KEY` para sair do loopback.
+
+#### Antes de fixar qualquer versão
+
+O PyPI lista **dois avisos sem correção publicada** (`fixed_in: []`), um de
+injeção em `_compress_context` e outro de consumo de recursos em
+`_handle_webhook_request`, e o fornecedor não respondeu à divulgação. Pode ser
+metadata obsoleta — o `pyproject.toml` da árvore main tem pinagem pesada e
+datada por CVE — mas para deploy automatizado convém checar contra a versão exata
+que se pretende fixar, e não confiar só no aviso.
+
+E os registries divergem entre si: PyPI em `0.19.0`, npm em `0.21.5`, as tags
+docker em `v2026.9.24`, e o `requires_python` publicado no PyPI é `<3.14` enquanto
+o da main é `<3.15` — então `pip install hermes-agent` em Python 3.14 seria
+**rejeitado pelos metadados publicados**, apesar de 3.14 ser o runtime suportado.
+Nada disso é o que o `install.sh` usa: ele clona o repo e usa o `uv.lock`. Os
+pacotes de registry são canal alternativo **não anunciado**, não substituto
+documentado.
+
+**Nenhuma das duas rotas foi executada nesta VM.** A decisão fica registrado aqui
+para quando for tomada.
+
 ### OpenDesign via container
 
 O daemon é um serviço, não uma CLI: processo de longa duração, porta própria e
