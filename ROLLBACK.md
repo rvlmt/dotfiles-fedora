@@ -169,6 +169,20 @@ sudo rm /etc/ssh/sshd_config.d/99-dotfiles-hardening.conf
 sudo systemctl reload sshd
 ```
 
+Destravar a senha do root, que o mesmo módulo aplica. É reversível, mas só
+funciona se você souber a senha: `passwd -l` não a guarda em lugar nenhum, e o
+`root` da instalação continua sendo `1234` numa VM recém-criada. Se a senha já
+não é essa, destravar deixa o root com uma senha que você não escolheu.
+
+```bash
+passwd -S root            # o segundo campo: L = travada, P = com senha
+sudo passwd -u root
+```
+
+Só faça isto com acesso por console — `sudo virsh console <vm>` — ou por outro
+caminho já aberto. Destravar o root não é o que te tranca para fora; ficar sem
+saber a senha dele, sim.
+
 ## `firewalld` — tirar a interface Tailscale da zona confiável
 
 ```bash
