@@ -33,7 +33,7 @@ rm -rf ~/.bun
 
 # 4. Ferramentas de CLI do módulo. curl e wget ficam de fora de propósito:
 #    são dependência de praticamente todo o resto.
-sudo dnf remove git gh jq tree tmux zellij ripgrep fd-find unzip btop tar dnf5-plugins
+sudo dnf remove git gh jq tree tmux zellij ripgrep fd-find unzip btop tar openssl dnf5-plugins
 ```
 
 Este módulo **não** instala `nodejs`/`npm`: o Node do host vem do mise. Se você
