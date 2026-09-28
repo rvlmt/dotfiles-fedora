@@ -893,10 +893,6 @@ prompt_github_app() {
     local limite=60 n=0 viu_begin=0
     while IFS= read -r -s linha; do
         n=$((n + 1))
-        # Um PEM copiado de um contexto Windows chega com CR no fim da linha. Não
-        # quebra o casamento do marcador abaixo, que é por substring, mas gravar o
-        # CR no arquivo tornaria a chave menos legível para o openssl.
-        linha="${linha%$'\r'}"
         # Linha vazia é ignorada, em qualquer posição, por duas razões que importam.
         # A primeira é o \r de um CRLF: o tty tem ICRNL ligado, então cada linha do
         # paste chega partida em duas, e sem isto o arquivo sairia com linhas vazias
@@ -933,11 +929,9 @@ prompt_github_app() {
     done
     printf '\n'
 
-    # O CR é removido aqui em bloco, e não só do fim de cada leitura. A diferença
-    # importa: quando o paste chega como UMA leitura só — bloco único do terminal —
-    # os `\r` estão no MEIO de `$linha`, e tirar a cauda não alcança nenhum deles.
-    # Aí o arquivo sai com CR no meio das linhas e o `openssl` recusa, que é
-    # exatamente o sintoma reportado.
+    # Higiene, não correção: medido, o `openssl` ACEITA um PEM cujas linhas terminam
+    # em CR. Isto é para o arquivo ficar canônico, e cobre também o CR que ficaria
+    # no MEIO de `$linha` se o paste chegasse como uma leitura única.
     key="${key//$'\r'/}"
 
     if [ -z "$key" ]; then
@@ -960,32 +954,20 @@ prompt_github_app() {
         return 1
     fi
 
-    local PROV=$(mktemp)
+    # Valida num arquivo temporário, e o temporário vai embora. Uma versão anterior
+    # guardava a captura em `rejected.pem` para eu poder inspecionar por que o
+    # openssl recusava: turned out a chave estava boa e o openssl não estava
+    # instalado. Era uma segunda cópia de uma chave privada em disco, existindo
+    # só por causa de um erro meu — e uma superfície de ataque que não compensa
+    # nenhum diagnóstico. A mensagem do próprio openssl é o diagnóstico certo.
+    local PROV; PROV=$(mktemp)
     printf '%s' "$key" > "$PROV"
-    local PROV_ERR; PROV_ERR=$(openssl pkey -in "$PROV" -noout 2>&1) || true
-    if ! openssl pkey -in "$PROV" -noout &>/dev/null; then
-        # A primeira linha é o marcador BEGIN, que é público por definição — dizer
-        # qual marcador chegou é o que separa "chave de outro formato" de "conteúdo
-        # corrompido", e as duas exigem respostas diferentes. O resto nunca é mostrado.
-        local primeira; primeira=$(printf '%s' "$key" | head -1)
-        local linhas; linhas=$(printf '%s' "$key" | grep -c '')
-        local crs; crs=$(printf '%s' "$key" | tr -cd '\r' | wc -c)
-        # Guarda o que chegou, em 600, para QUEM ADMINISTRA olhar. O conteúdo de
-        # uma chave não sai daqui nem entra em log — a pessoa que colou é a única
-        # que precisa ver por que o terminal entregou algo diferente do que colou.
-        ( umask 077
-          mkdir -p "$GH_APP_DIR"
-          install -m 600 /dev/null "$GH_APP_DIR/rejected.pem" )
-        printf '%s' "$key" > "$GH_APP_DIR/rejected.pem"
+    if ! PROV_ERR=$(openssl pkey -in "$PROV" -noout 2>&1); then
         rm -f "$PROV"; unset key app_id linha
-        echo -e "${YELLOW}  O que chegou não é uma private key legível pelo openssl; descartando.${NC}" >&2
-        echo -e "${YELLOW}  Guardado em $GH_APP_DIR/rejected.pem (600) para você inspecionar com${NC}" >&2
-        echo -e "${YELLOW}  'cat -A $GH_APP_DIR/rejected.pem' — o -A mostra o fim de cada linha.${NC}" >&2
-        echo -e "${YELLOW}    primeira linha: ${primeira:-<vazia>}" >&2
-        echo -e "${YELLOW}    linhas: ${linhas}   caracteres: ${#key}   CR remanescentes: ${crs}" >&2
-        echo -e "${YELLOW}  O openssl disse: ${PROV_ERR:-<sem mensagem>}" >&2
-        echo -e "${YELLOW}  Uma chave RSA tem BEGIN/END com o mesmo nome nos dois, e nenhum CR." >&2
-        echo -e "${YELLOW}  Se a primeira linha não é o BEGIN, o paste foi para outro lugar, ou chegou com lixo junto.${NC}" >&2
+        echo -e "${YELLOW}  O openssl recusou a chave colada; nada foi gravado.${NC}" >&2
+        echo -e "${YELLOW}  O openssl disse: ${PROV_ERR}" >&2
+        echo -e "${YELLOW}  Os pontos acima devem mostrar ~28 linhas. Se apareceram poucas,${NC}" >&2
+        echo -e "${YELLOW}  o paste não chegou inteiro — cole do BEGIN ao END.${NC}" >&2
         return 1
     fi
 
