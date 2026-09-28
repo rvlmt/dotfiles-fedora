@@ -31,6 +31,15 @@ NC='\033[0m'
 DEFAULT_GIT_NAME="rvlmt"
 DEFAULT_GIT_EMAIL="80988467+rvlmt@users.noreply.github.com"
 
+# App ID da GitHub App que é a identidade de máquina da VM. É um IDENTIFICADOR,
+# não uma credencial: aparece em claro no payload do JWT e na URL do app, e o
+# próprio GitHub o trata como não-secreto. Fica como default pelo mesmo motivo que
+# a identidade Git e as portas do OpenCode ficam: este script é de uso individual,
+# e perguntar o número a cada reexecução só atrapalha.
+#
+# A PRIVATE KEY não tem default, e não vai ter. Segredo não tem valor padrão.
+DEFAULT_GH_APP_ID="5098816"
+
 # Runtime do host, pinado aqui para que setup, shell de login e devcontainers
 # concordem. Quem fornece Node/npm no host é o mise — o pacote nodejs do dnf
 # não é instalado de propósito, para que o runtime do host não dependa da
@@ -869,7 +878,8 @@ prompt_github_app() {
             return 0
         fi
     else
-        read -r -p "  App ID (Settings da App → General): " app_id
+        read -r -p "  App ID [${DEFAULT_GH_APP_ID}]: " app_id
+        app_id="${app_id:-$DEFAULT_GH_APP_ID}"
         if [ -z "$app_id" ]; then
             echo -e "${YELLOW}  Sem App ID: o módulo gh-app fica inativo e o gh exigirá login.${NC}"
             return 1
