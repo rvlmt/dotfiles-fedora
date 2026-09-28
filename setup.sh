@@ -876,30 +876,52 @@ prompt_github_app() {
         fi
     fi
 
-    echo -e "  Cole a private key inteira. O script para no marcador END; a leitura é muda, nada é ecoado."
-    echo -e "  Uma linha em branco no começo cancela e deixa o módulo inativo."
-    local limite=60
+    echo -e "  Cole a private key inteira. A leitura é muda: o conteúdo não é ecoado, mas"
+    echo -e "  cada ponto abaixo é uma linha que entrou, para você ver o paste chegando."
+    echo -e "  Para desistir, Ctrl-D. Linha em branco não cancela: um paste traz uma antes"
+    echo -e "  do bloco, e tratar isso como cancelamento quebraria o paste."
+    local limite=60 n=0 viu_begin=0
     while IFS= read -r -s linha; do
-        # Linha em branco no primeiro passo cancela. Um PEM colado não tem linha
-        # em branco, então isso não atrapalha o caminho normal — e dá uma saída
-        # para quem digitou um App ID e mudou de ideia, porque sem isto o laço
-        # ficaria esperando 60 linhas que nunca vêm, num pty que não devolve EOF.
-        if [ -z "$key" ] && [ -z "$linha" ]; then
-            unset key linha
-            echo -e "${YELLOW}  Sem private key: o módulo gh-app fica inativo.${NC}" >&2
-            return 1
-        fi
+        n=$((n + 1))
+        # Um PEM copiado de um contexto Windows chega com CR no fim da linha. Não
+        # quebra o casamento do marcador abaixo, que é por substring, mas gravar o
+        # CR no arquivo tornaria a chave menos legível para o openssl.
+        linha="${linha%$'\r'}"
+        # Linha vazia é ignorada, em qualquer posição, por duas razões que importam.
+        # A primeira é o \r de um CRLF: o tty tem ICRNL ligado, então cada linha do
+        # paste chega partida em duas, e sem isto o arquivo sairia com linhas vazias
+        # no meio — que o openssl recusa. A segunda é a linha vazia que um paste
+        # traz ANTES do bloco, que um cancelamento por "primeira linha vazia"
+        # transformaria em falha. Um PEM de verdade não tem linha em branco, então
+        # ignorar é seguro.
+        [ -z "$linha" ] && continue
         key+="$linha"$'\n'
+        printf '.'
+        # Só os marcadores são notados, nunca o conteúdo: é o bastante para dizer
+        # "o paste não chegou" de "chegou truncado", que são falhas diferentes.
+        case "$linha" in *"-----BEGIN "*"PRIVATE KEY-----"*) viu_begin=1 ;; esac
+        # O casamento é por substring de propósito: com *bracketed paste*, o
+        # terminal entrega o bloco inteiro como UMA linha com newlines embutidos, e
+        # nesse caso a única forma de achar o fim é procurar o marcador dentro dela.
         case "$linha" in
             *"-----END "*"PRIVATE KEY-----") break ;;
         esac
         limite=$((limite - 1))
         if [ "$limite" -le 0 ]; then
-            echo -e "${YELLOW}  A chave não chegou ao marcador END em 60 linhas; descartando.${NC}" >&2
+            printf '\n'
+            echo -e "${YELLOW}  Li ${n} linhas e não vi -----END ... PRIVATE KEY-----." >&2
+            if [ "$viu_begin" = "0" ]; then
+                echo -e "${YELLOW}  Também não vi -----BEGIN ... PRIVATE KEY-----, o que significa${NC}" >&2
+                echo -e "${YELLOW}  que o paste não chegou ao prompt. Cole a chave INTEIRA, do${NC}" >&2
+                echo -e "${YELLOW}  BEGIN ao END, e espere os pontos aparecerem.${NC}" >&2
+            else
+                echo -e "${YELLOW}  Vi o BEGIN, então o paste entrou mas ficou truncado. Cole de novo.${NC}" >&2
+            fi
             unset key linha
             return 1
         fi
     done
+    printf '\n'
 
     if [ -z "$key" ]; then
         echo -e "${YELLOW}  Sem private key: o módulo gh-app vai ficar inativo.${NC}" >&2
