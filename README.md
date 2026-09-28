@@ -574,6 +574,110 @@ registrada como pendência em
 [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10). Publicar pela tailnet
 reduz a dependência dela, mas não fecha o problema para os outros serviços.
 
+### OpenDesign via container
+
+O daemon é um serviço, não uma CLI: processo de longa duração, porta própria e
+estado persistente. Instalado aqui pelo **compose base do upstream**, que é o que
+publica **só em loopback** — o override `docker-compose.linux.yml` troca para
+`network_mode: host` e é justamente o que não se quer.
+
+**O que a VM não tinha: provider de compose.** O `podman` estava instalado e o
+`podman compose` respondia *"looking up compose provider failed"* — nem
+`podman-compose` nem `docker-compose` presentes. Sem isso, o caminho do compose
+simplesmente não existe, e o sintoma não parece o que é.
+
+```bash
+sudo dnf install -y podman-compose
+podman compose version
+```
+
+⚠️ **O compose base tem `build:`, e ele precisa de `--no-build`.** O arquivo traz
+`image:` e `build:` juntos, que é normal para quem desenvolve a partir do repo.
+Sem a flag, o Podman tenta **compilar da fonte** — o caminho nativo, com
+toolchain e Node 24 — em vez de usar a imagem publicada. O `--no-build` não é
+opcional aqui.
+
+```bash
+git clone --depth 1 https://github.com/nexu-io/open-design.git ~/open-design
+cd ~/open-design/deploy
+podman compose up -d --no-build
+```
+
+**O `.env` a `600`, com token de 32 bytes** — é o que a doc do projeto prescreve
+(`openssl rand -hex 32`), e o mesmo padrão que o repo usa para as outras
+credenciais:
+
+```bash
+( umask 077; install -m 600 /dev/null .env )
+TOKEN=$(openssl rand -hex 32)
+{
+  printf 'OD_API_TOKEN=%s\n' "$TOKEN"
+  printf 'OPEN_DESIGN_PORT=7456\n'
+} >> .env
+chmod 600 .env
+```
+
+`OPEN_DESIGN_DISABLE_API_AUTH=1` **não** vai aqui. A doc oferece isso para quem
+atrás de um proxy reverso já autenticado, e a mesma doc **não diz o que acontece
+com `OD_API_TOKEN` vazio e a flag desligada**. Não se supõe esse estado.
+
+**Pinar a imagem, e qual digest é o pinnable — uma armadilha que custou uma rodada.**
+A tag `:latest` é mutável e a doc recomenda pinar. Só que existem três digests, e
+só um serve:
+
+| o que | onde | pinnable |
+|---|---|---|
+| **ID da imagem** (digest da config) | `podman image inspect --format '{{.Id}}'` | **não** — o registro responde `manifest unknown` |
+| manifest da plataforma | `podman image inspect --format '{{.Digest}}'` | serve para uma arch só |
+| **digest do índice** (multi-arch) | cabeçalho `Docker-Content-Digest` do registro | **é este** |
+
+```bash
+T=$(curl -s "https://ghcr.io/token?scope=repository:nexu-io/od:pull" \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+curl -sI -H "Authorization: Bearer $T" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json' \
+  https://ghcr.io/v2/nexu-io/od/manifests/latest | grep -i docker-content-digest
+```
+
+O erro que a doc não cobre: conferir o digest com `skopeo inspect --raw |
+sha256sum` e **confiar no resultado sem verificar se `skopeo` existe**. Sem o
+binário, o pipeline devolve a entrada vazia e o sha256 de string vazia
+(`e3b0c442…`) — que parece um digest, e não é. Com `2>/dev/null` o
+"command not found" desaparece junto.
+
+**Verificar por endpoint, nunca por estado do container.** Existe um bug em
+aberto em que o daemon trava consumindo CPU e memória enquanto o `systemd` — ou o
+Podman — continua reportando *active*. O readiness é a resposta HTTP:
+
+```bash
+# o healthcheck é ABERTO, de propósito: 200 sem credencial é o esperado
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7456/api/health   # 200
+
+# um endpoint de verdade, para conferir a autenticação
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7456/api/projects        # 401
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+     http://127.0.0.1:7456/api/projects                                            # 200
+curl -s -o /dev/null -w '%{http_code}\n' -u "open-design:$TOKEN" \
+     http://127.0.0.1:7456/api/projects                                            # 200
+```
+
+`401` sem credencial e `200` com o token é a prova de que a autenticação está
+funcionando — e é a única prova que importa aqui. O corpo do 401 diz as duas
+formas aceitas: *"Authorization: Bearer <OD_API_TOKEN> or browser Basic
+authentication required"*.
+
+E o que o compose garante, verificado no container: `user=open-design` (uid
+1001, não root), `readonly=true`, `mem_limit=384m`, `pids_limit=256`, estado num
+volume nomeado. A porta é **`127.0.0.1:7456`**, e medida de fora — LAN e tailnet —
+ela está **fechada**.
+
+⚠️ **O container não tem MCP.** A doc diz que os snippets de MCP *"require a
+local/source install for now"*. Então os dois caminhos não se somam: o container
+mantém a base limpa, e o nativo é o único que entrega MCP. Ver a seção do
+OpenDesign nativo, e a escolha é sua sobre qual dos dois fica.
+
+**Rollback** na seção `podman` do [`ROLLBACK.md`](ROLLBACK.md).
+
 ### OpenCode em uma VM nova
 
 Sequência medida numa VM real. Os caminhos de arquivo vêm do binário v2.0.18, não
