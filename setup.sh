@@ -938,8 +938,21 @@ prompt_github_app() {
     # Valida **antes** de gravar. Sem isto, um Ctrl-D no meio do paste deixaria um
     # arquivo truncado em disco com a App marcada como configurada, e o "gravados"
     # seria mentira. A validação é local e não usa API.
+    # `openssl` é dependência dura deste passo E do helper. Sem esta checagem, uma
+    # máquina sem o pacote produz "command not found", que com o erro suprimido
+    # virava "a chave que você colou é inválida" — uma acusação falsa contra quem
+    # colou, causada por uma dependência ausente. Aconteceu numa VM real.
+    if ! command -v openssl &>/dev/null; then
+        echo -e "${YELLOW}  'openssl' não está instalado, então a chave não pode ser validada.${NC}" >&2
+        echo -e "${YELLOW}  Instale com 'sudo dnf install openssl' e rode o módulo de novo;${NC}" >&2
+        echo -e "${YELLOW}  a chave não foi gravada.${NC}" >&2
+        unset key app_id linha
+        return 1
+    fi
+
     local PROV=$(mktemp)
     printf '%s' "$key" > "$PROV"
+    local PROV_ERR; PROV_ERR=$(openssl pkey -in "$PROV" -noout 2>&1) || true
     if ! openssl pkey -in "$PROV" -noout &>/dev/null; then
         # A primeira linha é o marcador BEGIN, que é público por definição — dizer
         # qual marcador chegou é o que separa "chave de outro formato" de "conteúdo
@@ -960,6 +973,7 @@ prompt_github_app() {
         echo -e "${YELLOW}  'cat -A $GH_APP_DIR/rejected.pem' — o -A mostra o fim de cada linha.${NC}" >&2
         echo -e "${YELLOW}    primeira linha: ${primeira:-<vazia>}" >&2
         echo -e "${YELLOW}    linhas: ${linhas}   caracteres: ${#key}   CR remanescentes: ${crs}" >&2
+        echo -e "${YELLOW}  O openssl disse: ${PROV_ERR:-<sem mensagem>}" >&2
         echo -e "${YELLOW}  Uma chave RSA tem BEGIN/END com o mesmo nome nos dois, e nenhum CR." >&2
         echo -e "${YELLOW}  Se a primeira linha não é o BEGIN, o paste foi para outro lugar, ou chegou com lixo junto.${NC}" >&2
         return 1
@@ -1168,7 +1182,7 @@ if should_run "base"; then
     # instalado.
     sudo dnf install -y --skip-unavailable \
         git gh jq tree tmux zellij ripgrep fd-find unzip \
-        curl wget btop tar \
+        curl wget btop tar openssl \
         dnf5-plugins
     echo -e "${GREEN}✓ Pacotes base instalados.${NC}"
 
