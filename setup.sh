@@ -1225,7 +1225,7 @@ fi
 
 CONFIRM_AI_CLIS=""
 if should_run "ai-clis"; then
-    confirm "Instalar as CLIs de IA (Claude Code, Codex, Gemini, etc.) nesta máquina? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
+    confirm "Instalar as CLIs de IA (Claude Code, Codex, Cursor Agent, Open Code, Antigravity, DeepSeek Harness) nesta máquina? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
 fi
 
 # A senha do servidor do OpenCode é perguntada sempre que o módulo `ai-clis` for
