@@ -301,7 +301,7 @@ em que `mise activate` não se aplica, como em serviço systemd ou script.
 Se você aceitou o módulo `ai-clis`, há consumo adicional, e ele é consequência
 dessa escolha, não um invariante do host:
 
-- `codex`, `gemini`, `copilot` e `ocx`/`opencodex` resolvem `#!/usr/bin/env node`,
+- `codex` e `ocx`/`opencodex` resolvem `#!/usr/bin/env node`,
   ou seja, o mesmo Node do mise. `claude`, `opencode` e `cursor-agent` são
   binários nativos e não usam Node.
 - O instalador do `agy` cria o serviço `antigravity-cli-daemon`, que executa

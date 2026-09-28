@@ -455,8 +455,6 @@ install_common_ai_clis() {
 
     install_npm_global "@anthropic-ai/claude-code" "claude"
     install_npm_global "@openai/codex" "codex"
-    install_npm_global "@google/gemini-cli" "gemini"
-    install_npm_global "@github/copilot" "copilot"
 
     if command -v cursor-agent &> /dev/null; then
         echo -e "${YELLOW}cursor-agent já instalado, pulando.${NC}"
@@ -1677,8 +1675,6 @@ if should_run "ai-clis"; then
     done <<'CLI_LIST'
 claude|.claude
 codex|.codex
-gemini|.gemini
-copilot|.config/gh
 cursor-agent|.cursor-agent
 agy|.agy
 opencode|.config/opencode
