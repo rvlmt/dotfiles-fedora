@@ -61,7 +61,7 @@ MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 # número e o commit diz por quê. A 2.0.18 é a `latest` do canal `latest` quando isto
 # foi escrito, e o instalador a busca como `@opencode/cli-linux-x64`.
 OPENCODE_INSTALL_URL="https://opencode.ai/v2/install"
-OPENCODE_VERSION="2.0.18"
+OPENCODE_LATEST_URL="https://opencode.ai/update/api/latest/cli/npm"
 
 # Endereço e porta do servidor do OpenCode no host, declarados aqui para que um
 # host novo reproduza o mesmo estado — o instalador do opencode cria a unit sem
@@ -463,10 +463,20 @@ install_common_ai_clis() {
         echo -e "${GREEN}✓ Cursor Agent CLI instalado.${NC}"
     fi
 
-    # A URL e o pin vêm de OPENCODE_INSTALL_URL/OPENCODE_VERSION, declarados no
-    # topo. O instalador da linha 1, noutra URL, é o que fazia a v1 ser instalada e
-    # depois faltar o subcomando `service`. O `--version` vai depois do `--`, que é
-    # como o instalador da opencode recebe os próprios argumentos.
+    # A URL vem de OPENCODE_INSTALL_URL, declarada no topo. O instalador da linha
+    # 1, noutra URL, é o que fazia a v1 ser instalada e depois faltar o subcomando
+    # `service`. O `--version` vai depois do `--`, que é como o instalador da
+    # opencode recebe os próprios argumentos.
+    #
+    # NÃO há pin de versão. O que existe é a comparação com o endpoint público
+    # que o próprio instalador consulta (`OPENCODE_LATEST_URL`): o script instala a
+    # v2 mais nova que existir, e não reinstala nada quando já está nela. Um pin
+    # fixo resolveria o problema errado — deixaria a máquina presa numa versão
+    # para sempre, que é o defeito que o guard por existência do binário escondia.
+    #
+    # A major é travada em 2 de propósito. O endpoint reporta `channel: latest` e
+    # hoje esse canal é o branch v2, mas o script não deve atravessar major por
+    # conta própria: se a v3 subir para lá, para e avisa em vez de trocar.
     #
     # A idempotência é conferida no caminho, e não com `command -v`: o binário fica
     # em `~/.opencode/bin`, que o PATH exportado acima não inclui, então num shell
@@ -479,13 +489,51 @@ install_common_ai_clis() {
     # a linha do zshrc versionado tem um prefixo `[ -d … ] &&`, que não casa — então
     # sem esta flag o instalador escreveria dentro do arquivo versionado, através do
     # symlink. Quem é dono do PATH interativo é o zshrc do repo, não o instalador.
-    if [ -x "$OPENCODE_BIN" ]; then
-        echo -e "${YELLOW}opencode já instalado em $OPENCODE_BIN, pulando.${NC}"
-    else
-        curl -fsSL "$OPENCODE_INSTALL_URL" \
-            | bash -s -- --no-modify-path --version "$OPENCODE_VERSION"
-        echo -e "${GREEN}✓ Open Code (anomalyco/opencode, canal v2) instalado.${NC}"
+    local oc_latest=""
+    if command -v curl &> /dev/null; then
+        oc_latest=$(curl -fsSL --max-time 20 "$OPENCODE_LATEST_URL" 2>/dev/null \
+            | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -1)
     fi
+    if [ -z "$oc_latest" ]; then
+        # Sem o endpoint não há como saber se o que está instalado é o mais novo,
+        # e reaplicar o instalador às cegas rebaixaria uma instalação mais recente
+        # para uma mais antiga. Deixar como está é a única escolha que não regride.
+        echo -e "${YELLOW}Não consegui consultar a versão mais recente do opencode; o que está instalado foi mantido.${NC}" >&2
+        echo -e "${YELLOW}  Endpoint: $OPENCODE_LATEST_URL${NC}" >&2
+    else
+        local oc_major="${oc_latest%%.*}"
+        if [ "$oc_major" != "2" ]; then
+            # O canal `latest` deixou de ser o branch v2. Instalar seria trocar de
+            # major por decisão de script, e isso é do dono da máquina.
+            echo -e "${YELLOW}O canal do opencode agora aponta para a major ${oc_major}, e este script só instala a 2.${NC}" >&2
+            echo -e "${YELLOW}  Versão publicada: ${oc_latest} — nada foi instalado nem alterado.${NC}" >&2
+        else
+            # A normalização espelha a do instalador (check_version): último campo
+            # separado por espaço, sem o 'v' inicial. Sem isso, "2.0.18" e "v2.0.18"
+            # seriam sempre diferente e o script reinstalaria toda vez.
+            local oc_have=""
+            if [ -x "$OPENCODE_BIN" ]; then
+                # O `awk` colapsa espaço interno e apara as pontas. Sem ele, uma
+                # saída com espaço à direita sobra vazia depois de `##* ` — e
+                # `oc_have` vazio é indistinguível de "não instalado", o que faria
+                # o script reinstalar em toda execução sem nunca convergir.
+                oc_have=$("$OPENCODE_BIN" --version 2>/dev/null | tr -d '\r' | awk '{ $1=$1; print }' || echo "")
+                oc_have="${oc_have##* }"
+                oc_have="${oc_have#v}"
+            fi
+            if [ -n "$oc_have" ] && [ "$oc_have" = "$oc_latest" ]; then
+                echo -e "${YELLOW}opencode ${oc_have} já é a v2 mais recente; pulando.${NC}"
+            else
+                [ -n "$oc_have" ] \
+                    && echo -e "${YELLOW}opencode ${oc_have} instalado; a mais recente é ${oc_latest}. Atualizando.${NC}"
+                curl -fsSL "$OPENCODE_INSTALL_URL" \
+                    | bash -s -- --no-modify-path --version "$oc_latest"
+                echo -e "${GREEN}✓ Open Code (anomalyco/opencode, canal v2) em ${oc_latest}.${NC}"
+            fi
+        fi
+    fi
+    unset oc_latest oc_major oc_have
 
     if command -v agy &> /dev/null; then
         echo -e "${YELLOW}agy (Antigravity CLI) já instalado, pulando.${NC}"
