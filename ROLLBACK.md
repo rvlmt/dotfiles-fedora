@@ -247,8 +247,7 @@ systemctl --user daemon-reload
 
 # 2. CLIs de npm: remover pelo Bun quando o pacote estiver no escopo global do
 #    Bun; senão ele veio do npm e o comando correto é o outro.
-for pkg in @anthropic-ai/claude-code @openai/codex @google/gemini-cli \
-           @github/copilot; do
+for pkg in @anthropic-ai/claude-code @openai/codex; do
   if [ -d "$HOME/.bun/install/global/node_modules/$pkg" ]; then
     bun remove -g "$pkg"
   else
@@ -285,9 +284,9 @@ A senha **não** faz parte do rollback: ela vive em
 `--service` o servidor geraria uma senha aleatória a cada start. Para trocá-la,
 `opencode service set password <senha>` seguido de restart.
 
-`claude` e `cursor-agent` não dependem de Node, mas `codex`, `gemini`, `copilot` e
-`ocx` resolvem `#!/usr/bin/env node` — por isso remova estas últimas **antes** do
-Bun e do mise (seção `base`). Os symlinks em `~/.bun/bin` são recriados pelo Bun a
+`claude` e `cursor-agent` não dependem de Node, mas `codex` e `ocx` resolvem
+`#!/usr/bin/env node` — por isso remova estas últimas **antes** do Bun e do mise
+(seção `base`). Os symlinks em `~/.bun/bin` são recriados pelo Bun a
 partir de `~/.bun/install/global/node_modules`; remover os pacotes basta.
 
 ## `opencodex` — o router OpenCodex
