@@ -191,6 +191,48 @@ A App em si **não** é removida: ela vive no GitHub, e o que este rollback desf
 _Developer settings → GitHub Apps_, e é decisão sua, porque afeta outras máquinas
 se a App estiver instalada em mais de uma.
 
+### O OpenDesign não é um módulo do script (ainda)
+
+Ele não tem seção própria aqui porque **não existe passo que o instale** — foi
+montado à mão nesta VM e o procedimento está no `README.md`, seção "OpenDesign via
+container". O que segue desfaz **aquele montaje**, não um módulo do script.
+
+⚠️ **Parar antes de apagar o volume.** Ele é o estado do daemon — projetos,
+skills, histórico. `podman volume rm` é o passo que perde trabalho, e ele é
+independente de parar o container.
+
+```bash
+# 1. conferir o que existe
+podman ps -a --filter name=open-design --format 'table {{.Names}}\t{{.Status}}'
+podman volume ls | grep open-design
+
+# 2. guardar o token ANTES de qualquer coisa, se ainda não foi guardado em outro lugar
+#    (está em ~/open-design/deploy/.env, a 600 — e o .env só vai embora com o repo)
+cp ~/open-design/deploy/.env ~/.od.env.keep
+chmod 600 ~/.od.env.keep
+
+# 3. derrubar o serviço
+cd ~/open-design/deploy && podman compose down
+
+# 4. o estado, só se for isso que se quer
+podman volume rm open-design_open_design_data
+
+# 5. o repo e o provider de compose
+rm -rf ~/open-design
+sudo dnf remove -y podman-compose      # se não houver outro uso para ele
+
+# 6. a imagem, se o disco importa — 1,28 GB
+podman rmi ghcr.io/nexu-io/od:latest
+```
+
+**O `.env` guarda o `OD_API_TOKEN` e é a única cópia dele.** Depois do passo 3 o
+arquivo continua lá, mas se o passo 5 remover o repo, o token vai com ele — e o
+daemon seguinte gera outro, invalidando o que já estava salvo. Por isso o passo 2
+existe, e é o único que importa.
+
+O token **não tem rotação pela doc**: o caminho é gerar outro com
+`openssl rand -hex 32` e reiniciar.
+
 ## `tailscale` — desconectar ou remover
 
 ```bash
