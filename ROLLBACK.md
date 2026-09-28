@@ -218,6 +218,10 @@ sudo rm /etc/ssh/sshd_config.d/99-dotfiles-hardening.conf
 sudo systemctl reload sshd
 ```
 
+A publicação pela tailnet é do módulo `tailscale`, não deste — ver a seção dele.
+Aviso: `tailscale serve reset` **apaga tudo** que estiver publicado, então não é
+o inverso apenas deste passo se houver mais de um serviço.
+
 Destravar a senha do root, que o mesmo módulo aplica. É reversível, mas só
 funciona se você souber a senha: `passwd -l` não a guarda em lugar nenhum, e o
 `root` da instalação continua sendo `1234` numa VM recém-criada. Se a senha já
@@ -369,6 +373,33 @@ A senha **não** faz parte do rollback: ela vive em
 `#!/usr/bin/env node` — por isso remova estas últimas **antes** do Bun e do mise
 (seção `base`). Os symlinks em `~/.bun/bin` são recriados pelo Bun a
 partir de `~/.bun/install/global/node_modules`; remover os pacotes basta.
+
+### A configuração do servidor do OpenCode não é do repo, e uma parte não tem inverso
+
+`opencode service set hostname|port|password` grava em
+`~/.config/opencode/service.json` a `600`. Esse arquivo existe **por causa** do
+`ai-clis`, mas não é do `setup.sh` — é do binário. Desinstalar a CLI leva o
+arquivo junto? **Não**: ele fica.
+
+```bash
+# ver o que está gravado (a senha sai mascarada, por decisão do próprio binário)
+opencode service get
+
+# voltar ao default de loopback
+opencode service unset hostname
+```
+
+**A senha não tem volta.** `unset password` faz o servidor voltar a *gerar* uma
+aleatória a cada start — o que invalida as credenciais já salvas no navegador, e
+não devolve a anterior. Se o objetivo é trocar por outra escolha, o caminho é
+`set password` com a nova, e não há como recuperar a velha depois de sobrescrita.
+Por isso ela é lida sem eco e a variável é apagada logo depois: o valor nunca
+precisa ser reescrito para ser lembrado.
+
+O serviço em si, hoje, **não sobrevive a reboot** — `opencode service start`
+spawna um filho `detached` e `unref`, sem unit. Não há o que remover aqui porque
+não há unit; ver a seção "OpenCode em uma VM nova" do `README.md` para o caminho
+com `systemd`.
 
 ## `opencodex` — o router OpenCodex
 
