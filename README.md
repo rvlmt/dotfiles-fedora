@@ -290,7 +290,7 @@ O Node e o npm do host vêm do `mise`, com versão pinada — **não** do `dnf`.
 dependa da versão que o Fedora decidir empacotar a cada atualização:
 
 ```bash
-mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
+mise use -g --pin node@24.21.0 devcontainer-cli@0.89.0
 ```
 
 O consumo **baseline** é o Dev Container CLI, que é controller de host. O
@@ -354,20 +354,20 @@ A instalação é gerenciada e pinada pelo `mise`, incluindo um runtime Node
 próprio para o CLI:
 
 ```bash
-mise use -g --pin node@22.23.3 devcontainer-cli@0.89.0
-mise exec node@22.23.3 devcontainer-cli@0.89.0 -- node --version
-mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer --version
+mise use -g --pin node@24.21.0 devcontainer-cli@0.89.0
+mise exec node@24.21.0 devcontainer-cli@0.89.0 -- node --version
+mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer --version
 ```
 
 Force as versões globais também nos comandos executados dentro de um
 repositório, para que um `mise.toml` local não substitua o runtime do CLI:
 
 ```bash
-mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
+mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer up \
   --docker-path podman \
   --workspace-folder /caminho/do/projeto
 
-mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer exec \
+mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer exec \
   --docker-path podman \
   --workspace-folder /caminho/do/projeto \
   <comando-do-aplicativo>
@@ -422,7 +422,7 @@ podman ps -a \
   --format '{{.ID}} {{.Names}} {{.Status}}'
 
 # 6. Recriar quando o cleanup estiver aprovado.
-mise exec node@22.23.3 devcontainer-cli@0.89.0 -- devcontainer up \
+mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer up \
   --docker-path podman \
   --workspace-folder "${WORKSPACE}"
 ```
