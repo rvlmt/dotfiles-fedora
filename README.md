@@ -23,6 +23,9 @@ rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
   cada um instala, o custo de disco de uma instalação limpa, o que exige mão
   humana, e as decisões conhecidas com o que cada uma custa. Toda tabela tem uma
   medição por trás, e onde o número é de uma máquina isso está marcado.
+- **`pos-instalacao.md`** — o que fica **depois** do script: configurar o modelo
+  do Hermes, instalar o gateway, verificar por estado, e o que fazer se der 401
+  na UI. Nenhum item é instalação; são configuração e verificação.
 - **`setup.sh`** — provisiona o servidor Fedora. Um arquivo só (cores,
   confirmação, geração de chave SSH, config git/gh, instalação das CLIs de
   IA, os módulos — tudo junto); idempotente, pode ser executado várias vezes

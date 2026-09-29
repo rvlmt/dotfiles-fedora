@@ -120,13 +120,27 @@ faixa de DHCP, mas não tem onde expressar regra de filtro — e o filtro é
 obrigatório, não opcional. Essa é a parte da configuração de VM que o repo não
 delega, independentemente de quem constrói a VM.
 
-**`firewalld` é o guardião do egress da VM.** Com o host nessa função, marcar
-`tailscale0` como zona `trusted` — que libera todo tráfego — deixa de ser "um
-pouco amplo" e passa a ser o elo errado da cadeia. Ver
-[#10](https://github.com/rvlmt/dotfiles-fedora/issues/10).
+**`firewalld` é o guardião do egress da VM.** Marcar `tailscale0` como zona
+`trusted` — que libera todo tráfego — seria "o elo errado da cadeia" **se o host
+fosse o guardião**.
 
-## O guest
+⚠️ **Decisão: a exposição é aceita, e este documento passa a dizer o que o script
+faz.** A premissa que sustentava a crítica não se aplica: o `firewalld` roda no
+**host**, e o que se quer proteger é a **VM** de agentes — que tem o próprio
+`firewalld`, o próprio `sshd-hardening` e a superfície pequena de três serviços
+publicados atrás do `tailscale serve`. O host não é a máquina que recebe tráfego
+não confiável.
 
+O que a marcação concede, concreto: **qualquer nó da tailnet alcança todas as
+portas do host**, não só a 22. É uma exposição conhecida e consciente, e o preço
+está no `AUDITORIA.md`, na tabela de decisões.
+
+A correção que este documento propunha — `tailscale0` sai do `trusted` e ganha
+uma zona própria — continua sendo a direção certa **para o host**, e é o item
+[#10](https://github.com/rvlmt/dotfiles-fedora/issues/10). Ela não é pré-requisito
+para provisionar a VM de agentes. O que mudou é a precedence: antes os dois
+documentos discordavam sobre o que o script faz, e discordar sobre o que o seu
+próprio script faz é pior do que a decisão em si.
 **Papel:** a fronteira.
 
 **Construção:** **manual, no Cockpit.** O repo não constrói o guest e não há
@@ -343,11 +357,28 @@ fim da entrada. Como algumas dessas leituras estão fora de um contexto `&&`, o
 sem rodar módulo nenhum. Não era "recusar em silêncio" — era morrer em silêncio,
 e por isso também não dava para dizer que era seguro rodar por pipe.
 
-Corrigido na #18: o script **recusa no início**, com mensagem, quando o stdin não
-é um terminal. A alternativa seria seguir com os defaults, que produziria um
-provisionamento parcial e silencioso — pior que não rodar. O ponto que fica para o
-padrão, e que não foi decidido aqui: **o que uma execução verdadeiramente não
-interativa deveria fazer** (instalar com defaults declarados? exigir flags
+**Decidido: existe um caminho não interativo, e ele é opt-in por flag.**
+
+`./setup.sh --yes` responde a tudo, e o default **continua sendo não** — sem a
+flag, um Enter não instala nada. A diferença entre "responde por mim" e "instale
+por omissão" é o ponto inteiro da flag.
+
+O que ela resolve, e o que não resolve, ambos medidos:
+
+- **Resolve:** todo `read` de prompt passou por um helper que degrada para vazio
+  sob `--yes`, e vazio é o que cada chamador já tratava como "aceita o padrão".
+  Sem isso o `set -e` abortaria no primeiro `read` em EOF — a mesma morte
+  silenciosa que a recusa evitava, só que agora pela porta de trás.
+- **Resolve:** as confirmações respondem sim, e o modo do OpenDesign vai para
+  `nativo`, anunciado.
+- **Não resolve:** o `sudo`. Sem terminal, `sudo -v` falha com *"um terminal é
+  necessário para ler a senha"*, e a flag não muda isso — o `sudo` lê a senha de
+  um terminal, e um pipe não é um terminal. O script detecta e diz o que fazer.
+- **Por decisão:** a GitHub App fica **inativa**. A private key é um segredo que
+  existe fora da máquina, e um App ID inventado marcaria o módulo como configurado
+  sem nada funcionando — o pior desfecho possível, porque o relatório mentiria.
+
+Detalhe completo em `pos-instalacao.md`.
 explícitas? recusar?). Recusar é o comportamento seguro, não o completo.
 
 ## Pendência: a postura de rede do host
