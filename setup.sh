@@ -118,7 +118,12 @@ HERMES_DASH_PORT="9119"
 HERMES_SERVE_PORT="8445"
 HERMES_DASH_USER="hermes"
 HERMES_PW_FILE="$HOME/.config/hermes/dashboard-password"
-HERMES_CLI_DIR="$HOME/Hermes-Agent"
+HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
+# Onde o instalador OFICIAL deixa a arvore: `INSTALL_DIR` tem como padrao
+# `$HERMES_HOME/hermes-agent` (medido no install.sh, linha 79). Antes este script
+# clonava para ~/Hermes-Agent e montava o symlink a mao — o caminho oposto ao que
+# a documentacao prescreve, e que deixava o `pm` sem pin.
+HERMES_CLI_DIR="$HOME/.hermes/hermes-agent"
 # A `version` do pyproject NAO serve para comparar — na fonte ela e "0.0.0" e o
 # numero real vem do NOME da tag. E o nome da tag carrega o status no prefixo:
 # `abandoned-rc.9-v0.21.5` e a mesma 0.21.5 da `rc.14-v0.21.5`, marcada como
@@ -200,6 +205,11 @@ OPENDESIGN_MODE=""                 # native | container, decidido na pergunta
 OPENDESIGN_PORT="7456"
 OPENDESIGN_IMAGE="ghcr.io/nexu-io/od@sha256:587a992857d0f8b71011e4bc55c5851e33ef9fc4c169fc17e6447700ac428f22"
 OPENDESIGN_SRC="$HOME/Developer/open-design"
+# O modo nativo compila de fonte, entao precisa do clone. A URL estava no README
+# e NAO no script, que imprimia um placeholder e parava — medido: o passo parava
+# com "git clone <url-do-open-design>" numa maquina limpa. O repositorio resolve
+# (medido com `git ls-remote` da propria VM).
+OPENDESIGN_REPO_URL="https://github.com/nexu-io/open-design.git"
 # REGISTRO, nao um bug: `-native-root` e um nome PROVISORIO, criado para nao
 # colidir com o clone em OPENDESIGN_SRC — que e o caminho que a doc e os exemplos
 # do proprio OpenDesign esperam. A intencao e que a proxima instalacao use SO
@@ -504,7 +514,8 @@ setup_opencode_serve() {
 # o que invalida as credenciais já salvas no navegador a cada reinício.
 # `OPENCODE_SERVER_PASSWORD` e `UnsetEnvironment` não desligam a autenticação,
 # apenas escolhem a fonte do valor.
-# Instala a CLI do Hermes NATIVA, e o `uv` de que ela e do `setup-hermes.sh`.
+# Instala a CLI do Hermes NATIVA, pelo instalador que a propria documentacao
+# prescreve — o "Quick Install" do README upstream e uma linha de `curl | bash`.
 #
 # Nativa por necessity e nao por preferencia: o binario `opencode` e o `agy` que
 # o OpenDesign usa como agentes sao ELF glibc, e o container do OpenDesign e
@@ -515,59 +526,76 @@ setup_hermes_cli() {
         return 1
     fi
 
-    # O mise nao conhece `uv` (medido: `mise ls-remote` nao devolve entradas),
-    # entao vai o instalador oficial. Duas configuracoes que importam:
-    #   UV_INSTALL_DIR         poe em ~/.local/bin, que ja e o PATH deste repo
-    #   INSTALLER_NO_MODIFY_PATH  impede o instalador de editar o shell rc
-    if ! command -v uv &> /dev/null; then
-        echo -e "${BLUE}Instalando o uv…${NC}"
-        if ! curl -LsSf -o /tmp/uv-install.sh https://astral.sh/uv/install.sh; then
-            echo -e "${YELLOW}Não baixei o instalador do uv; pulei a CLI.${NC}" >&2
-            return 1
-        fi
-        UV_INSTALL_DIR="$HOME/.local/bin" INSTALLER_NO_MODIFY_PATH=1 \
-            sh /tmp/uv-install.sh >/dev/null 2>&1
-        rm -f /tmp/uv-install.sh
-    fi
-    [ -x "$HOME/.local/bin/uv" ] || {
-        echo -e "${YELLOW}uv não ficou executável; pulei a CLI do Hermes.${NC}" >&2
-        return 1
-    }
-
     # libatomic: sem ela o node pinado do pm morre com "error while loading
     # shared libraries: libatomic.so.1" e o install falha na verificacao. Nem o
     # setup-hermes.sh nem o README do upstream mencionam a dependencia — e ela
     # EXISTE dentro do container Alpine e nao existe no host, que e o mesmo muro
-    # de libc do OpenDesign no sentido inverso.
+    # de libc do OpenDesign no sentido inverso. O modulo `base` a instala; este
+    # guarda existe para quem roda `--only=hermes-cli` sem o `base`.
     if [ ! -e /usr/lib64/libatomic.so.1 ]; then
         echo -e "${YELLOW}Falta a libatomic, e o install do Hermes vai falhar sem ela.${NC}" >&2
         echo -e "${YELLOW}  Instale com: sudo dnf install -y libatomic${NC}" >&2
         return 1
     fi
 
-    if [ ! -d "$HERMES_CLI_DIR/.git" ]; then
-        echo -e "${BLUE}Clonando a CLI do Hermes…${NC}"
-        rm -rf "$HERMES_CLI_DIR"
-        git clone -q https://github.com/NousResearch/Hermes-Agent.git "$HERMES_CLI_DIR" || {
-            echo -e "${YELLOW}Não consegui clonar a CLI do Hermes.${NC}" >&2
+    # ── O CAMINHO DOCUMENTADO ──────────────────────────────────────────────────
+    # O README do upstream, secao "Quick Install", prescreve exatamente uma linha:
+    #
+    #     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+    #
+    # Este modulo usava `git clone` + `setup-hermes.sh --runtime-only` + symlink
+    # manual. A flag `--runtime-only` existe mesmo (medido no setup-hermes.sh do
+    # clone, linhas 20/24/179) — nao era dedução — mas o caminho montado a mao
+    # perdia duas coisas que o instalador oficial garante:
+    #
+    #   * o uv PINADO. O oficial baixa `uv 0.12.3` do `pm/lock.json` e confere o
+    #     sha256 (`UV_PIN_SHA256`, medido). O caminho antigo chamava o instalador
+    #     do astral, que traz a ultima versao sem pin nenhum.
+    #   * o estado em `~/.hermes`, com log em `~/.hermes/logs/install.log`.
+    #
+    # O pin de tag continua: o instalador aceita `--branch`, entao
+    # `HERMES_CLI_TAG` sobrevive em vez de virar "latest".
+    #
+    # `--non-interactive` NAO e opcional, e a razao esta medida no install.sh: os
+    # estagios `setup` e `gateway` leem /dev/tty e so se pulam quando /dev/tty NAO
+    # abre. O setup.sh roda sob pty, entao /dev/tty abre, o instalador espera o
+    # assistente e TRAVA PARA SEMPRE. Sem a flag, este passo nao termina. Medido
+    # no install.sh: `if [ "$NON_INTERACTIVE" = true ]; then return 0; fi` nas linhas
+    # 764, 773 e 818.
+    #
+    # A segunda flag, `--branch`, e o pin. Juntas:
+    #     curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG"
+    if [ -x "$HOME/.local/bin/hermes" ] && [ -d "$HERMES_CLI_DIR/.git" ]; then
+        local _have_tag
+        _have_tag=$(git -C "$HERMES_CLI_DIR" describe --tags --exact-match 2>/dev/null || echo "")
+        if [ "$_have_tag" = "$HERMES_CLI_TAG" ]; then
+            echo -e "${YELLOW}Hermes já em $_have_tag; pulando o instalador.${NC}"
+        else
+            echo -e "${BLUE}Atualizando o Hermes para $HERMES_CLI_TAG…${NC}"
+            curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG" || {
+                echo -e "${YELLOW}O instalador do Hermes falhou; a saída está acima.${NC}" >&2
+                return 1
+            }
+        fi
+    else
+        echo -e "${BLUE}Instalando o Hermes pelo instalador oficial…${NC}"
+        curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG" || {
+            echo -e "${YELLOW}O instalador do Hermes falhou; a saída está acima.${NC}" >&2
             return 1
         }
     fi
-    git -C "$HERMES_CLI_DIR" checkout -q "$HERMES_CLI_TAG" 2>/dev/null || true
 
-    if [ ! -x "$HERMES_CLI_DIR/.hermes/tools" ] && [ ! -d "$HOME/.hermes/tools" ]; then
-        echo -e "${BLUE}Instalando as dependências da CLI (o pm baixa e confere por sha256)…${NC}"
-        if ! ( cd "$HERMES_CLI_DIR" && bash setup-hermes.sh --runtime-only ); then
-            echo -e "${YELLOW}O install da CLI do Hermes falhou; a saída está acima.${NC}" >&2
-            return 1
-        fi
-    fi
-
-    # O install cria ~/.hermes/ com o estado e NAO cria ~/.hermes/bin — que é um
-    # caminho que o launcher procura. O executável é o clone. Sem o link, `hermes`
-    # não existe como comando e o OpenDesign o lista como `not-on-path`.
-    ln -sfn "$HERMES_CLI_DIR/hermes" "$HOME/.local/bin/hermes"
-    chmod +x "$HERMES_CLI_DIR/hermes" 2>/dev/null || true
+    # O instalador publica o launcher em `~/.local/bin` pela propria
+    # `source_completion`. O symlink que este script montava apontava para o clone
+    # antigo em `~/Hermes-Agent`, que o caminho oficial nao usa — entao ele saiu.
+    #
+    # O instalador tambem tentaria anexar uma linha de PATH no `~/.zshrc`. Ele
+    # NAO vai: o proprio `append_shell_path` guarda com
+    # `^[[:space:]]*([^#[:space:]].*)?PATH=.*\.local/bin` (medido no install.sh,
+    # linha 679) e a linha 11 do zshrc versionado ja casa com ela. O detalhe
+    # importa porque `~/.zshrc` aqui e symlink para o arquivo do repo: sem essa
+    # guarda, o instalador escreveria DENTRO do arquivo versionado.
+    mkdir -p "$HOME/.local/bin"
 
     # Verificar por ESTADO: o link existe e responde. `command -v` nao basta,
     # porque o launcher importa o pacote e um Python errado passa pelo link.
@@ -576,7 +604,7 @@ setup_hermes_cli() {
     case "$v" in
         *Hermes*) echo -e "${GREEN}✓ CLI do Hermes: $v${NC}" ;;
         *)
-            echo -e "${YELLOW}O link da CLI existe mas ela não responde: ${v:-sem saída}${NC}" >&2
+            echo -e "${YELLOW}A CLI do Hermes não respondeu: ${v:-sem saída}${NC}" >&2
             return 1
             ;;
     esac
@@ -860,7 +888,17 @@ _setup_open_design_native() {
 
     # O node vem do mise e o pnpm do corepack; nenhum dos dois esta no PATH de
     # uma sessao nao interativa, entao o PATH e montado a mao e nao esperado.
-    local nb="$HOME/.local/share/mise/installs/node/24.21.0/bin"
+    #
+    # O caminho NAO e fixado numa versao. Antes era `.../node/24.21.0/bin`, que e
+    # um fato de UMA maquina e nao do repositorio: uma VM nova com outra patch
+    # faria o script devolver 1 sem explicacao util. O mise grava o `current` como
+    # link simbolico, entao e ele que diz qual node esta em uso.
+    local nb="$HOME/.local/share/mise/installs/node/current/bin"
+    [ -x "$nb/node" ] || {
+        local _nb
+        _nb=$(ls -1d "$HOME"/.local/share/mise/installs/node/*/bin 2>/dev/null | sort -V | tail -1)
+        [ -n "$_nb" ] && [ -x "$_nb/node" ] && nb="$_nb"
+    }
     [ -x "$nb/node" ] || { echo -e "${YELLOW}node do mise ausente; pulei o OpenDesign.${NC}" >&2; return 1; }
     export PATH="$nb:$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
     if [ ! -x "$nb/pnpm" ]; then
@@ -869,11 +907,17 @@ _setup_open_design_native() {
     fi
     [ -x "$nb/pnpm" ] || { echo -e "${YELLOW}pnpm nao ficou disponivel; pulei o OpenDesign.${NC}" >&2; return 1; }
 
+    # O modo nativo compila de fonte e nao tem imagem para baixar, entao o repo
+    # e clonado aqui. Antes este passo IMPRIMIA um placeholder e parava, o que
+    # transformava a instalacao em manual — o README tinha a URL, o script nao.
     if [ ! -d "$OPENDESIGN_SRC/.git" ]; then
-        echo -e "${YELLOW}Falta o fonte em $OPENDESIGN_SRC.${NC}" >&2
-        echo -e "${YELLOW}  O modo nativo compila de fonte e nao tem imagem para baixar:${NC}" >&2
-        echo -e "${YELLOW}    git clone <url-do-open-design> $OPENDESIGN_SRC${NC}" >&2
-        return 1
+        echo -e "${BLUE}Clonando o OpenDesign…${NC}"
+        mkdir -p "$(dirname "$OPENDESIGN_SRC")"
+        git clone -q --depth 1 "$OPENDESIGN_REPO_URL" "$OPENDESIGN_SRC" || {
+            rm -rf "$OPENDESIGN_SRC"
+            echo -e "${YELLOW}Não consegui clonar o OpenDesign de $OPENDESIGN_REPO_URL.${NC}" >&2
+            return 1
+        }
     fi
 
     if [ ! -d "$OPENDESIGN_SRC/node_modules" ]; then
@@ -1549,16 +1593,6 @@ install_common_ai_clis() {
     # O pacote não declara `engines` em nenhuma das versões publicadas, então o
     # requisito (^22.19 ou >=24) não é imposto pelo npm e depende do pin do mise.
     install_npm_global_latest "@deepseek-ai/dsh" "dsh"
-    # DeepSeek Harness. O README o descreve como developer preview com
-    # "COMPATIBILITY-BREAKING CHANGES" explícito, e a documentação oficial só
-    # mostra `npx`. O `npm install -g` abaixo é o mesmo caminho que as outras
-    # cinco usam, e é o que torna o binário `dsh` utilizável sem baixar o
-    # pacote inteiro a cada invocação. A escolha de acompanhar a versão
-    # publicada mais recente é deliberada: um pacote em preview que muda de
-    # forma incompatível entre versões é o pior candidato possível para um pin
-    # entre versões é o pior candidato possível para um pin que ninguém reverte.
-    # O pacote não declara `engines` em nenhuma das versões publicadas, então o
-    # requisito (^22.19 ou >=24) não é imposto pelo npm e depende do pin do mise.
 
     if command -v cursor-agent &> /dev/null; then
         echo -e "${YELLOW}cursor-agent já instalado, pulando.${NC}"
@@ -2413,7 +2447,16 @@ if should_run "base"; then
     sudo dnf install -y --skip-unavailable \
         git gh jq tree tmux zellij ripgrep fd-find unzip \
         curl wget btop tar openssl \
-        dnf5-plugins
+        dnf5-plugins \
+        libatomic libX11
+    # `libatomic` e `libX11` não são enfeite. O `pm` do Hermes — o provisionador
+    # que o instalador oficial usa para trazer o uv pinado e o runtime — baixa
+    # binários para a máquina-alvo, e os dois que ele baixava medidos nesta VM
+    # faltavam no host: sem eles o node pinado morre com "error while loading
+    # shared libraries". Nenhum dos dois vem numa imagem mínima do Fedora, e
+    # nenhum instalador menciona a dependência. Antes eles apareciam como DOIS
+    # `return 1` no meio do caminho, exigindo um `sudo` manual em dois lugares —
+    # e o `libX11` não era verificado em lugar nenhum.
     echo -e "${GREEN}✓ Pacotes base instalados.${NC}"
 
     if ! command -v bun &> /dev/null; then
