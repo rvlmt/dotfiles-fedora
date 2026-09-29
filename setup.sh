@@ -89,7 +89,12 @@ OPENCODE_LATEST_URL="https://opencode.ai/update/api/latest/cli/npm"
 # de acesso remoto: escutar em loopback e expor pela tailnet. Escutar em
 # `0.0.0.0` foi descartado porque incluía a interface WiFi local, alcançável por
 # qualquer máquina da mesma rede, e sem TLS.
-OPENCODE_BIND="127.0.0.1"
+# Estes dois NÃO são variáveis de ambiente do opencode. Medido no binário de
+# 203 MB: `OPENCODE_BIND` tem zero ocorrências, e `OPENCODE_PORT` também. A v2
+# não conhece nenhuma das duas, em v1 nem em v2. São os valores que nós
+# aplicamos com `opencode service set hostname|port`, que é o mecanismo real.
+# Mantidos aqui porque duas funções precisam deles: a unit e a publicação.
+OPENCODE_HOST="127.0.0.1"
 OPENCODE_PORT="49374"
 OPENCODE_BIN="$HOME/.opencode/bin/opencode"
 
@@ -315,7 +320,7 @@ apply_opencode_password() {
 # Não sobrescreve config de outro serviço: se já houver algo publicado, o script
 # avisa e deixa a decisão para quem administra o host.
 setup_opencode_serve() {
-    local target="${OPENCODE_BIND}:${OPENCODE_PORT}"
+    local target="${OPENCODE_HOST}:${OPENCODE_PORT}"
 
     if ! command -v tailscale &> /dev/null; then
         echo -e "${YELLOW}Tailscale ausente; pulei a publicação do OpenCode.${NC}" >&2
@@ -377,55 +382,76 @@ setup_opencode_serve() {
 # `OPENCODE_SERVER_PASSWORD` e `UnsetEnvironment` não desligam a autenticação,
 # apenas escolhem a fonte do valor.
 setup_opencode_service() {
+    # A v2 do opencode NÃO cria unit nenhuma. `opencode service start` executa
+    # `opencode serve --service` como filho detached, com stdio ignorado e unref —
+    # medido na VM: o processo aparece com ppid=1 e o systemd responde "does not
+    # belong to any loaded unit". Sem unit, o processo não volta depois de um
+    # reboot, e nada no padrão o recria.
+    #
+    # A unit é portanto DECLARADA aqui, e não lida de um instalador. Ela chama
+    # `service start` em vez de `serve` em primeiro plano, e isso é uma escolha
+    # com um custo conhecido: `service start` cria o filho desacoplado, então a
+    # unit não é dona do processo — ela só o inicia. A alternativa seria
+    # `opencode serve --hostname ... --port ...`, que é um processo de verdade
+    # sob controle do systemd, mas que ignora ~/.config/opencode/service.json e
+    # portanto exige a senha por variável de ambiente em vez do arquivo.
     local unit="$HOME/.config/systemd/user/opencode.service"
-    local dropin_dir="$HOME/.config/systemd/user/opencode.service.d"
-    local dropin="$dropin_dir/10-bind.conf"
-    if [ ! -f "$unit" ]; then
-        return 0
-    fi
+    local dir="$HOME/.config/systemd/user"
 
-    local exec_line bin
-    exec_line="$(sed -nE 's/^ExecStart=(.*)$/\1/p' "$unit" | head -1)"
-    if [ -z "$exec_line" ]; then
-        echo -e "${YELLOW}Não li o ExecStart de $unit; pulei o drop-in do OpenCode.${NC}" >&2
-        return 1
-    fi
-    bin="${exec_line%% *}"
-    if [ ! -x "$bin" ]; then
-        echo -e "${YELLOW}Binário $bin não é executável; pulei o drop-in do OpenCode.${NC}" >&2
+    if [ ! -x "$OPENCODE_BIN" ]; then
+        echo -e "${YELLOW}Binário do opencode ausente ($OPENCODE_BIN); pulei a unit.${NC}" >&2
         return 1
     fi
 
-    # Sobrescreve só --hostname e --port, preservando --service e qualquer outra
-    # flag do instalador. Trocar o comando inteiro aqui quebraria a senha.
-    local new_line="$exec_line"
-    if [[ "$new_line" == *"--hostname"* ]]; then
-        new_line="$(printf '%s' "$new_line" | sed -E "s/--hostname[= ][^ ]+/--hostname ${OPENCODE_BIND}/g")"
+    # A escuta e a senha vivem no service.json, e é o que mantém a senha estável
+    # entre restarts: o código reaproveita a guardada e só gera uma quando não
+    # existe. `service set` é idempotente por conta própria — ele para o serviço,
+    # grava, e o próximo start pega. Por isso não há comparação de arquivo aqui.
+    "$OPENCODE_BIN" service set hostname "$OPENCODE_HOST" >/dev/null 2>&1 || {
+        echo -e "${YELLOW}Não consegui fixar o hostname do opencode em $OPENCODE_HOST.${NC}" >&2
+        return 1
+    }
+    "$OPENCODE_BIN" service set port "$OPENCODE_PORT" >/dev/null 2>&1 || {
+        echo -e "${YELLOW}Não consegui fixar a porta do opencode em $OPENCODE_PORT.${NC}" >&2
+        return 1
+    }
+
+    # Type=oneshot porque `service start` RETORNA na hora: ele cria o filho e sai.
+    # Uma unit Type=simple ficaria ocioso e o systemd a reiniciaria em loop
+    # achando que o processo morreu. RemainAfterExit segura o estado "ativo".
+    local expected="[Unit]
+Description=Servidor do OpenCode (gerado por dotfiles-fedora)
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$OPENCODE_BIN service start
+ExecStop=$OPENCODE_BIN service stop
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target"
+
+    ( umask 077; mkdir -p "$dir" )
+    if [ -f "$unit" ] && [ "$(cat "$unit")" = "$expected" ]; then
+        systemctl --user daemon-reload 2>/dev/null || true
     else
-        new_line="$new_line --hostname $OPENCODE_BIND"
-    fi
-    if [[ "$new_line" == *"--port"* ]]; then
-        new_line="$(printf '%s' "$new_line" | sed -E "s/--port[= ][^ ]+/--port ${OPENCODE_PORT}/g")"
-    else
-        new_line="$new_line --port $OPENCODE_PORT"
+        printf '%s\n' "$expected" > "$unit"
+        chmod 600 "$unit"
+        systemctl --user daemon-reload 2>/dev/null || true
+        echo -e "${GREEN}✓ Unit do OpenCode criada ($unit).${NC}"
     fi
 
-    local expected="[Service]
-# Gerado por dotfiles-fedora (setup.sh): declara a escuta em loopback do servidor
-# do OpenCode. Preserva --service de propósito, para que a senha continue vindo
-# de ~/.config/opencode/service.json em vez de ser regenerada a cada start.
-ExecStart=
-ExecStart=$new_line"
-
-    mkdir -p "$dropin_dir"
-    if [ -f "$dropin" ] && [ "$(cat "$dropin")" = "$expected" ]; then
-        echo -e "${GREEN}✓ Escuta do OpenCode já declarada ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
-        return 0
+    # Habilitar é o que faz o serviço subir no boot. E depende de LINGER: sem ele
+    # o systemd de usuário não existe fora de uma sessão, e um `enable` não sobe
+    # nada. Medido na VM: Linger=yes, habilitado pelo módulo podman.
+    systemctl --user enable opencode.service >/dev/null 2>&1 || true
+    if ! loginctl show-user "$(id -un)" 2>/dev/null | grep -qi "Linger=yes"; then
+        echo -e "${YELLOW}Linger está desligado: a unit do OpenCode não vai subir no boot.${NC}" >&2
+        echo -e "${YELLOW}  Habilite com: sudo loginctl enable-linger $(id -un)${NC}" >&2
     fi
-    printf '%s\n' "$expected" > "$dropin"
-    systemctl --user daemon-reload 2>/dev/null || true
-    echo -e "${GREEN}✓ Drop-in de escuta do OpenCode criado ($OPENCODE_BIND:$OPENCODE_PORT).${NC}"
-    echo -e "${YELLOW}  Aplique com: systemctl --user restart opencode${NC}"
+    echo -e "${GREEN}✓ OpenCode: escuta em $OPENCODE_HOST:$OPENCODE_PORT, unit habilitada.${NC}"
 }
 
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
