@@ -499,10 +499,53 @@ não a ferramenta mais sensível.
 
 | Serviço | Escuta | Publicação | Auth da app |
 |---|---|---|---|
-| OpenCode | `127.0.0.1:49374` | `:8443` | basic auth obrigatória — ver abaixo |
-| OpenDesign | `127.0.0.1:7456` | `:8444` | token único compartilhado, `OD_API_TOKEN` |
+| OpenCode | `127.0.0.1:49374` | `:8443` | **só a API** é basic auth; a página é pública |
+| OpenDesign | `127.0.0.1:7456` | `:8444` | basic auth com `OD_API_TOKEN`; o 401 é texto puro |
 | Hermes (dashboard) | `127.0.0.1:9119` | `:8445` | **Nous Portal**, gate verificado |
 | _(reservado)_ | — | `:443`, para o próximo serviço | — |
+
+#### O que cada link mostra de fato
+
+Verificado abrindo os três endereços num navegador de verdade, e não por `curl`.
+A diferença entre o que a tabela diz e o que aparece na tela é o que vale aqui:
+
+| link | o que o navegador mostra |
+|---|---|
+| `:8443` | a UI do opencode, com o endereço já preenchido e um campo **"Senha (opcional)"** |
+| `:8444` | **tela em branco** — o 401 não vira interface |
+| `:8445` | a tela de login do **Nous Portal**, com e-mail, Google, Microsoft e GitHub |
+
+⚠️ **No opencode, a página é pública e o que exige basic auth é a API.** A página
+responde **200** sem credencial nenhuma; o portão está em `/config`, que responde
+**401** sem senha e **200** com ela. Isso é o inverso do que a tabela dizia antes, e
+a distinção importa: quem publicar a porta e achar que "tem senha" porque a
+exigiu no lugar errado vai concluir que o servidor está aberto.
+
+⚠️ **O campo da senha diz "(opcional)" e não é.** A senha é a única coisa que separa
+a página pública de uma sessão funcional, e o rótulo é do upstream — não dá para
+corrigir daqui. O efeito prático: seguir a tela ao pé da letra leva a conectar e a
+receber 401 da API, e parece defeito da publicação quando é defeito do rótulo.
+
+⚠️ **O 401 do OpenDesign é texto puro, e o navegador não mostra texto puro.** O
+corpo é `OpenDesign authentication required. Use username "open-design" and
+OD_API_TOKEN as the password.`, com `www-authenticate: Basic realm="OpenDesign"`.
+O Chrome renderiza isso como **página em branco** — sem a dica, sem o 401, sem
+nada. Quem for pela primeira vez precisa saber o par de antemão; o servidor nunca
+vai dizer na cara que a credencial é a do `.env`.
+
+#### `/api/health` não é um endpoint do opencode, e mediu nada
+
+Vale registrar porque ele aparece em rodadas anteriores deste trabalho como se fosse
+prova funcional, e não era. Com credencial, `https://<host>:8443/api/health`
+responde **404** — a rota não existe. Sem credencial, responde 401, que é a camada de
+auth recusando **antes** do roteador. Ou seja: os dois números mediam a mesma coisa, e
+ninguém dos dois dizia se o servidor estava servindo.
+
+A sonda que funciona é **`/config`**, e ela separa as duas coisas que importam:
+**401** sem senha, **200** com senha. No OpenDesign e no Hermes `/api/health` existe
+e responde **200**, o que torna a confusão maior ainda — o mesmo caminho é válido em
+um serviço e inexistente no outro.
+
 
 As três publicações vivem na **VM de agentes**, no mesmo nó, e todas seguem a mesma
 forma: escuta em loopback + `tailscale serve` com TLS. As portas são **uma por
