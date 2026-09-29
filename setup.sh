@@ -128,11 +128,82 @@ HERMES_CLI_DIR="$HOME/Hermes-Agent"
 # Antes de fixar uma tag, leia o NOME INTEIRO: `git tag | grep <versao>` mostra o
 # prefixo `abandoned-` na propria linha.
 HERMES_CLI_TAG="rc.14-v0.21.5"
+
+# ---------------------------------------------------------------- Hermes dashboard
+# NATIVO tambem. O `hermes dashboard` e um subcomando da CLI, entao a UI nao
+# precisa de container nenhum — e isso removeu 2,81 GB de imagem e os 9xx MB de
+# estado do bind mount, que ainda por cima era do subuid.
+#
+# O TARGET de escuta e o IP DA TAILNET, nunca 127.0.0.1. Medido: o
+# should_require_auth() devolve True para o IP da tailnet e False para o
+# loopback, entao em loopback o portao simplesmente nao existe. E a consequencia
+# de usar o IP e que o servico fica alcancavel direto, em HTTP sem TLS.
+HERMES_DASH_UNIT="$HOME/.config/systemd/user/hermes-dashboard.service"
+
+# O nome do no vem do DNSName do `tailscale status --json`, e NAO de
+# `tailscale dnsname` — que nao existe nesta versao e responde "unknown
+# subcommand", fazendo o $(...) virar vazio. Duas consequencias, ambas medidas:
+#   o DNSName vem COM PONTO FINAL, que precisa sair;
+#   e o HostName do no e "fedora", nao "fedora-vm". Sao nomes diferentes, e o
+#     `tailscale serve` usa o DNSName.
+# Com o hostname vazio, o public_url fica "https://:8445" e o middleware
+# _is_accepted_host() REJEITA com 400 todo Host que nao seja o IP ligado — o que
+# inclui o /login, e faz a tela parecer quebrada.
+#
+# Achei a causa olhando /proc/<pid>/environ, que mostrava a variavel com o host
+# vazio. E o erro se disfarca de outra coisa: `pkill -f "hermes dashboard"` nao
+# mata o processo, porque o binario reempacota o comando em
+# `python3 -I -c "..." dashboard --host ... --port ...`. O processo velho ficava
+# escutando, e toda medicao media ele em vez do novo.
+_hermes_dnsname() {
+    tailscale status --json 2>/dev/null | python3 -c "
+import json, sys
+print(json.load(sys.stdin).get('Self', {}).get('DNSName', '').rstrip('.'))" 2>/dev/null
+}
+
+# Mata o dashboard pelo que o PROCESSO mostra, e nao pelo que o comando diz.
+_hermes_dash_pids() {
+    pgrep -f -- "--port $HERMES_DASH_PORT" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- OpenDesign
+# DOIS modos, e eles nao sao dois ramos de uma coisa so. Nao compartilham
+# pre-requisito nenhum, e foi por isso que viraram dois modulos em vez de um
+# `if`:
+#
+#   NATIVO     node do mise, pnpm via corepack, libatomic, e ~1,5 GB de
+#              `pnpm install` seguido de build do daemon e do web. Em troca, os
+#              agentes do host EXECUTAM: medido, 7 disponiveis contra 0 no
+#              container.
+#   CONTAINER  nada alem da imagem. Em troca, nenhuma CLI do host executa dentro
+#              — `opencode` e `agy` sao ELF glibc e a imagem e Alpine.
+#
+# O que decide o preco de cada um, e o que a pergunta do bloco de inicial
+# precisa deixar claro:
+#
+#   O NATIVO PRECISA escutar no IP DA TAILNET, nao no loopback. O daemon tem um
+#   carve-out que dispensa o token quando o peer e loopback, e o `tailscale serve`
+#   faz proxy de localhost para localhost — em loopback a senha NAO SERIA
+#   conferida. Medido: em 127.0.0.1 o `/api/agents` devolve 200 sem credencial; no
+#   IP da tailnet devolve 401. E a consequencia: o servico fica alcancavel
+#   direto, em HTTP sem TLS, na porta interna.
+#
+#   O CONTAINER nao tem esse preco: a bridge faz o peer ser o gateway, o carve-out
+#   nao pega, e o servico so existe atras do `serve`, com TLS.
+OPENDESIGN_MODE=""                 # native | container, decidido na pergunta
+OPENDESIGN_PORT="7456"
+OPENDESIGN_IMAGE="ghcr.io/nexu-io/od@sha256:587a992857d0f8b71011e4bc55c5851e33ef9fc4c169fc17e6447700ac428f22"
+OPENDESIGN_SRC="$HOME/Developer/open-design"
+OPENDESIGN_ROOT="$HOME/Developer/open-design-native-root"
+OPENDESIGN_SERVE_PORT="8444"
+OPENDESIGN_DEPLOY_DIR="$OPENDESIGN_ROOT/apps/daemon"
+OPENDESIGN_WEB_DIR="$OPENDESIGN_SRC/apps/web/out"
+OPENDESIGN_UNIT="$HOME/.config/systemd/user/open-design.service"
 # O nome que o `tailscale serve` usa e o DNSName do no, e ele NAO e o hostname da
 # maquina: no nó medido, `hostname` da `fedora-vm` e o DNSName termina em
 # `.sawfish-banjo.ts.net`. Montar a URL com o hostname produz um public_url que o
 # OAuth nao reconhece, e o sintoma e redirect_uri_mismatch.
-HERMES_PUBLIC_URL="${HERMES_PUBLIC_URL:-https://$(tailscale dnsname 2>/dev/null | head -1):$HERMES_SERVE_PORT}"
+HERMES_PUBLIC_URL="${HERMES_PUBLIC_URL:-}"   # resolvido em _hermes_dnsname, nao no topo
 
 OPENCODE_HOST="127.0.0.1"
 OPENCODE_PORT="49374"
@@ -514,6 +585,183 @@ except Exception: print('?')" 2>/dev/null)"
     return 0
 }
 
+# Declara e sobe o dashboard do Hermes como SERVICO de usuario. Sem container e
+# sem sudo.
+setup_hermes_dashboard() {
+    local dns ip
+    dns="$(_hermes_dnsname)"
+    ip="$(tailscale ip -4 2>/dev/null | head -1)"
+    if [ -z "$dns" ] || [ -z "$ip" ]; then
+        echo -e "${YELLOW}Sem DNSName ou IP de tailnet; pulei o dashboard do Hermes.${NC}" >&2
+        return 1
+    fi
+    if [ ! -x "$HOME/.local/bin/hermes" ]; then
+        echo -e "${YELLOW}CLI do Hermes ausente; rode o módulo hermes-cli primeiro.${NC}" >&2
+        return 1
+    fi
+
+    # A senha: hash scrypt, e NUNCA texto puro no config. O `hermes config set`
+    # tem dois defeitos aqui, ambos medidos:
+    #   1. grava `password` EM CLARO e mascara a saida como *** — o *** e
+    #      cosmético, e o arquivo fica 644;
+    #   2. gravar `password_hash` NAO remove o `password` que ja existia: os dois
+    #      convivem, e a precedencia faz o texto claro ganhar.
+    # Entao a ordem e: grava o hash, e remove a chave em claro. E o hash sai do
+    # codigo do proprio Hermes, rodado com o PYTHONPATH montado a partir do cache
+    # do uv — que e onde o pm guarda os wheels descompactados, ja que ele nao cria
+    # venv nenhum.
+    local hash
+    hash="$(_hermes_scrypt_hash "$HERMES_DASH_PASSWORD")"
+    if [ -z "$hash" ]; then
+        echo -e "${YELLOW}Não consegui gerar o hash scrypt; pulei o dashboard.${NC}" >&2
+        return 1
+    fi
+    "$HOME/.local/bin/hermes" config set dashboard.basic_auth.username "$HERMES_DASH_USER" >/dev/null
+    "$HOME/.local/bin/hermes" config set dashboard.basic_auth.password_hash "$hash" >/dev/null
+    chmod 600 "$HOME/.hermes/config.yaml" 2>/dev/null || true
+    _hermes_drop_plaintext_password "$HOME/.hermes/config.yaml"
+
+    if grep -qE '^[[:space:]]+password:[[:space:]]' "$HOME/.hermes/config.yaml" 2>/dev/null; then
+        echo -e "${YELLOW}Ainda há senha em claro no config do Hermes.${NC}" >&2
+        return 1
+    fi
+
+    # here-doc com aspas, e nao string com "aspas duplas": o comentario do
+    # --skip-build abaixo tem aspas duplas, e isso FECHA a string do shell — o
+    # resto da unit vira comando e o ExecStart nunca chega ao arquivo. Foi
+    # exatamente o que aconteceu, e o `systemctl start` falhava sem dizer por que.
+    read -r -d '' expected <<UNIT_EOF
+[Unit]
+Description=Dashboard do Hermes (nativo, gerado por dotfiles-fedora)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$HOME/Hermes-Agent
+Environment=HERMES_DASHBOARD_PUBLIC_URL=https://$dns:$HERMES_SERVE_PORT
+Environment=PATH=$HOME/.local/bin:$HOME/.hermes/tools/bin:/usr/local/bin:/usr/bin:/bin
+# --skip-build porque o web_dist ja foi construido no primeiro start. Sem ele, o
+# dashboard refaz um "recovery build" da UI a cada boot, e a espera nao parece
+# espera.
+ExecStart=$HOME/.local/bin/hermes dashboard --host $ip --port $HERMES_DASH_PORT --skip-build --no-open
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT_EOF
+
+    ( umask 077; mkdir -p "$(dirname "$HERMES_DASH_UNIT")" )
+    local _atual=""
+    [ -f "$HERMES_DASH_UNIT" ] && _atual="$(cat "$HERMES_DASH_UNIT")"
+    if [ "$_atual" != "$expected" ]; then
+        ( umask 077; printf '%s\n' "$expected" > "$HERMES_DASH_UNIT" )
+        chmod 600 "$HERMES_DASH_UNIT"
+        echo -e "${GREEN}✓ Unit do dashboard criada.${NC}"
+    fi
+
+    # Quem estiver escutando, sai antes — e pelo PID que o ss mostra, nao por
+    # `pkill -f "hermes dashboard"`, que nao casa com o cmdline real.
+    local pid
+    for pid in $(_hermes_dash_pids); do
+        kill "$pid" 2>/dev/null || true
+    done
+    sleep 3
+
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable hermes-dashboard.service >/dev/null 2>&1 || true
+    if ! loginctl show-user "$(id -un)" 2>/dev/null | grep -qi "Linger=yes"; then
+        echo -e "${YELLOW}Linger desligado: o dashboard não sobe no boot.${NC}" >&2
+        echo -e "${YELLOW}  Habilite com: sudo loginctl enable-linger $(id -un)${NC}" >&2
+    fi
+    systemctl --user restart hermes-dashboard.service >/dev/null 2>&1 || {
+        echo -e "${YELLOW}Não consegui subir o dashboard.${NC}" >&2
+        return 1
+    }
+
+    local i
+    for i in $(seq 1 30); do
+        [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            "http://$ip:$HERMES_DASH_PORT/" 2>/dev/null)" != "000" ] && break
+        sleep 5
+    done
+
+    # Verificar por ESTADO, e o estado que decide sao DUIS: o /login tem de
+    # responder 200 (e nao 400), porque 400 e o sinal de public_url com hostname
+    # vazio; e o portao tem de segurar, provado por um 401 na API sem cookie.
+    local login api
+    login="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        "http://$ip:$HERMES_DASH_PORT/login" 2>/dev/null)"
+    api="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        "http://$ip:$HERMES_DASH_PORT/api/sessions" 2>/dev/null)"
+
+    if [ "$login" = "400" ]; then
+        echo -e "${YELLOW}/login respondeu 400: o public_url está sem hostname.${NC}" >&2
+        echo -e "${YELLOW}  O nome vem de 'tailscale status --json' (Self.DNSName), via${NC}" >&2
+        echo -e "${YELLOW}  _hermes_dnsname. 'tailscale dnsname' nao existe nesta versao.${NC}" >&2
+        return 1
+    fi
+    if [ "$login" = "200" ]; then
+        echo -e "${GREEN}✓ Página de login servida (200).${NC}"
+    else
+        echo -e "${YELLOW}/login respondeu $login, e o esperado era 200.${NC}" >&2
+    fi
+    if [ "$api" = "401" ]; then
+        echo -e "${GREEN}✓ Portão de pé: a API devolve 401 sem cookie.${NC}"
+    else
+        echo -e "${YELLOW}A API devolveu $api sem cookie, e o esperado era 401.${NC}" >&2
+        echo -e "${YELLOW}  O portão depende do BIND, nao do public_url: em loopback${NC}" >&2
+        echo -e "${YELLOW}  o should_require_auth() devolve False e nao ha login nenhum.${NC}" >&2
+        return 1
+    fi
+    unset HERMES_DASH_PASSWORD
+    echo -e "${GREEN}✓ Dashboard nativo em $ip:$HERMES_DASH_PORT.${NC}"
+    return 0
+}
+
+# Gera o hash scrypt com o codigo do proprio Hermes. As dependencias nao estao em
+# venv nenhum: o pm guarda os wheels descompactados em
+# ~/.hermes/cache/uv/archive-v0/<hash>/, e e dali que o processo do dashboard
+# carrega. Montar o PYTHONPATH com eles e a forma de rodar o MESMO codigo fora
+# do processo.
+_hermes_scrypt_hash() {
+    local pw="$1"
+    local pp
+    pp="$(find "$HOME/.hermes/cache/uv/archive-v0" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | tr '\n' ':')"
+    [ -z "$pp" ] && return 0
+    PYTHONPATH="${pp}${HOME}/Hermes-Agent" python3 -c "
+import sys
+from plugins.dashboard_auth.basic import hash_password
+print(hash_password(sys.argv[1]))" "$pw" 2>/dev/null | tail -1
+}
+
+# Remove a chave `password` do bloco basic_auth, deixando o password_hash. O
+# `config set` nao faz isso, e sem isso a precedencia do plugin faz o texto
+# claro ganhar sobre o hash que acabamos de gravar.
+_hermes_drop_plaintext_password() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    python3 - "$f" <<'PYEOF' 2>/dev/null
+import io, re, sys
+p = sys.argv[1]
+lines = io.open(p, encoding="utf-8").read().split("
+")
+out, dentro = [], False
+for l in lines:
+    if re.match(r"^\s*basic_auth:\s*$", l):
+        dentro = True
+        out.append(l)
+        continue
+    if dentro and re.match(r"^\S", l):
+        dentro = False
+    if dentro and re.match(r"^\s+password:\s", l):
+        continue
+    out.append(l)
+io.open(p, "w", encoding="utf-8").write("
+".join(out))
+PYEOF
+}
+
 # O dashboard do Hermes — o container em :9119, publicado em :8445 — foi
 # REMOVIDO por decisão de projeto: a máquina fica só com a CLI nativa
 # (`setup_hermes_cli`). O que motivou, medido:
@@ -531,6 +779,319 @@ except Exception: print('?')" 2>/dev/null)"
 #
 # Para trazer de volta, o que faltaria reverter: o `podman run` com o digest
 # pinado, o `:Z` no bind, e `sudo tailscale serve --bg --https=8445`.
+
+# A escolha da pergunta e o que decide qual dos dois modulos roda. Um `if/else`
+# dentro de um modulo so seria uma mentira: os dois procedimentos nao tem
+# pre-requisito em comum, e a consequencia de cada um e diferente.
+setup_open_design() {
+    [ "$OPENDESIGN_MODE" = "native" ] || return 0
+    _setup_open_design_native
+}
+
+setup_open_design_container() {
+    [ "$OPENDESIGN_MODE" = "container" ] || return 0
+    _setup_open_design_container
+}
+
+# Um por maquina. Os dois disputam a MESMA porta interna, e a consequencia de
+# deixar isso acontecer nao e um erro visivel: o segundo sobe, o primeiro
+# continua com o processo no ar mas sem escutar, e a publicacao continua
+# respondendo pelo que diedo primeiro. Recusar aqui deixa o conflito explicito.
+_open_design_exclusive() {
+    local outro
+    if [ "$OPENDESIGN_MODE" = "native" ]; then
+        outro="container"
+        podman container exists open-design 2>/dev/null && {
+            echo -e "${YELLOW}Ja existe um container do OpenDesign nesta maquina.${NC}" >&2
+            echo -e "${YELLOW}  Os dois modos disputam a porta $OPENDESIGN_PORT. Remova um:${NC}" >&2
+            echo -e "${YELLOW}    podman rm -f open-design${NC}" >&2
+            return 1
+        }
+    else
+        outro="nativo"
+        if [ -f "$OPENDESIGN_DEPLOY_DIR/dist/cli.js" ] && \
+           curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$OPENDESIGN_PORT/api/health" 2>/dev/null; then
+            echo -e "${YELLOW}Ja existe um OpenDesign nativo rodando nesta maquina.${NC}" >&2
+            echo -e "${YELLOW}  Os dois modos disputam a porta $OPENDESIGN_PORT. Pare o nativo:${NC}" >&2
+            echo -e "${YELLOW}    systemctl --user stop open-design${NC}" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------ nativo
+_setup_open_design_native() {
+    _open_design_exclusive || return 1
+
+    # build deps. libatomic nao e opcional e nao vem no Fedora: sem ela o node
+    # pinado do pnpm morre com "error while loading shared libraries" — a mesma
+    # dependencia que o install do Hermes tambem exige.
+    if [ ! -e /usr/lib64/libatomic.so.1 ]; then
+        echo -e "${YELLOW}Falta a libatomic, que o build precisa.${NC}" >&2
+        echo -e "${YELLOW}  Instale com: sudo dnf install -y libatomic${NC}" >&2
+        return 1
+    fi
+
+    # O node vem do mise e o pnpm do corepack; nenhum dos dois esta no PATH de
+    # uma sessao nao interativa, entao o PATH e montado a mao e nao esperado.
+    local nb="$HOME/.local/share/mise/installs/node/24.21.0/bin"
+    [ -x "$nb/node" ] || { echo -e "${YELLOW}node do mise ausente; pulei o OpenDesign.${NC}" >&2; return 1; }
+    export PATH="$nb:$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    if [ ! -x "$nb/pnpm" ]; then
+        corepack enable pnpm >/dev/null 2>&1
+        corepack prepare pnpm@10.33.2 --activate >/dev/null 2>&1
+    fi
+    [ -x "$nb/pnpm" ] || { echo -e "${YELLOW}pnpm nao ficou disponivel; pulei o OpenDesign.${NC}" >&2; return 1; }
+
+    if [ ! -d "$OPENDESIGN_SRC/.git" ]; then
+        echo -e "${YELLOW}Falta o fonte em $OPENDESIGN_SRC.${NC}" >&2
+        echo -e "${YELLOW}  O modo nativo compila de fonte e nao tem imagem para baixar:${NC}" >&2
+        echo -e "${YELLOW}    git clone <url-do-open-design> $OPENDESIGN_SRC${NC}" >&2
+        return 1
+    fi
+
+    if [ ! -d "$OPENDESIGN_SRC/node_modules" ]; then
+        echo -e "${BLUE}Instalando as dependencias (a etapa longa, ~1,5 GB)…${NC}"
+        ( cd "$OPENDESIGN_SRC" && pnpm install --frozen-lockfile ) || {
+            echo -e "${YELLOW}O pnpm install falhou; a saida esta acima.${NC}" >&2; return 1; }
+    fi
+
+    # O build do web estoura o HEAP do V8, e nao a RAM: medido numa maquina com
+    # 7,7 GiB de RAM e 7,7 GiB de swap LIVRES, com dmesg sem OOM, e o frame 2 da
+    # pilha era `node::OOMErrorHandler`. Duas alavancas, porque o Next cria um
+    # worker por CPU e cada um tem heap proprio.
+    if [ ! -d "$OPENDESIGN_SRC/apps/web/out" ]; then
+        echo -e "${BLUE}Compilando o daemon e o web…${NC}"
+        ( cd "$OPENDESIGN_SRC" && pnpm --filter @open-design/daemon build ) || {
+            echo -e "${YELLOW}O build do daemon falhou.${NC}" >&2; return 1; }
+        ( cd "$OPENDESIGN_SRC/apps/web" && \
+          NODE_OPTIONS=--max-old-space-size=3072 taskset -c 0-3 pnpm build ) || {
+            echo -e "${YELLOW}O build do web falhou.${NC}" >&2; return 1; }
+    fi
+
+    # `pnpm deploy --legacy --prod` ACHATA o pacote na raiz do output. O daemon,
+    # nao: `resolveProjectRoot` faz path.resolve(daemonDir, '../..') e assume
+    # <projeto>/apps/daemon/dist, que e o layout do container. Achato, o
+    # PROJECT_ROOT sobe um nivel a mais, o STATIC_DIR cai fora, e o sintoma e
+    # `Cannot GET /` com a API respondendo normalmente.
+    #
+    # E o sintoma MASCARADO quando o token esta ligado: o portao de auth
+    # responde 401 antes da rota, entao o 404 some. So `/` SEM credencial
+    # revela — e por isso que a verificacao final e feita assim.
+    if [ ! -f "$OPENDESIGN_DEPLOY_DIR/dist/cli.js" ]; then
+        echo -e "${BLUE}Montando o arvore de deploy no layout que o daemon espera…${NC}"
+        mkdir -p "$OPENDESIGN_ROOT/apps" || return 1
+        rm -rf "$OPENDESIGN_DEPLOY_DIR"
+        ( cd "$OPENDESIGN_SRC" && pnpm --filter @open-design/daemon deploy --legacy --prod \
+            "$OPENDESIGN_DEPLOY_DIR" ) || {
+            echo -e "${YELLOW}O deploy falhou.${NC}" >&2; return 1; }
+    fi
+    mkdir -p "$OPENDESIGN_ROOT/apps/web"
+    rm -f "$OPENDESIGN_ROOT/apps/web/out"
+    ln -sfn "$OPENDESIGN_WEB_DIR" "$OPENDESIGN_ROOT/apps/web/out"
+
+    # O .env do nativo. Fica no root do arvore, nao no deploy, porque e
+    # configuracao desta instalacao e nao da imagem.
+    local envf="$OPENDESIGN_ROOT/.env"
+    ( umask 077
+      cat > "$envf" <<ODENV
+OD_API_TOKEN=$OPENDESIGN_TOKEN
+OD_ALLOWED_ORIGINS=
+OD_DISABLE_API_AUTH=
+OD_CODEX_SANDBOX=
+ODENV
+    )
+
+    # O IP DA TAILNET, e nao 127.0.0.1. Ver o comentario das constantes: em
+    # loopback o carve-out do daemon desliga o token.
+    local ip
+    ip="$(tailscale ip -4 2>/dev/null | head -1)"
+    [ -n "$ip" ] || { echo -e "${YELLOW}Sem IP de tailnet; pulei o OpenDesign.${NC}" >&2; return 1; }
+    local origin="https://$(_hermes_dnsname):$OPENDESIGN_SERVE_PORT"
+
+    # A unit de usuario, e nao nohup: sem ela o processo nao volta depois de um
+    # reboot, que e o mesmo buraco que a unit do opencode teve.
+    # here-doc com aspas, e nao string com "aspas duplas": um comentario com
+    # $' ou " ABRE e FECHA a string, e o resto da unit vira comando — foi o que
+    # aconteceu aqui, e o ExecStart nunca chegava ao arquivo. Ver o mesmo
+    # comentario em setup_hermes_dashboard.
+    read -r -d '' expected <<UNIT_EOF
+[Unit]
+Description=OpenDesign nativo (gerado por dotfiles-fedora)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$OPENDESIGN_ROOT
+EnvironmentFile=$envf
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=192
+Environment=HOME=$HOME
+Environment=OD_BIND_HOST=$ip
+Environment=OD_PORT=$OPENDESIGN_PORT
+Environment=OD_WEB_PORT=$OPENDESIGN_PORT
+Environment=OD_ALLOWED_ORIGINS=$origin
+Environment=PATH=$nb:$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$nb/node $OPENDESIGN_DEPLOY_DIR/dist/cli.js --no-open
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT_EOF
+
+    ( umask 077; mkdir -p "$(dirname "$OPENDESIGN_UNIT")" )
+    local _atual=""
+    [ -f "$OPENDESIGN_UNIT" ] && _atual="$(cat "$OPENDESIGN_UNIT")"
+    if [ "$_atual" != "$expected" ]; then
+        ( umask 077; printf '%s\n' "$expected" > "$OPENDESIGN_UNIT" )
+        chmod 600 "$OPENDESIGN_UNIT"
+        echo -e "${GREEN}✓ Unit do OpenDesign criada.${NC}"
+    fi
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable open-design.service >/dev/null 2>&1 || true
+    if ! loginctl show-user "$(id -un)" 2>/dev/null | grep -qi "Linger=yes"; then
+        echo -e "${YELLOW}Linger desligado: a unit nao sobe no boot.${NC}" >&2
+        echo -e "${YELLOW}  Habilite com: sudo loginctl enable-linger $(id -un)${NC}" >&2
+    fi
+
+    local was_active=0
+    systemctl --user is-active open-design.service >/dev/null 2>&1 && was_active=1
+    if [ "$was_active" = "1" ]; then
+        systemctl --user restart open-design.service >/dev/null 2>&1
+    else
+        systemctl --user start open-design.service >/dev/null 2>&1
+    fi
+    unset OPENDESIGN_TOKEN
+
+    # Verificar por ESTADO, e o estado que decide e a UI, medida SEM credencial
+    # e COM. Sem credencial tem de ser 401: e assim que se prova que o token
+    # segura, e que nao ha carve-out em acao.
+    local i sem com ui
+    for i in $(seq 1 36); do
+        sem="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            "http://$ip:$OPENDESIGN_PORT/api/health" 2>/dev/null)"
+        [ "$sem" != "000" ] && break
+        sleep 5
+    done
+    com="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+        "http://$ip:$OPENDESIGN_PORT/api/agents" 2>/dev/null)"
+    ui="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$ip:$OPENDESIGN_PORT/" 2>/dev/null)"
+
+    if [ "$com" = "200" ]; then
+        echo -e "${YELLOW}ATENCAO: a API respondeu 200 SEM credencial.${NC}" >&2
+        echo -e "${YELLOW}  O token nao esta sendo conferido — o carve-out de loopback esta em${NC}" >&2
+        echo -e "${YELLOW}  acao, ou OD_DISABLE_API_AUTH esta ligado. Nao publique assim.${NC}" >&2
+    else
+        echo -e "${GREEN}✓ Token conferido: /api/agents devolve $com sem credencial.${NC}"
+    fi
+    if [ "$ui" = "401" ]; then
+        echo -e "${GREEN}✓ UI servida e protegida ($ui).${NC}"
+    else
+        echo -e "${YELLOW}A UI respondeu $ui.${NC}" >&2
+        echo -e "${YELLOW}  Se for 404 com a API de pe, o STATIC_DIR fell fora: confira o layout${NC}" >&2
+        echo -e "${YELLOW}  $OPENDESIGN_ROOT/apps/web/out.${NC}" >&2
+    fi
+    echo -e "${GREEN}✓ OpenDesign nativo em $ip:$OPENDESIGN_PORT, escutando na tailnet.${NC}"
+    return 0
+}
+
+# ---------------------------------------------------------------- container
+_setup_open_design_container() {
+    _open_design_exclusive || return 1
+
+    if ! command -v podman &> /dev/null; then
+        echo -e "${YELLOW}Podman ausente; pulei o OpenDesign.${NC}" >&2; return 1
+    fi
+    # Sem o provider de compose, `podman compose` responde "looking up compose
+    # provider failed" — e nenhum dos dois modos de container existe.
+    if ! podman compose version >/dev/null 2>&1; then
+        echo -e "${YELLOW}Falta o provider de compose.${NC}" >&2
+        echo -e "${YELLOW}  Instale com: sudo dnf install -y podman-compose${NC}" >&2
+        return 1
+    fi
+
+    local D="$OPENDESIGN_SRC/deploy"
+    [ -f "$D/docker-compose.yml" ] || {
+        echo -e "${YELLOW}Falta $D/docker-compose.yml.${NC}" >&2; return 1; }
+
+    # A origem da tailnet na lista de permitidos. A base do compose JA tem a
+    # linha certa (OD_ALLOWED_ORIGINS <- OPEN_DESIGN_ALLOWED_ORIGINS); o que
+    # falta e o valor. Sem ele a pagina carrega, a API morre com 403, e o
+    # navegador acusa cross-origin sem explicar nada.
+    local origin="https://$(_hermes_dnsname):$OPENDESIGN_SERVE_PORT"
+    local envf="$D/.env"
+    ( umask 077
+      cat > "$envf" <<ODENV
+OD_API_TOKEN=$OPENDESIGN_TOKEN
+OPEN_DESIGN_ALLOWED_ORIGINS=$origin
+OPEN_DESIGN_IMAGE=$OPENDESIGN_IMAGE
+ODENV
+    )
+    chmod 600 "$envf"
+    echo "  origem permitida: $origin"
+
+    # O override LOCAL, e nao o `docker-compose.linux.yml` do upstream: aquele
+    # nao funde com a base porque `OD_PORT` e int num arquivo e texto no outro, e
+    # o podman-compose recusa ("can't merge value of [OD_PORT] of type int and
+    # str").
+    #
+    # E a lista de volumes PRECISA repetir `open_design_data:/app/.od`: o
+    # podman-compose SUBSTITUI a lista do servico em vez de acrescentar, entao um
+    # override que so soma os host-bins faz o volume de dados sumir do merge — e a
+    # recreate seguinte comeca com o estado vazio.
+    cat > "$D/docker-compose.local.yml" <<'ODLOCAL'
+# Override LOCAL, escrito por dotfiles-fedora. Nao faz parte do upstream.
+#
+# O `docker-compose.linux.yml` do upstream traz os mounts das CLIs do host e o
+# PATH que as aponta, mas nao funde com a base: OD_PORT e int na base e texto no
+# override, e o podman-compose recusa a fusao.
+#
+# O `,z` no fim do mount nao e opcional. Sem ele os mounts ficam legiveis mas o
+# container leva `Permission denied`, porque os rotulos SELinux do host nao servem
+# para um container: medido, ~/.local/bin e gconf_home_t e ~/.opencode/bin e
+# user_tmp_t. As permissoes Unix sao 755 e nao sao o motivo. `z` e nao `Z` porque o
+# host tambem usa esses diretorios.
+#
+# ATENCAO: a lista de volumes SUBSTITUI a da base. `open_design_data:/app/.od`
+# tem que estar aqui, senao o estado do OpenDesign some no merge.
+services:
+  open-design:
+    environment:
+      PATH: /mnt/host-local-bin:/mnt/host-opencode:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - open_design_data:/app/.od
+      - ${HOME}/.local/bin:/mnt/host-local-bin:ro,z
+      - ${HOME}/.opencode/bin:/mnt/host-opencode:ro,z
+ODLOCAL
+
+    # `--no-build` e obrigatorio: a base traz `image:` e `build:` juntos, o que e
+    # normal para quem desenvolve do repo, e sem a flag o Podman tenta COMPILAR DA
+    # FONTE — uma operacao longa com aparencia legitima.
+    ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
+        up -d --no-build ) || {
+        echo -e "${YELLOW}O compose up falhou; a saida esta acima.${NC}" >&2; return 1; }
+    unset OPENDESIGN_TOKEN
+
+    local i st
+    for i in $(seq 1 36); do
+        st="$(podman inspect open-design --format '{{.State.Health.Status}}' 2>/dev/null)"
+        [ "$st" = "healthy" ] && break
+        sleep 10
+    done
+    st="$(podman inspect open-design --format '{{.State.Health.Status}}' 2>/dev/null)"
+    if [ "$st" = "healthy" ]; then
+        echo -e "${GREEN}✓ Container do OpenDesign healthy.${NC}"
+    else
+        echo -e "${YELLOW}O container ficou $st, e nao healthy.${NC}" >&2
+        echo -e "${YELLOW}  A causa costuma estar no COMECO do log, nao no fim.${NC}" >&2
+        return 1
+    fi
+    echo -e "${GREEN}✓ OpenDesign em container, so atras do serve, com TLS.${NC}" >&2
+    echo -e "${YELLOW}  Nenhuma CLI do host roda dentro: sao ELF glibc e a imagem e Alpine.${NC}" >&2
+    return 0
+}
 
 setup_opencode_service() {
     # A v2 do opencode NÃO cria unit nenhuma. `opencode service start` executa
@@ -1194,7 +1755,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex hermes-cli zshrc"
+ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex hermes-cli open-design open-design-container zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -1207,7 +1768,7 @@ ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-harden
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
 HOST_STEPS="base hostname ssh device-keys git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
-VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening podman ai-clis hermes-cli zshrc"
+VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening podman ai-clis hermes-cli hermes-dashboard open-design open-design-container zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
 OPT_IN_STEPS="toolbx gui-access"
@@ -1654,6 +2215,46 @@ fi
 #
 # A senha do Hermes é lida AQUI, mas o container recebe só o hash scrypt. O valor
 # bruto é gravado num arquivo 600 e apagado da variável assim que usado.
+# O modo do OpenDesign e perguntado sempre que qualquer um dos dois modulos pode
+# rodar, e SEM padrao. Um padrao implicito seria uma escolha de arquitetura
+# tomada em nome de quem nao foi perguntado — e a escolha aqui tem consequencia
+# real e oposta em cada ramo: o nativo tem os agentes e expoe a porta interna, o
+# container tem o TLS e nao tem agente nenhum.
+#
+# O token vai na MESMA pergunta, e pela razao de sempre: e segredo, e o script
+# nao pode parar no meio do caminho para travar o terminal.
+OPENDESIGN_TOKEN=""
+OPENDESIGN_TOKEN_SET=0
+if should_run "open-design" || should_run "open-design-container"; then
+    echo -e "${BLUE}OpenDesign${NC}"
+    echo -e "  Dois modos, com consequencias opostas. Medido nesta maquina:"
+    echo -e "    ${GREEN}nativo${NC}    7 agentes disponiveis (opencode, agy, hermes, claude, codex...)"
+    echo -e "              precisa escutar no IP da tailnet, entao expoe a $OPENDESIGN_PORT em HTTP sem TLS"
+    echo -e "    ${YELLOW}container${NC} so existe atras do serve, com TLS, e nenhuma CLI do host roda dentro"
+    echo
+    while :; do
+        if ! read -r -p "  Modo [nativo/container]: " OPENDESIGN_MODE; then
+            # EOF, e nao resposta invalida. A distincao importa: com entrada
+            # invalida o loop repregunta, mas em EOF o `read` falha para sempre e
+            # um `while :` sem este teste trava o script indefinidamente. Sem
+            # padrao declarado, a saida correta em EOF e NAO INSTALAR.
+            echo
+            echo -e "${YELLOW}  Sem resposta: o OpenDesign nao sera instalado.${NC}" >&2
+            OPENDESIGN_MODE=""
+            break
+        fi
+        OPENDESIGN_MODE="$(printf '%s' "$OPENDESIGN_MODE" | tr '[:upper:]' '[:lower:]')"
+        case "$OPENDESIGN_MODE" in
+            nativo | container) break ;;
+            *) echo -e "${YELLOW}  Escolha 'nativo' ou 'container'.${NC}" ;;
+        esac
+    done
+    read -r -s -p "  OD_API_TOKEN (vazio = gerar um): " OPENDESIGN_TOKEN
+    echo
+    OPENDESIGN_TOKEN_SET=1
+    [ -z "$OPENDESIGN_TOKEN" ] && OPENDESIGN_TOKEN="$(openssl rand -hex 32)"
+fi
+
 HERMES_DASH_PASSWORD=""
 HERMES_DASH_PASSWORD_SET=0
 if [ "${CONFIRM_HERMES:-0}" = "1" ]; then
