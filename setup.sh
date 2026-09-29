@@ -403,6 +403,11 @@ setup_opencode_service() {
         return 1
     fi
 
+    # Lido ANTES dos `service set`: eles param o serviço, e é essa informação que
+    # decide entre `restart` e `start` no fim da função.
+    local _was_active=0
+    systemctl --user is-active opencode.service >/dev/null 2>&1 && _was_active=1
+
     # A escuta e a senha vivem no service.json, e é o que mantém a senha estável
     # entre restarts: o código reaproveita a guardada e só gera uma quando não
     # existe. `service set` é idempotente por conta própria — ele para o serviço,
@@ -447,11 +452,30 @@ WantedBy=default.target"
     # o systemd de usuário não existe fora de uma sessão, e um `enable` não sobe
     # nada. Medido na VM: Linger=yes, habilitado pelo módulo podman.
     systemctl --user enable opencode.service >/dev/null 2>&1 || true
+
+    # Deixar o serviço DE PÉ. Os dois `service set` acima PARAM o servidor antes de
+    # gravar — é assim que o opencode garante que o próximo start pega a config
+    # nova. Quem chamou esta função e não levantar nada depois encontra o serviço
+    # derrubado, e foi exatamente o que aconteceu no teste: a unit ficou enabled e
+    # inactive, e a publicação na tailnet respondeu 502 com o backend fora.
+    #
+    # `restart` quando já estava no ar, `start` quando não estava. Num unit
+    # Type=oneshot com RemainAfterExit, um `start` em algo já ativo é no-op — e a
+    # config nova não chegaria ao processo.
+    if [ "$_was_active" = "1" ]; then
+        systemctl --user restart opencode.service >/dev/null 2>&1 \
+            && echo -e "${GREEN}✓ OpenCode reiniciado com a escuta nova.${NC}" \
+            || echo -e "${YELLOW}Não consegui reiniciar o OpenCode.${NC}" >&2
+    else
+        systemctl --user start opencode.service >/dev/null 2>&1 \
+            && echo -e "${GREEN}✓ OpenCode no ar ($OPENCODE_HOST:$OPENCODE_PORT).${NC}" \
+            || echo -e "${YELLOW}Não consegui subir o OpenCode.${NC}" >&2
+    fi
     if ! loginctl show-user "$(id -un)" 2>/dev/null | grep -qi "Linger=yes"; then
         echo -e "${YELLOW}Linger está desligado: a unit do OpenCode não vai subir no boot.${NC}" >&2
         echo -e "${YELLOW}  Habilite com: sudo loginctl enable-linger $(id -un)${NC}" >&2
     fi
-    echo -e "${GREEN}✓ OpenCode: escuta em $OPENCODE_HOST:$OPENCODE_PORT, unit habilitada.${NC}"
+    echo -e "${GREEN}✓ OpenCode: escuta $OPENCODE_HOST:$OPENCODE_PORT, unit habilitada e no ar.${NC}"
 }
 
 # Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
