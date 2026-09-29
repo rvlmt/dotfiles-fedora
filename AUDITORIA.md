@@ -233,7 +233,10 @@ Uma entrada inválida repregunta; em EOF o `read` falharia para sempre e um
 | **Tailscale SSH desligado**, VM em NAT | a entrada é `ssh` normal, com a hardened config | sem acesso se a chave se perder |
 | **OpenCode sem pin de versão** | a máquina não fica presa numa versão | acompanha a major 2; se a 3 subir, o script **para e avisa** |
 | **sem evidência de sessão filha** (opencode 2.x) | o agente roda, os 7 agentes são detectados, a transcript da raiz salva | **`--pure` é a garantia de que um plugin não executa no caminho de evidência, e ela não existe no 2.x.** A degradação é **silenciosa** |
-| **gateway do Hermes manual** | o script não duplica a documentação do produto | três comandos a mais numa VM nova |
+| **gateway do Hermes manual** | o script não duplica a documentação do produto | três comandos a mais numa VM nova — e a unit gerada prende o caminho do executável |
+| **zona `trusted` no `tailscale0`** | a superfície da VM é pequena e ela tem o próprio `firewalld` | **qualquer nó da tailnet alcança todas as portas do host**, não só a 22 |
+| **nenhuma versão pinada por número** | o `base` não pode falhar porque um número saiu do registro | o **pnpm** salta de major (10.33.2 → 12.x) contra um lockfile `9.0` |
+| **`--yes` para rodar sem terminal** | provisionamento não interativo, com o default ainda sendo **não** | **o `sudo` continua pedindo senha** — a flag tira as perguntas do script, não as do sudo |
 | **raiz do build = o clone** | o caminho é o que a doc do OpenDesign espera; −947 MB | o clone ganha arquivos não rastreados, e `git status` mostra |
 | **`gpgcheck=0` no repo do Antigravity** | o repo **não publica chave** — os dois `.repo` dão 404 e não há `gpgkey` | pacotes desse repo sem verificação de assinatura. É do perfil `host`, não afeta a VM |
 | **senhas padrão** (`hermes`, `opencode`) | nada a configurar | adivinhável por quem conheça a convenção |
