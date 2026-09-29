@@ -1010,6 +1010,49 @@ justamente o que o `Dockerfile` faz:
 `~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
 explicitamente antes de qualquer build.
 
+#### O OpenDesign tem DOIS modos, e a pergunta é no bloco de inicial
+
+Não são dois ramos de uma coisa só: **não compartilham pré-requisito nenhum**, e
+por isso são dois módulos e a pergunta escolhe qual roda. Um `if/else` num módulo
+só seria mentira — o `if` teria quarenta linhas e nenhum lado pareceria o que é.
+
+| | **nativo** | **container** |
+|---|---|---|
+| pré-requisitos | node do mise, pnpm via corepack, `libatomic` | nada, a imagem traz tudo |
+| custo | `pnpm install` de 1,5 GB + build do daemon + build do web | pull de 1,28 GB |
+| agentes | **7** | **0** |
+| como o auth é aplicado | escutando no **IP da tailnet** | bridge: o peer é o gateway |
+| alcançável | direto, em HTTP sem TLS | só atrás do `:8444`, com TLS |
+
+⚠️ **O nativo PRECISA escutar no IP DA TAILNET, e é o preço do modo.** O daemon
+tem um carve-out que dispensa o token quando o peer é loopback, e o `tailscale
+serve` faz proxy de localhost para localhost. Medido: em `127.0.0.1` o
+`/api/agents` devolve **200** sem credencial; no IP da tailnet devolve **401**. A
+consequência é que o serviço fica exposto na porta interna, sem TLS.
+
+⚠️ **O sintoma do `public_url` quebrado é `400` no `/login`, e ele MASCARADO
+quando o token está ligado.** O portão de auth responde 401 antes da rota, então o
+`Cannot GET /` some. Só `/` **sem** credencial revela que a UI não existe — e é por
+isso que a verificação final é feita nos dois lados.
+
+⚠️ **`pnpm deploy --legacy --prod` ACHATA o pacote, e o daemon não.** O
+`resolveProjectRoot` faz `path.resolve(daemonDir, '../..')` e assume
+`<projeto>/apps/daemon/dist`, que é o layout do container. Achatado, o
+`PROJECT_ROOT` sobe um nível a mais, o `STATIC_DIR` cai fora, e a UI não é montada.
+O layout que funciona é `apps/daemon/` e `apps/web/out` — o mesmo do container.
+
+⚠️ **O build do web estoura o HEAP do V8, não a RAM.** `rc=0 em 89s` com
+`--max-old-space-size=3072` e `taskset -c 0-3`, numa máquina com 7,7 GiB de RAM e
+7,7 GiB de swap **livres** e `dmesg` sem OOM. O frame 2 da pilha era
+`node::OOMErrorHandler`. Duas alavancas, porque o Next cria um worker por CPU e
+cada um tem heap próprio.
+
+**Um por máquina.** Os dois disputam a mesma porta interna, e deixar isso acontecer
+não dá erro visível: o segundo sobe, o primeiro fica com o processo no ar mas sem
+escutar, e a publicação continua respondendo pelo que ficou. O script recusa, com
+a mensagem dizendo qual remover.
+
+
 #### O dashboard do Hermes é NATIVO, e a UI não custa container
 
 O dashboard do Hermes — o container em `127.0.0.1:9119`, publicado em `:8445` —
