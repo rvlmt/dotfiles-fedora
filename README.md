@@ -1006,6 +1006,93 @@ justamente o que o `Dockerfile` faz:
 `~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
 explicitamente antes de qualquer build.
 
+#### A CLI do Hermes nativa na VM, e o que ela custou
+
+O dashboard roda em container, mas a **CLI é nativa** — e essa distinção não é
+preferência, é consequência da libc. Instalada em `rc.9-v0.21.5`, a mesma versão
+`0.21.5` que a imagem carrega.
+
+```bash
+# 1. uv. O mise não conhece uv, então é o instalador oficial, sem sudo e sem
+#    tocar no shell rc — o PATH é gerenciado por este repo, e o instalador
+#    편집aria o rc por conta própria.
+curl -LsSf -o /tmp/uv-install.sh https://astral.sh/uv/install.sh
+UV_INSTALL_DIR="$HOME/.local/bin" INSTALLER_NO_MODIFY_PATH=1 sh /tmp/uv-install.sh
+
+# 2. a fonte, na tag que casa com a imagem
+git clone https://github.com/NousResearch/Hermes-Agent.git
+cd Hermes-Agent && git checkout rc.9-v0.21.5
+
+# 3. o install. Ele traz o PRÓPRIO uv, pinado por sha256 a partir de
+#    pm/lock.json — o uv do passo 1 é para o resto, não para este script.
+bash setup-hermes.sh --runtime-only
+```
+
+⚠️ **A instalação falha sem `libatomic`, e o erro é de biblioteca, não de
+permissão.** O `pm` baixa um node pinado e **verifica rodando `node --version`**; o
+binário morre com
+
+```
+error while loading shared libraries: libatomic.so.1: cannot open shared object file
+```
+
+e o `pm` reporta `node: staged entry failed verification ... exited 127`. Nem o
+`setup-hermes.sh` nem o README mencionam a dependência. A ironia útil: a
+`libatomic.so.1` **existe dentro do container Alpine** e não existe no host — é o
+mesmo muro de libc do OpenDesign, no sentido inverso.
+
+```bash
+sudo dnf install -y libatomic     # libatomic.x86_64 em qualquer Fedora
+```
+
+⚠️ **A CLI não é colocada no PATH por ninguém.** O `setup-hermes.sh` cria
+`~/.hermes/` com o estado (`SOUL.md`, `cron`, `hooks`, `pairing`, `cache`…) e
+**não** cria `~/.hermes/bin` — que fica ausente, e é um caminho que o launcher
+procura. O executável real é `~/Hermes-Agent/hermes`, um script Python. Sem um
+link, `hermes` não existe como comando:
+
+```bash
+ln -sfn "$HOME/Hermes-Agent/hermes" "$HOME/.local/bin/hermes"
+```
+
+`~/.local/bin` é onde este repo já põe `agy`, `cursor-agent`, `gh-app` e
+`bunx`, então é o lugar certo por convenção — e é também o diretório que o
+container do OpenDesign monta.
+
+**Dois homes do Hermes, e eles não compartilham estado.** O nativo usa
+`~/.hermes/`; o container usa `~/Developer/.hermes/` (o `HERMES_HOME=/opt/data`).
+Nomes iguais, caminhos diferentes, e o segundo é do **subuid** — sem `sudo` não
+se nem faz `stat` dele. Configurar provider num não aparece no outro.
+
+**E sem provider a CLI é inerte.** Estado medido em `auth.json`: `providers: []`,
+e o `credential_pool` com `nous` em **0** entradas. A CLI conecta, autentica e não
+gera nada. Um `hermes model` resolve, e é a única coisa que falta.
+
+#### O container não roda NENHUMA CLI do host, por duas causas
+
+Medido depois de a CLI existir. Não é uma causa, são **duas**, e o OpenDesign
+reporta as duas com a mesma mensagem:
+
+| CLI | o que é | por que não roda no container |
+|---|---|---|
+| `opencode` | ELF glibc | **libc**: Alpine é musl, sem `/lib64/ld-linux-x86-64.so.2` |
+| `agy` | ELF glibc | **libc**, idem |
+| `hermes` | symlink para `~/Hermes-Agent/hermes` | **caminho**: o container monta `~/.local/bin`, mas não `~/Hermes-Agent` |
+
+E o diagnóstico do app é impreciso nos dois casos: ele diz *"foi encontrado mas não
+pode ser iniciado — seu wrapper ou shim aponta para um caminho ausente"*, o que é
+exato para o symlink e **falso para o ELF**, cujo problema é a libc. Um
+`shim-broken` no container **não significa** que o shim está quebrado.
+
+⚠️ **O `shim-broken` é o estado normal do container, não um sintoma a investigar.**
+Três agentes aparecem como `shim-broken` desde que os mounts existem, e nenhum
+deles vai ficar disponível enquanto o container for Alpine. A lista de agentes que
+o container consegue usar é vazia por construção.
+
+Isso é o argumento medido a favor do **nativo**: no modo nativo os três aparecem
+disponíveis, porque os binários glibc executam no glibc.
+
+
 #### O Hermes: senha local em vez do OAuth do Portal
 
 O dashboard aceita **dois** provedores, e o próprio `--help` do binário diz: *"a
