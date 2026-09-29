@@ -1005,30 +1005,39 @@ justamente o que o `Dockerfile` faz:
 `~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
 explicitamente antes de qualquer build.
 
-#### A pasta `open-design-native-root` é um nome provisório, e isso é decisão
+#### A raiz do build passou a ser o próprio clone
 
-O modo nativo constrói a raiz em `~/Developer/open-design-native-root/`, ao lado
-do clone em `~/Developer/open-design/`. O sufixo existe por uma razão só: **não
-colidir com o clone** — que é o caminho que a documentação e os exemplos do
-próprio OpenDesign esperam, e que um `git clone` insists em ocupar.
+O modo nativo **não** cria mais uma pasta paralela. A raiz do build é
+`~/Developer/open-design/`, que é o clone — o caminho que a documentação e os
+exemplos do próprio OpenDesign esperam.
 
-A intenção registrada é que a **próxima** instalação use só
-`~/Developer/open-design/` e não crie a raiz paralela. **Não foi feito nesta
-máquina**: mudar exigiria mover a raiz construída e reapontar a unit, e o nome
-atual funciona — é reversível pelo caminho de volta, e o ganho é cosmeticidade de
-caminho.
+Havia um nome provisório, `~/Developer/open-design-native-root/`, criado só para
+não colidir com o clone. Ele estava registrado em três lugares (aqui, no
+`setup.sh` e no `ROLLBACK.md`) como *"a próxima instalação deve usar só
+`~/Developer/open-design` e não criar a raiz paralela"*.
 
-O que fica é o registro, em três lugares, para quem for o próximo a instalar:
+**A próxima instalação chegou, e a mudança foi feita.** O critério era o momento:
+mover a raiz é trivial numa máquina que ainda não rodou nada, e caro numa que já
+está rodando — e é justamente por isso que ficou adiada até agora e não antes.
 
-- no `setup.sh`, comentário em `OPENDESIGN_ROOT` logo acima da atribuição;
-- no `ROLLBACK.md`, seção *"a pasta `open-design-native-root` é um nome
-  provisório"*;
-- aqui.
+O que a mudança exige em código, e que é a pegadinha real: com a raiz **igual** ao
+clone, o symlink de `apps/web/out` passaria a apontar para o próprio destino.
 
-Uma consequência de manutenção: a unit
-`EnvironmentFile=~/Developer/open-design-native-root/.env` é o que amarra a unit
-à pasta, então trocar o caminho não é só editar uma variável — é mover a árvore
-e reapontar a unit, o que é o que torna a troca mais cara do que parece.
+```
+apps/web/out  ->  apps/web/out        # laço
+```
+
+Por isso o symlink ficou dentro de um guard que compara `$OPENDESIGN_ROOT` com
+`$OPENDESIGN_SRC`, e só o cria quando são diferentes — que é o caso de uma raiz
+paralela. O guard está em `_setup_open_design_native`, logo depois do
+`pnpm deploy`, e ele existe por causa dessa decisão, não por Prudência genérica.
+
+**O que isso não muda:** o `pnpm deploy` continua precisando do layout
+`<projeto>/apps/daemon/dist`, porque `resolveProjectRoot` faz
+`path.resolve(daemonDir, '../..')`. Escrever dentro do clone deixa `apps/daemon`
+com o conteúdo do deploy — que é o que o daemon espera, e o que a imagem do
+container traz. O clone passa a ter arquivos não rastreados, e `git status` mostra
+isso; é o preço de não manter uma cópia paralela da mesma árvore.
 
 
 #### O OpenDesign tem DOIS modos, e a pergunta é no bloco de inicial

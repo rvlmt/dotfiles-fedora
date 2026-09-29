@@ -210,13 +210,18 @@ OPENDESIGN_SRC="$HOME/Developer/open-design"
 # com "git clone <url-do-open-design>" numa maquina limpa. O repositorio resolve
 # (medido com `git ls-remote` da propria VM).
 OPENDESIGN_REPO_URL="https://github.com/nexu-io/open-design.git"
-# REGISTRO, nao um bug: `-native-root` e um nome PROVISORIO, criado para nao
-# colidir com o clone em OPENDESIGN_SRC — que e o caminho que a doc e os exemplos
-# do proprio OpenDesign esperam. A intencao e que a proxima instalacao use SO
-# ~/Developer/open-design e nao crie a raiz paralela. Mudar agora exigiria mover a
-# raiz e reapontar a unit, e o nome atual funciona, entao fica para a proxima.
-# Ver ROLLBACK.md, secao "a pasta open-design-native-root e um nome provisorio".
-OPENDESIGN_ROOT="$HOME/Developer/open-design-native-root"
+# A raiz do build E o proprio clone. Antes existia uma pasta paralela,
+# `~/Developer/open-design-native-root`, criada para nao colidir com o clone — que
+# e o caminho que a documentacao e os exemplos do proprio OpenDesign esperam. O
+# nome provisorio foi registrado em tres lugares como "para a proxima instalacao",
+# e a proxima instalacao chegou: mover a raiz e trivial numa maquina que ainda nao
+# rodou nada, e caro numa que ja roda. Entao a raiz passou a ser o clone.
+#
+# Consequencia que precisa ser respeitada em `_setup_open_design_native`: com
+# ROOT == SRC, o symlink de `apps/web/out` apontaria para o proprio destino, um
+# laco. O guard la existe por causa desta linha, e nao e removivel numa
+# leitura apressada.
+OPENDESIGN_ROOT="$OPENDESIGN_SRC"
 OPENDESIGN_SERVE_PORT="8444"
 OPENDESIGN_DEPLOY_DIR="$OPENDESIGN_ROOT/apps/daemon"
 OPENDESIGN_WEB_DIR="$OPENDESIGN_SRC/apps/web/out"
@@ -956,9 +961,17 @@ _setup_open_design_native() {
             "$OPENDESIGN_DEPLOY_DIR" ) || {
             echo -e "${YELLOW}O deploy falhou.${NC}" >&2; return 1; }
     fi
-    mkdir -p "$OPENDESIGN_ROOT/apps/web"
-    rm -f "$OPENDESIGN_ROOT/apps/web/out"
-    ln -sfn "$OPENDESIGN_WEB_DIR" "$OPENDESIGN_ROOT/apps/web/out"
+    # O `out` do web e a propria saida do build, que ja vive em
+    # `$OPENDESIGN_SRC/apps/web/out`. A raiz do build E o clone agora, entao os dois
+    # caminhos sao o mesmo diretorio: criar o symlink aqui produziria
+    # `apps/web/out -> apps/web/out`, um laco que o shell segue e nunca resolve.
+    # O guard compara os dois e so cria o link quando sao diferentes, que e o caso
+    # de uma raiz paralela — ver OPENDESIGN_ROOT.
+    if [ "$OPENDESIGN_ROOT" != "$OPENDESIGN_SRC" ]; then
+        mkdir -p "$OPENDESIGN_ROOT/apps/web"
+        rm -f "$OPENDESIGN_ROOT/apps/web/out"
+        ln -sfn "$OPENDESIGN_WEB_DIR" "$OPENDESIGN_ROOT/apps/web/out"
+    fi
 
     # A origem que o browser vai usar: é a da publicação, e precisa estar na
     # lista de permitidos porque o navegador chama /api de outra origem que não

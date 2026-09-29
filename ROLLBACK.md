@@ -194,7 +194,7 @@ se a App estiver instalada em mais de uma.
 ### O OpenDesign está em modo NATIVO — desfazer é desfazer a unit
 
 O que está instalado nesta VM é o modo **nativo**: a unit `open-design.service`
-com a raiz em `~/Developer/open-design-native-root/`. Medido no provisionamento:
+com a raiz em `~/Developer/open-design/`. Medido no provisionamento:
 **0 containers, 0 imagens, 0 volumes** — o modo container nunca chegou a ser o
 estado instalado, ele é o módulo alternativo `open-design-container` que o
 `setup.sh` ainda oferece.
@@ -204,14 +204,14 @@ limpeza de um estado inexistente. O que desfaz o que existe:
 
 ```bash
 # 1. guardar o token ANTES do passo 3 — a .env e a unica copia dele
-cp ~/Developer/open-design-native-root/.env ~/.od.env.keep
+cp ~/Developer/open-design/.env ~/.od.env.keep
 chmod 600 ~/.od.env.keep
 
 # 2. derrubar e desabilitar
 systemctl --user disable --now open-design.service
 
 # 3. remover a raiz do build
-rm -rf ~/Developer/open-design-native-root
+rm -rf ~/Developer/open-design
 ```
 
 O passo 1 importa pelo mesmo motivo de sempre: a `.env` guarda o `OD_API_TOKEN`,
@@ -223,13 +223,11 @@ estava salvo deixa de valer.
 `pnpm build` do repo `~/Developer/open-design`; apagar não perde trabalho, só
 tempo de reconstrução. O que **não** é regenerável é o token do passo 1.
 
-**A pasta `open-design-native-root` é um nome provisório.** Ela existe para não
-colidir com o clone do repo em `~/Developer/open-design`, que a doc e os exemplos
-do próprio OpenDesign esperam. A intenção registrada é que a **próxima**
-instalação use só `~/Developer/open-design` e não crie a raiz paralela — mas
-mudar agora exigiria mover a raiz e reapontar a unit, e a troca é reversível
-com o caminho de volta em cima. **Não foi feito nesta VM**, e o nome atual
-funciona; o que fica é o registro, para a próxima.
+**A raiz do build é o próprio clone.** Não há pasta paralela, e o passo 3
+acima remove o clone inteiro — o que é mais do que só a raiz, e por isso ele
+perde também o `node_modules` e o `out` do web. Regeneráveis por
+`pnpm install && pnpm build`; o que não é regenerável é o token do passo 1.
+
 
 ### O modo CONTAINER, para quem tiver instalado por ele
 
