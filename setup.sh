@@ -650,8 +650,21 @@ Environment=PATH=$HOME/.local/bin:$HOME/.hermes/tools/bin:/usr/local/bin:/usr/bi
 # dashboard refaz um "recovery build" da UI a cada boot, e a espera nao parece
 # espera.
 ExecStart=$HOME/.local/bin/hermes dashboard --host $ip --port $HERMES_DASH_PORT --skip-build --no-open
-Restart=on-failure
+Restart=always
 RestartSec=5
+# Os tres codigos de saida, com os nomes de sysexits.h. Sao os mesmos que a unit
+# do gateway (`hermes gateway install`) escreve, e o Hermes avisa quando a do
+# dashboard nao os tem. Medido nesta maquina: com a porta ocupada, o processo
+# devolve 75 e sai em 2,3s.
+#   75 = EX_TEMPFAIL — drenagem graciosa; o systemd DEVE reiniciar
+#   78 = EX_CONFIG   — recusa deliberada (--port que o dono nao pode servir);
+#                      o systemd NAO deve reiniciar, senao e laco infinito sem
+#                      nada escutando na porta de entrada
+# Sem o 78, um 78 sob Restart=always vira crash-loop. Sem o 75 e o
+# SuccessExitStatus, um 75 parece sucesso e o servico nao volta.
+SuccessExitStatus=75
+RestartForceExitStatus=75
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target

@@ -1024,11 +1024,63 @@ só seria mentira — o `if` teria quarenta linhas e nenhum lado pareceria o que
 | como o auth é aplicado | escutando no **IP da tailnet** | bridge: o peer é o gateway |
 | alcançável | direto, em HTTP sem TLS | só atrás do `:8444`, com TLS |
 
-⚠️ **O nativo PRECISA escutar no IP DA TAILNET, e é o preço do modo.** O daemon
-tem um carve-out que dispensa o token quando o peer é loopback, e o `tailscale
-serve` faz proxy de localhost para localhost. Medido: em `127.0.0.1` o
-`/api/agents` devolve **200** sem credencial; no IP da tailnet devolve **401**. A
-consequência é que o serviço fica exposto na porta interna, sem TLS.
+⚠️ **A documentação do OpenDesign diz que o bind é loopback, e eu propus o
+contrário.** `deploy/.env.example` e `docs/deployment/docker.md` — que eu não
+abri — afirmam:
+
+> *connector endpoints (Composio, GitHub OAuth) also require the daemon to receive
+> requests over **loopback**. On Linux Docker this is handled automatically by
+> `docker-compose.linux.yml` (`network_mode: host`).*
+
+E o motivo está no `server.js`, num comentário que eu li e não reconheci:
+
+> *the loopback bypass exists for the **localhost desktop UI which has no proxy in
+> the path***
+
+Não é escolha de onde escutar: é o desenho do produto. Os endpoints de
+**escrita** — associar CLI, OAuth de conector — exigem loopback porque a UI desktop
+local é o caso de uso, e o proxy TLS na frente não é. A exclusão dos dois modos é
+consequência disso, não preferência minha:
+
+| | token na API | associar CLI / OAuth de conector |
+|---|---|---|
+| **container** (bridge) | sim — o peer é o gateway | **sim** — gateway conta como loopback dentro |
+| **nativo em loopback** | não — o carve-out desliga | **sim** |
+| **nativo na tailnet** | sim | **não** |
+
+⚠️ **A saída que eu não vi, porque não li: `OPEN_DESIGN_DISABLE_API_AUTH=1`.** O
+`.env.example` a chama de *escape hatch for deployments whose reverse proxy already
+authenticates every request*, e `docker.md` condiciona: *set to 1 only when that
+proxy already authenticates every request and the daemon is not directly exposed*.
+Com o `tailscale serve` fazendo TLS e a tailnet como fronteira, o nativo em
+loopback passa a ter os dois.
+
+**Não é desligar o portão de olhos fechados**: `OD_API_TOKEN` é o portão quando
+não há proxy que autentique, e desligá-lo é desligar o portão. A condição da doc é
+"o proxy já autentica tudo", e isso precisa ser verdade, não presumido.
+
+⚠️ **O sintoma do `public_url` quebrado é `400` no `/login`, e ele fica MASCARADO
+quando o token está ligado** — o portão responde 401 antes da rota, e o
+`Cannot GET /` desaparece. Só `/` **sem** credencial revela que a UI não existe.
+
+⚠️ **`pnpm deploy --legacy --prod` ACHATA o pacote, e o daemon não.** O
+`resolveProjectRoot` faz `path.resolve(daemonDir, '../..')` e assume
+`<projeto>/apps/daemon/dist`, que é o layout do container. Achatado, o
+`PROJECT_ROOT` sobe um nível a mais, o `STATIC_DIR` cai fora, e a UI não é montada.
+O layout que funciona é `apps/daemon/` e `apps/web/out`.
+
+⚠️ **O build do web estoura o HEAP do V8, não a RAM.** `rc=0 em 89s` com
+`--max-old-space-size=3072` e `taskset -c 0-3`, numa máquina com 7,7 GiB de RAM e
+7,7 GiB de swap **livres** e `dmesg` sem OOM. O frame 2 da pilha era
+`node::OOMErrorHandler`. Duas alavancas, porque o Next cria um worker por CPU e
+cada um tem heap próprio.
+
+**Um por máquina.** Os dois disputam a mesma porta interna, e deixar isso acontecer
+não dá erro visível: o segundo sobe, o primeiro fica com o processo no ar mas sem
+escutar, e a publicação continua respondendo pelo que ficou. O script recusa, com
+a mensagem dizendo qual remover.
+
+
 
 ⚠️ **O sintoma do `public_url` quebrado é `400` no `/login`, e ele MASCARADO
 quando o token está ligado.** O portão de auth responde 401 antes da rota, então o
@@ -1100,6 +1152,47 @@ de qualquer bind mount rootless com estado:
 
 Para trazer de volta, o que reverter: o `podman run` com o digest pinado, o `:Z` no
 bind, o hash scrypt no lugar da senha, e `sudo tailscale serve --bg --https=8445`.
+
+
+⚠️ **A unit precisa dos TRÊS códigos de saída, e o Hermes avisa quando não tem.**
+O aviso na TUI — *`hermes-dashboard lacks RestartPreventExitStatus=78`* — procede,
+e vale a mesma tripé que a unit do gateway escreve. Medido nesta máquina: com a
+porta ocupada, `hermes dashboard` devolve **75** e sai em 2,3s.
+
+| código | nome em `sysexits.h` | o que significa | o que o systemd deve fazer |
+|---|---|---|---|
+| **75** | `EX_TEMPFAIL` | drenagem graciosa, recarregar | **reiniciar** |
+| **78** | `EX_CONFIG` | recusa deliberada: um `--port` que o dono não pode servir | **estacionar** |
+
+Sem o `78`, um `78` sob `Restart=always` vira **laço infinito sem nada escutando**
+na porta de entrada — que é o defeito que o próprio código do projeto registra
+(#119824). E sem `SuccessExitStatus=75` mais `RestartForceExitStatus=75`, um `75`
+parece saída limpa e o serviço não volta.
+
+⚠️ **`hermes gateway install` NÃO substitui a unit da dashboard.** São serviços
+diferentes: o gateway é *mensageria* (WhatsApp, Telegram) e não abre a porta
+`9119`; a dashboard é a UI. O `install` cria `hermes-gateway.service` e não toca
+em `hermes-dashboard.service` — verificado, com as duas `active` ao mesmo tempo. A
+unit da dashboard **precisa** ser declarada, e é a única que o `setup.sh` escreve.
+
+⚠️ **O `pm` baixa binários para uma máquina que não é a do build.** Duas vezes
+agora, com a mesma assinatura — `staged entry failed verification … exited 127 …
+error while loading shared libraries`:
+
+| binário | biblioteca que faltava | origem |
+|---|---|---|
+| o `node` pinado do install | `libatomic.so.1` | `sudo dnf install -y libatomic` |
+| o `cua-driver` | `libX11.so.6` | `sudo dnf install -y libX11` |
+
+O verificador é honesto — ele **executa** o binário baixado e reporta o que o
+loader diz — mas nenhum dos dois `install` menciona a dependência de sistema. A
+regra prática: se o `pm` reclamar de `shared libraries`, é biblioteca do sistema,
+não do pacote.
+
+⚠️ **O aviso de "fork não rastreia o upstream" foi enganoso.** Medido: o remote é
+`https://github.com/NousResearch/Hermes-Agent.git`, o branch é `main` e `@{u}` é
+`origin/main`. É o upstream que o repo em `~/Developer` fica, e o `pm` lê o
+estado de tracking de um modo que não casa com esse arranjo.
 
 
 #### A CLI do Hermes nativa na VM, e o que ela custou
