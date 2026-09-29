@@ -465,7 +465,7 @@ instalador não desfaz o que o padrão quer, e as outras diretivas que ele defin
 | Unit | Drop-in | O que declara |
 |---|---|---|
 | `antigravity-cli-daemon` | `…service.d/10-mise-path.conf` | o `PATH` do mise, para que o filho `npm exec` encontre o runtime |
-| ~~`opencode`~~ | ~~`10-bind.conf`~~ | **Removido, por dois motivos.** A unit não existe: a v2 não cria nenhuma. E as variáveis do drop-in também não: `OPENCODE_BIND` e `OPENCODE_PORT` têm **0 ocorrências** no binário de 203 MB, entre as 49 `OPENCODE_*` que ele de fato conhece. O padrão passa a declarar a unit e a escuta. |
+| `opencode` | — (nenhum) | A unit é **declarada** por `setup_opencode_service`, não lida de instalador: a v2 não cria nenhuma. Não há drop-in porque não há o que sobrepor — a escuta e a senha vão para `~/.config/opencode/service.json` via `service set`. Ver "OpenCode em uma VM nova". |
 
 A publicação na tailnet (`tailscale serve`) também é do padrão, e é declarada por
 `setup_opencode_serve` — com a ressalva de que ela não sobrescreve o que já
@@ -497,10 +497,32 @@ Cada serviço escuta em loopback e é publicado em **porta HTTPS própria**. A 4
 fica reservada: é o slot para o serviço que você quiser ter mais à mão — um painel,
 não a ferramenta mais sensível.
 
-| Serviço | Escuta | Publicação na tailnet | Auth da app |
+| Serviço | Escuta | Publicação | Auth da app |
 |---|---|---|---|
-| OpenCode | `127.0.0.1:49374` | `https://<host>.<tailnet>.ts.net:8443` | basic auth obrigatória — ver abaixo |
+| OpenCode | `127.0.0.1:49374` | `:8443` | basic auth obrigatória — ver abaixo |
+| OpenDesign | `127.0.0.1:7456` | `:8444` | token único compartilhado, `OD_API_TOKEN` |
+| Hermes (dashboard) | `127.0.0.1:9119` | `:8445` | **Nous Portal**, gate verificado |
 | _(reservado)_ | — | `:443`, para o próximo serviço | — |
+
+As três publicações vivem na **VM de agentes**, no mesmo nó, e todas seguem a mesma
+forma: escuta em loopback + `tailscale serve` com TLS. As portas são **uma por
+serviço, em sequência**, para que a tabela fique legível — e `8443` é o opencode nos
+dois nós, host e VM.
+
+⚠️ **A faixa 8443–8445 é do `serve`, não das aplicações.** Nenhuma aplicação escuta
+nesses números: são portas do `tailscaled`, e cada uma faz proxy para o loopback da
+aplicação. Duas camadas, e o número publicado vem do namespace do `serve` — não do
+interno. A consequência prática: se uma aplicação voltar a escutar em `0.0.0.0` na
+porta interna, **não** colide com a publicação, e o conflito fica explícito em vez de
+virar diagnóstico confuso.
+
+⚠️ **O bind do Hermes tem uma assimetria que os outros dois não têm.** O dashboard
+só exige login quando escuta **fora** do loopback, então `--host 127.0.0.1` publicado
+por `serve` serviria a tailnet inteira **sem auth**. A solução é tornar as duas coisas
+independentes: `--host 0.0.0.0` **dentro do container**, que engata o gate, mapeado
+só para o loopback do host com `-p 127.0.0.1:9119:9119`, que mantém a LAN de fora.
+Verificado: `/` responde **302** para `/auth/login`, e `192.168.122.181:9119` está
+**fechada**.
 
 Ao publicar um serviço novo: acrescente a linha na tabela com uma porta livre, e
 não troque o que já existe. `setup_opencode_serve` não sobrescreve config de outro
@@ -794,6 +816,96 @@ mantém a base limpa, e o nativo é o único que entrega MCP. Ver a seção do
 OpenDesign nativo, e a escolha é sua sobre qual dos dois fica.
 
 **Rollback** na seção `podman` do [`ROLLBACK.md`](ROLLBACK.md).
+
+### O que hoje é montado à mão, e o que falta para virar passo
+
+Três serviços da VM foram montados à mão. Nenhum tem passo no `setup.sh`:
+
+| | como está na VM | falta |
+|---|---|---|
+| **OpenCode** | unit de usuário, `service start` | **nada** — declarado agora |
+| **OpenDesign** | `podman compose` a partir de `~/Developer/open-design/deploy` | provider de compose, clone, `.env` a 600, e `--no-build` |
+| **Hermes** | `podman run`, container único | idem, mais o registro de auth, que é humano |
+
+**A ordem numa instalação limpa** tem uma dependência real: o provider de compose. O
+`podman` vem do módulo `podman`, mas `podman compose` respondeu *"looking up compose
+provider failed"* — sem `podman-compose` nem `docker-compose`. Sem isso, **os dois**
+caminhos de container não existem, e o sintoma não parece o que é.
+
+```bash
+sudo dnf install -y podman-compose      # antes de qualquer container
+```
+
+O `--no-build` do OpenDesign não é opcional: o compose base traz `image:` e
+`build:` juntos, e sem a flag o Podman tenta **compilar da fonte** — operação longa
+com aparência legítima. Detalhes em "OpenDesign via container".
+
+**O bind e a porta do Hermes não passam por `service set`** — o dashboard não tem
+esse caminho. O bind vem de flag, e o `public_url` de variável de ambiente. Os três
+juntos, e a ordem importa:
+
+```bash
+# 1. registrar a auth do DASHBOARD. É um comando DIFERENTE de `hermes portal`, que
+#    registra a credencial de INFERÊNCIA. Registrar antes de decidir o bind grava a
+#    URL canônica errada, e o login falha com redirect_uri_mismatch.
+hermes dashboard register
+
+# 2. 0.0.0.0 DENTRO do container (engata o gate) · 3. mapeado só para o loopback do
+#    host (mantém a LAN de fora) · 4. public_url, senão o app deriva a callback do
+#    bind e o OAuth não casa
+podman run -d --name hermes-dash \
+  -v ~/Developer/.hermes:/opt/data:Z \
+  -p 127.0.0.1:9119:9119 \
+  -e HERMES_DASHBOARD_PUBLIC_URL=https://<maquina>.<tailnet>.ts.net:8445 \
+  <imagem por digest> dashboard --host 0.0.0.0 --no-open
+```
+
+⚠️ **`:Z` é obrigatório, e o que falha sem ele é enganoso.** O SELinux bloqueia
+`/opt/data`, o `01-hermes-setup` sai com 1, e o container morre com **exit 2 e
+nenhuma mensagem útil no fim do log** — a causa está no começo.
+
+⚠️ **O bind mount em rootless tem um custo que ninguém escolhe explicitamente:**
+`~/Developer/.hermes` precisa ser do **subuid** — o `hermes` é uid 10000 dentro da
+imagem — então o dono no host vira algo como `534287`, e **`rvlmt` não lê o `.env`
+nem o `auth.json` sem `sudo`**. O caminho é `podman unshare chown 10000:10000`.
+
+### O disco da VM, e por que não é assunto de install
+
+O `sudo virsh` expande o **block device no host**, o que não é o mesmo que expandir
+o disco da VM — e a diferença é fácil de perder porque o `lsblk` mostra o bloco
+maior e dá a impressão de que acabou:
+
+```
+vda        40G   <- o host expandiu
+`-vda3     13G   <- a particao dentro do guest continua 13G
+```
+
+São dois passos, e o segundo é o que faz diferença. `/` e `/home` são **subvolumes
+do mesmo btrfs** em `vda3`, então crescem juntos:
+
+```bash
+sudo dnf install -y cloud-utils-growpart   # growpart nao vem no Fedora
+sudo growpart /dev/vda 3
+sudo btrfs filesystem resize max /         # ATENCAO: o tamanho ANTES do caminho
+```
+
+⚠️ **A sintaxe é o contrário do que parece.** `resize max /` funciona; `resize / max`
+devolve *"cannot access 'max'"*, e o mesmo erro para o `40G`. O `man` confirma:
+`[<devid>:]<size>|[<devid>:]max` vem **antes** de `<path>`. E a partição precisa
+crescer antes — sem o `growpart` o `resize` não tem de onde pegar.
+
+Isto não entra no `setup.sh` de propósito: numa VM nova o disco é dimensionado certo,
+e expandir é operação de **host**, uma vez — não de provisionamento.
+
+### `~/Developer` é a base
+
+Os repos e o estado dos agentes vivem sob `~/Developer`. O módulo `hostname` já
+criava o diretório; o que passou a ser regra é que **os repos também ficam lá** —
+`dotfiles-fedora` e `open-design` — e não mais direto em `$HOME`.
+
+A consequência prática: **o caminho de execução do script muda.** Onde era
+`~/dotfiles-fedora/setup.sh`, agora é `~/Developer/dotfiles-fedora/setup.sh`.
+
 
 ### OpenCode em uma VM nova
 

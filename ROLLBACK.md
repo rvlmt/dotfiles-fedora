@@ -394,9 +394,14 @@ publicação na tailnet, então as duas fazem parte do rollback:
 # Tira a publicação (o servidor deixa de ser alcançável de fora).
 sudo tailscale serve reset
 
-# Devolve a unit ao estado que o instalador deixou.
-rm -rf ~/.config/systemd/user/opencode.service.d
+# Remove a unit. NAO ha drop-in para apagar: a v2 nao cria unit nenhuma, e a
+# nossa e reescrita por `setup_opencode_service` — que ja a reescreve, e e o
+# caminho de volta. `opencode.service.d` nao existe e nunca existiu nesta maquina.
+rm -f ~/.config/systemd/user/opencode.service
 systemctl --user daemon-reload
+
+# A config em ~/.config/opencode/service.json e do BINARIO, nao do script: ela
+# guarda a escuta e a senha, e sobrevive a remocao da CLI. Apagar e opcional.
 ```
 
 ⚠️ `tailscale serve reset` apaga **toda** a config de publicação do nó, não só a
