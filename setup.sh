@@ -660,9 +660,26 @@ setup_hermes_dashboard() {
     # `hermes config set` imprime é cosmético. Sem este arquivo a senha é
     # irrecuperável — e o `HERMES_PW_FILE` era declarado aqui e nunca lido, que é
     # como o arquivo existia na VM sem ter sido o script a cria-lo.
+    #
+    # O arquivo é ESCREITO INTEIRO, com URL, usuário e senha, e não apenas a senha
+    # numa linha. A versão que estava na VM foi montada à mão e carregava também
+    # avisos operacionais; um `printf` de uma linha só apagaria essa informação sem
+    # substituí-la por nada. Gerar o arquivo completo faz dele um derivado do
+    # estado real — a URL vem do DNSName do nó, não de um texto decorado — e faz
+    # este trecho ser a fonte da verdade em vez de um artefato solto.
     if [ -n "$HERMES_DASH_PASSWORD" ]; then
         ( umask 077; mkdir -p "$(dirname "$HERMES_PW_FILE")" )
-        printf '%s\n' "$HERMES_DASH_PASSWORD" > "$HERMES_PW_FILE"
+        {
+            printf '# Dashboard do Hermes — gerado por setup.sh. Não versionar.\n'
+            printf '\n'
+            printf 'URL      https://%s:%s\n' "$(_tailnet_dnsname)" "$HERMES_SERVE_PORT"
+            printf 'usuario  %s\n' "$HERMES_DASH_USER"
+            printf 'senha    %s\n' "$HERMES_DASH_PASSWORD"
+            printf '\n'
+            printf 'O config do Hermes guarda só o hash scrypt. Este arquivo é a\n'
+            printf 'única cópia do texto claro; a senha padrão é a mesma que o nome\n'
+            printf 'do serviço, então é adivinhável por quem conheça a convenção.\n'
+        } > "$HERMES_PW_FILE"
         chmod 600 "$HERMES_PW_FILE"
         echo -e "${GREEN}  Senha do dashboard: $HERMES_PW_FILE (600).${NC}"
     fi
