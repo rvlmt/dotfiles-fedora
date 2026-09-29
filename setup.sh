@@ -95,25 +95,14 @@ OPENCODE_LATEST_URL="https://opencode.ai/update/api/latest/cli/npm"
 # aplicamos com `opencode service set hostname|port`, que é o mecanismo real.
 # Mantidos aqui porque duas funções precisam deles: a unit e a publicação.
 # ---------------------------------------------------------------- Hermes
-# Dashboard do Hermes, servido por container. As três coisas que decidem e que
-# já custaram uma rodada cada:
+# Dashboard do Hermes, NATIVO — `hermes dashboard` é um subcomando da CLI, então a
+# UI não precisa de container nenhum. Isso removeu a imagem de 2,81 GB e os 919 MB
+# de estado do container, e é a única forma de a unit ser do systemd de usuário.
 #
-#   A imagem é pinada por DIGEST, e não por tag. `{{.Digest}}` do podman inspect
-#   é o manifest da plataforma; o índice é o pinnable. Um digest errado pinado dá
-#   "image not known" e um digest certo solto dá uma imagem que muda embaixo.
-#
-#   A senha NÃO vai para o container. Entra o hash scrypt, gerado pelo próprio
-#   código do Hermes. O texto puro fica num arquivo 600 do usuário, e no
-#   ambiente do container nunca.
-#
-#   O `public_url` é variável de ambiente e tem que estar setado ANTES do start.
-#   Sem ele o app deriva a callback do bind, e o OAuth não casa. E o bind tem que
-#   ser 0.0.0.0 DENTRO do container para engatar o portão de auth, com o mapeamento
-#   só para o loopback do host para manter a LAN de fora.
-HERMES_IMAGE="docker.io/nousresearch/hermes-agent@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7"
-HERMES_CONTAINER="hermes-dash"
-HERMES_HOME_DIR="$HOME/Developer/.hermes"
-HERMES_DASH_HOST="127.0.0.1"
+# A senha NÃO vai para o config em claro. Entra o hash scrypt, gerado pelo próprio
+# código do Hermes; o texto puro fica num arquivo 600 do usuário, e no
+# `config.yaml` nunca. Ver `setup_hermes_dashboard`, que também tem de remover a
+# chave `password` que o `hermes config set` deja para trás.
 HERMES_DASH_PORT="9119"
 HERMES_SERVE_PORT="8445"
 HERMES_DASH_USER="hermes"
@@ -522,7 +511,7 @@ setup_opencode_serve() {
 # Instala a CLI do Hermes NATIVA, pelo instalador que a propria documentacao
 # prescreve — o "Quick Install" do README upstream e uma linha de `curl | bash`.
 #
-# Nativa por necessity e nao por preferencia: o binario `opencode` e o `agy` que
+# Nativa por necessidade e nao por preferencia: o binario `opencode` e o `agy` que
 # o OpenDesign usa como agentes sao ELF glibc, e o container do OpenDesign e
 # Alpine. Ver a secao do README sobre o muro de libc nos dois sentidos.
 setup_hermes_cli() {
@@ -665,6 +654,18 @@ setup_hermes_dashboard() {
     "$HOME/.local/bin/hermes" config set dashboard.basic_auth.password_hash "$hash" >/dev/null
     chmod 600 "$HOME/.hermes/config.yaml" 2>/dev/null || true
     _hermes_drop_plaintext_password "$HOME/.hermes/config.yaml"
+
+    # O texto claro da senha vai para um arquivo 600 do usuario, e é o unico lugar
+    # onde ele existe: o `config.yaml` recebe so o hash, e o `***` que o
+    # `hermes config set` imprime é cosmético. Sem este arquivo a senha é
+    # irrecuperável — e o `HERMES_PW_FILE` era declarado aqui e nunca lido, que é
+    # como o arquivo existia na VM sem ter sido o script a cria-lo.
+    if [ -n "$HERMES_DASH_PASSWORD" ]; then
+        ( umask 077; mkdir -p "$(dirname "$HERMES_PW_FILE")" )
+        printf '%s\n' "$HERMES_DASH_PASSWORD" > "$HERMES_PW_FILE"
+        chmod 600 "$HERMES_PW_FILE"
+        echo -e "${GREEN}  Senha do dashboard: $HERMES_PW_FILE (600).${NC}"
+    fi
 
     if grep -qE '^[[:space:]]+password:[[:space:]]' "$HOME/.hermes/config.yaml" 2>/dev/null; then
         echo -e "${YELLOW}Ainda há senha em claro no config do Hermes.${NC}" >&2
@@ -854,7 +855,7 @@ setup_open_design_container() {
 # Um por maquina. Os dois disputam a MESMA porta interna, e a consequencia de
 # deixar isso acontecer nao e um erro visivel: o segundo sobe, o primeiro
 # continua com o processo no ar mas sem escutar, e a publicacao continua
-# respondendo pelo que diedo primeiro. Recusar aqui deixa o conflito explicito.
+# respondendo pelo que tinha ficado primeiro. Recusar aqui deixa o conflito explicito.
 _open_design_exclusive() {
     local outro
     if [ "$OPENDESIGN_MODE" = "native" ]; then
@@ -1100,7 +1101,7 @@ UNIT_EOF
     else
         echo -e "${YELLOW}A UI respondeu $ui.${NC}" >&2
         if [ "$ui" = "404" ]; then
-            echo -e "${YELLOW}  404 com a API de pe: o STATIC_DIR fell fora. Confira o layout${NC}" >&2
+            echo -e "${YELLOW}  404 com a API de pe: o STATIC_DIR saiu do lugar. Confira o layout${NC}" >&2
             echo -e "${YELLOW}  $OPENDESIGN_ROOT/apps/web/out.${NC}" >&2
         fi
         return 1
@@ -1369,20 +1370,6 @@ process.stdin.on("data", d => s += d).on("end", () => {
     unset registry latest have
 }
 
-# Instala um pacote npm global acompanhando a versão publicada mais recente.
-#
-# Existe separada da install_npm_global porque aquela decide por PRESENÇA do
-# binário, e presença não é versão: uma máquina que rodou o módulo uma vez fica
-# presa na primeira versão que caiu, para sempre. Aqui a pergunta é feita ao
-# registro, e o instalador só roda quando a resposta difere do que está em disco.
-#
-# O JSON do registro tem ~190 kB. Medido: para este pacote, o primeiro
-# casamento de `"latest":"` pelo sed hoje já é o correto, então a fragilidade
-# não é atual — é estrutural. A chave pode reaparecer aninhada em outro objeto
-# do documento, e aí um sed acerta por acidente. Extrair por Node não depende
-# de posição, e este módulo já tem Node no PATH: prepend_mise_shims roda antes,
-# e ensure_host_node instala o runtime se faltar. Pedir JSON a um programa que
-# entende JSON é mais barato que torcer para o primeiro casamento ser o bom.
 # Autoriza nesta máquina as chaves públicas de dispositivos que o GitHub reúne.
 #
 # O bloco entre GITHUB_KEYS_BEGIN e GITHUB_KEYS_END é reescrito inteiro a cada
@@ -2903,6 +2890,20 @@ if should_run "desktop-apps"; then
     # Google) — o rpm oficial abaixo cobre os dois, não há dois apps distintos
     # a instalar no Fedora.
     if ! command -v antigravity &> /dev/null; then
+        # ⚠️ `gpgcheck=0` é uma EXCEÇÃO, e é a única neste script: os outros dois
+        # repositórios importam a chave antes (`rpm --import` da Microsoft e da
+        # Brave), e este não pode.
+        #
+        # Medido: o repo do Google não publica chave. `antigravity.repo` e
+        # `antigravity-rpm.repo` respondem 404, o `repomd.xml` não declara
+        # `gpgkey`, e a chave do Google não está no keyring do host — que tem
+        # só a do Fedora e a da Tailscale. Não há URL de chave para importar sem
+        # inventá-la, e inventar uma quebraria a instalação.
+        #
+        # O custo é real e fica registrado: os pacotes deste repo são aceitos sem
+        # verificação de assinatura. O módulo é do perfil `host` e não entra no
+        # perfil `vm`, então isto não afeta a reprodução da VM de agentes. Se o
+        # Google passar a publicar a chave, este é o primeiro lugar a arrumar.
         sudo tee /etc/yum.repos.d/antigravity.repo > /dev/null <<'EOF'
 [antigravity-rpm]
 name=Antigravity RPM Repository
