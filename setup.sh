@@ -155,7 +155,13 @@ HERMES_DASH_UNIT="$HOME/.config/systemd/user/hermes-dashboard.service"
 # mata o processo, porque o binario reempacota o comando em
 # `python3 -I -c "..." dashboard --host ... --port ...`. O processo velho ficava
 # escutando, e toda medicao media ele em vez do novo.
-_hermes_dnsname() {
+# Funcao COMUM a dois modulos, e o nome precisa dizer isso. A primeira versao se
+# chamava _hermes_dnsname e o OpenDesign tambem a usava: rodar o OpenDesign sem
+# o bloco do Hermes carregado dava "command not found", e o efeito foi uma unit
+# com `OD_ALLOWED_ORIGINS=https://:8444` — hostname vazio, exatamente o defeito
+# que a funcao existe para evitar. Um nome que declara o dono vira uma dependencia
+# invisivel, e o erro so aparece no arquivo gerado, muito depois do ponto.
+_tailnet_dnsname() {
     tailscale status --json 2>/dev/null | python3 -c "
 import json, sys
 print(json.load(sys.stdin).get('Self', {}).get('DNSName', '').rstrip('.'))" 2>/dev/null
@@ -203,7 +209,7 @@ OPENDESIGN_UNIT="$HOME/.config/systemd/user/open-design.service"
 # maquina: no nó medido, `hostname` da `fedora-vm` e o DNSName termina em
 # `.sawfish-banjo.ts.net`. Montar a URL com o hostname produz um public_url que o
 # OAuth nao reconhece, e o sintoma e redirect_uri_mismatch.
-HERMES_PUBLIC_URL="${HERMES_PUBLIC_URL:-}"   # resolvido em _hermes_dnsname, nao no topo
+HERMES_PUBLIC_URL="${HERMES_PUBLIC_URL:-}"   # resolvido em _tailnet_dnsname, nao no topo
 
 OPENCODE_HOST="127.0.0.1"
 OPENCODE_PORT="49374"
@@ -589,7 +595,7 @@ except Exception: print('?')" 2>/dev/null)"
 # sem sudo.
 setup_hermes_dashboard() {
     local dns ip
-    dns="$(_hermes_dnsname)"
+    dns="$(_tailnet_dnsname)"
     ip="$(tailscale ip -4 2>/dev/null | head -1)"
     if [ -z "$dns" ] || [ -z "$ip" ]; then
         echo -e "${YELLOW}Sem DNSName ou IP de tailnet; pulei o dashboard do Hermes.${NC}" >&2
@@ -698,7 +704,7 @@ UNIT_EOF
     if [ "$login" = "400" ]; then
         echo -e "${YELLOW}/login respondeu 400: o public_url está sem hostname.${NC}" >&2
         echo -e "${YELLOW}  O nome vem de 'tailscale status --json' (Self.DNSName), via${NC}" >&2
-        echo -e "${YELLOW}  _hermes_dnsname. 'tailscale dnsname' nao existe nesta versao.${NC}" >&2
+        echo -e "${YELLOW}  _tailnet_dnsname. 'tailscale dnsname' nao existe nesta versao.${NC}" >&2
         return 1
     fi
     if [ "$login" = "200" ]; then
@@ -908,7 +914,7 @@ ODENV
     local ip
     ip="$(tailscale ip -4 2>/dev/null | head -1)"
     [ -n "$ip" ] || { echo -e "${YELLOW}Sem IP de tailnet; pulei o OpenDesign.${NC}" >&2; return 1; }
-    local origin="https://$(_hermes_dnsname):$OPENDESIGN_SERVE_PORT"
+    local origin="https://$(_tailnet_dnsname):$OPENDESIGN_SERVE_PORT"
 
     # A unit de usuario, e nao nohup: sem ela o processo nao volta depois de um
     # reboot, que e o mesmo buraco que a unit do opencode teve.
@@ -1020,7 +1026,7 @@ _setup_open_design_container() {
     # linha certa (OD_ALLOWED_ORIGINS <- OPEN_DESIGN_ALLOWED_ORIGINS); o que
     # falta e o valor. Sem ele a pagina carrega, a API morre com 403, e o
     # navegador acusa cross-origin sem explicar nada.
-    local origin="https://$(_hermes_dnsname):$OPENDESIGN_SERVE_PORT"
+    local origin="https://$(_tailnet_dnsname):$OPENDESIGN_SERVE_PORT"
     local envf="$D/.env"
     ( umask 077
       cat > "$envf" <<ODENV
