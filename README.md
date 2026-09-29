@@ -1159,7 +1159,41 @@ opencode depois de recusar as flags — daí o `level (choices: all, trace, debu
 e o `--print-logs`. Ler aquilo como uma segunda falha é ler a mensagem de_usage do
 erro anterior.
 
-**As três saídas, e o que cada uma custa:**
+**A decisão: aceita sem a evidência de sessão filha, no opencode 2.0.18.** O
+agente roda, os 7 agentes são detectados, e a transcript da sessão raiz é salva.
+O que não acontece é a verificação de que uma sessão filha corresponde ao que a
+raiz diz que ela fez.
+
+E o que se perde, nomeado: **o `--pure` é a garantia de que um plugin instalado
+pelo usuário não executa dentro do caminho de evidência.** Sem essa flag, no 2.0.18
+não existe nada que assegure isso — não é uma flag a menos, é a propriedade que a
+flag entregava. Isso vale para qualquer plugin que você tenha instalado no
+opencode, e é o motivo de a decisão ser uma decisão e não um detalhe.
+
+⚠️ **A degradação é silenciosa, e isso é o ponto de atenção.** O coletor devolve
+`retained: []` e o run segue. Nada na UI avisa que a parte não rodou. A evidência
+também é infraestrutura de **conformidade**, com nível declarado por capacidade —
+`nativeSessionContinuation: { support: 'verified', evidenceLevel: 'L0' }` e
+`nativeSubagents: { support: 'verified', evidenceLevel: 'L2' }`, sob o esquema
+`EVIDENCE_V1`. Então o que falta é trilha de auditoria de subagente, não
+funcionalidade de execução.
+
+**O caminho ACP foi verificado e NÃO é a saída.** `opencode acp` existe no
+binário — *"Start an Agent Client Protocol server"* — mas `docs/agent-adapters.md`
+atribui `acp-json-rpc` a `amr`, `devin`, `hermes`, `kimi`, `kiro`, `kilo`,
+`reasonix`, `trae-cli` e `vibe`, e o **opencode** a `json-event-stream`. Existe um
+`runtimes/acp/` inteiro no daemon, para os outros. E a API em execução concorda com
+a doc nas quatro entradas conferidas — `opencode` e `byok-opencode` em
+`json-event-stream`, `antigravity` em `plain`, `claude` em `claude-stream-json`.
+
+**Como reverter, se a trilha de auditoria passar a importar:** fixar o opencode na
+`1.18.18`, que é a versão que `dist/runtimes/opencode-child-evidence.js` declara em
+`OPENCODE_CHILD_EVIDENCE_CLI_VERSION`. Repare que essa constante é um **registro, e
+não um gate** — nada no daemon a compara com o binário instalado, então o adaptador
+não consegue avisar que a versão mudou. Uma versão antiga fixada sem pin declarado é
+dívida, e é o custo de voltar atrás.
+
+
 
 | | o que |
 |---|---|
