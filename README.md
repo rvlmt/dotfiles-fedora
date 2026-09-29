@@ -501,7 +501,7 @@ não a ferramenta mais sensível.
 |---|---|---|---|
 | OpenCode | `127.0.0.1:49374` | `:8443` | **só a API** é basic auth; a página é pública |
 | OpenDesign | `127.0.0.1:7456` | `:8444` | basic auth com `OD_API_TOKEN`; o 401 é texto puro |
-| ~~Hermes (dashboard)~~ | — | — | **Removido** — ficamos só com a CLI nativa. Ver "O Hermes ficou só nativo". |
+| **Hermes** (dashboard) | `0.0.0.0:9119` | `:8445` | **hash scrypt** no `config.yaml`; a senha em texto puro fica num arquivo 600 do usuário. `/` responde 302 para `/login` |
 | _(reservado)_ | — | `:443`, para o próximo serviço | — |
 
 #### O que cada link mostra de fato
@@ -890,24 +890,46 @@ OpenDesign nativo, e a escolha é sua sobre qual dos dois fica.
 
 ### Provisionar os três serviços numa VM nova
 
-Os três serviços da VM de agentes (OpenCode, OpenDesign, Hermes) não têm passo no
-`setup.sh` ainda. O que segue é a ordem medida, e **as armadilhas que custaram uma
-rodada cada** — todas verificadas por estado, nenhuma por leitura.
+Os três serviços da VM de agentes (OpenCode, OpenDesign, Hermes) **têm passo no
+`setup.sh`**, e cada um é despachado no perfil `vm`.
+
+⚠️ **Esta seção dizia que os três "não têm passo no `setup.sh` ainda", e a tabela
+abaixo descrevia o OpenDesign como `podman compose` com basic auth e o Hermes como
+`podman run`, um container.** As três coisas estavam erradas na mesma direção: o
+texto era anterior ao modo nativo e ao despacho dos módulos, e ninguém o atualizou.
+As duas tabelas abaixo são o estado medido, e a coluna do que é manual é a que
+importa para provisionar.
 
 | | como roda | auth | o que ainda é manual |
 |---|---|---|---|
-| **OpenCode** | unit de usuário, `service start` | senha em `service.json` | **nada** — `setup_opencode_service` já declara |
-| **OpenDesign** | `podman compose`, bridge, publicação em loopback | basic auth, `OD_API_TOKEN` | `.env` e o override local |
-| **Hermes** | `podman run`, um container | **basic auth por scrypt** | o registro no Portal, que é humano |
+| **OpenCode** | unit de usuário `opencode.service`, `service start` | senha em `service.json` (600) | **nada** |
+| **OpenDesign** | unit de usuário, `hermes dashboard`… **nativo**: `pnpm install` + `pnpm build` no clone | `OD_DISABLE_API_AUTH=1`, porque o `tailscale serve` autentica antes | **nada** — o clone é feito pelo módulo, o token é gerado se você não colar um |
+| **Hermes** | `hermes-cli` (instalador oficial) + `hermes-dashboard` (unit) | hash scrypt no `config.yaml` (600), texto puro num arquivo 600 | a **senha do modelo**: `hermes model` |
 
-A ordem tem uma dependência real e ela vem primeiro:
+### O gateway do Hermes fica de fora, e é decisão
+
+O `hermes-gateway.service` **não é criado pelo `setup.sh`**, e a unit que existe
+na VM foi gerada por `hermes gateway install` — subcomando de primeira classe do
+CLI (*"install gateway as a systemd/launchd background service"*), que a própria
+documentação prescreve.
+
+Decisão: **fica manual.** O gateway é parte da instalação padrão do Hermes e está
+em uso; o que o script não faz é duplicar a documentação do produto. Em uma VM
+nova, o passo é:
 
 ```bash
-sudo dnf install -y podman-compose      # sem isso os DOIS caminhos de container falham
+hermes gateway setup      # configura as plataformas de mensageria
+hermes gateway install    # instala a unit de usuário
+hermes gateway start
 ```
 
-Sem provider, `podman compose` responde *"looking up compose provider failed"* — e o
-sintoma não parece o que é.
+⚠️ **A unit do gateway guarda o caminho do executável no momento da instalação.**
+Medido na VM: `ExecStart="/home/rvlmt/Hermes-Agent/.hermes/bin/hermes" "gateway"
+"run"`. Se a CLI for reinstalada em outro caminho, a unit fica apontando para um
+executável que não existe mais, e **é preciso rodar `hermes gateway install` de
+novo** — não há como corrigir editando a unit à mão, porque o `ExecStopPost` de
+limpeza de cgroup também aponta para o caminho antigo.
+
 
 #### O OpenDesign: três armadilhas, e uma delas apaga o estado
 
@@ -1274,12 +1296,21 @@ dashboard em container não tinha capacidade que a nativa não tenha, e ocupava
 usava `~/Developer/.hermes`. Provider configurado num **não** aparecia no outro, o
 que tornava a dashboard quase decorativa para o uso real.
 
-O que foi **preservado**, e não apagado:
+**O backup do estado do container foi descartado depois.** Isto é o estado
+medido hoje, e substitui a afirmação anterior de que ele fora preservado com
+7138 arquivos e 919 MB:
 
-| | |
+| | estado medido |
 |---|---|
-| `~/Developer/.hermes` | 7138 arquivos, **919 MB** — `config.yaml`, `auth.json`, sessões |
-| `~/Developer/.hermes-backup-*` | cópia idêntica, tirada antes de qualquer troca |
+| `~/Developer/.hermes` | 8 KB, 1 entrada — não é o estado do container |
+| `~/Developer/.hermes-backup-20260929-050136` | **vazio** |
+
+⚠️ **A tabela anterior dizia que os dois guardavam 919 MB.** Ela estava escrita
+quando o backup existia, e ninguém a atualizou quando ele sumiu. Registrado aqui
+porque a lição é o que importa: **um backup que ninguém verifica volta a ser uma
+afirmação no README.** O que sobreviveu do container está em `~/.hermes`, que é o
+home do nativo.
+
 
 ⚠️ **O backup também cai no subuid, e isso é o surpreendente.** Fazer o backup de
 dentro de um container funciona — ele lê como uid 10000 — mas o `tar` extrai com
