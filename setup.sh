@@ -910,24 +910,56 @@ _setup_open_design_native() {
     rm -f "$OPENDESIGN_ROOT/apps/web/out"
     ln -sfn "$OPENDESIGN_WEB_DIR" "$OPENDESIGN_ROOT/apps/web/out"
 
-    # O .env do nativo. Fica no root do arvore, nao no deploy, porque e
-    # configuracao desta instalacao e nao da imagem.
+    # A origem que o browser vai usar: é a da publicação, e precisa estar na
+    # lista de permitidos porque o navegador chama /api de outra origem que não
+    # é a que serviu o HTML.
+    #
+    # Ela vem ANTES do .env porque o .env a consome, e a ordem aqui não é
+    # detalhe. Com `set -u`, usar uma variável antes da linha que a define aborta
+    # com "unbound variable" — e o modo silencioso desse script é o que dói: o
+    # `.env` sai VAZIO, o daemon sobe com o auth ligado, e o sintoma aparece
+    # muito depois, como um 401 que ninguém liga a esta linha.
+    local origin="https://$(_tailnet_dnsname):$OPENDESIGN_SERVE_PORT"
+
+    # O alvo é LOOPBACK, e não o IP da tailnet. É o que a documentação do projeto
+    # exige: "connector endpoints (Composio, GitHub OAuth) also require the daemon
+    # to receive requests over loopback", resolvido no Linux por
+    # `docker-compose.linux.yml` com `network_mode: host`. O motivo está num
+    # comentário do próprio daemon: "the loopback bypass exists for the localhost
+    # desktop UI which has no proxy in the path".
+    local ip="127.0.0.1"
+
+    # O `.env` do nativo fica na raiz da árvore, não no deploy, porque é
+    # configuração desta instalação e não da imagem.
+    #
+    # `OD_DISABLE_API_AUTH=1` é o escape hatch que o próprio
+    # `deploy/.env.example` do projeto descreve: "deployments whose reverse proxy
+    # already authenticates every request before it reaches the daemon". E
+    # `docs/deployment/docker.md` condiciona: "only when that proxy already
+    # authenticates every request and the daemon is not directly exposed". As duas
+    # condições são verdadeiras aqui — o `tailscale serve` termina TLS e
+    # autentica pela tailnet, e o daemon só escuta em loopback, então não há
+    # caminho direto até ele.
+    #
+    # As duas decisões andam juntas, e a tabela é a consequência:
+    #
+    #   bind em loopback  -> a ESCRITA passa (peer de loopback) e a LEITURA
+    #                        dispensa o token pelo mesmo carve-out
+    #   bind na tailnet   -> a LEITURA exige token e a ESCRITA leva 403
+    #
+    # Não há modo nativo com os dois e o token como único portão. O container é o
+    # único onde os dois funcionam, porque o gateway do podman conta como
+    # loopback DENTRO dele.
     local envf="$OPENDESIGN_ROOT/.env"
     ( umask 077
       cat > "$envf" <<ODENV
 OD_API_TOKEN=$OPENDESIGN_TOKEN
-OD_ALLOWED_ORIGINS=
-OD_DISABLE_API_AUTH=
+OD_ALLOWED_ORIGINS=$origin
+OD_DISABLE_API_AUTH=1
 OD_CODEX_SANDBOX=
 ODENV
     )
-
-    # O IP DA TAILNET, e nao 127.0.0.1. Ver o comentario das constantes: em
-    # loopback o carve-out do daemon desliga o token.
-    local ip
-    ip="$(tailscale ip -4 2>/dev/null | head -1)"
-    [ -n "$ip" ] || { echo -e "${YELLOW}Sem IP de tailnet; pulei o OpenDesign.${NC}" >&2; return 1; }
-    local origin="https://$(_tailnet_dnsname):$OPENDESIGN_SERVE_PORT"
+    chmod 600 "$envf"
 
     # A unit de usuario, e nao nohup: sem ela o processo nao volta depois de um
     # reboot, que e o mesmo buraco que a unit do opencode teve.
@@ -987,32 +1019,32 @@ UNIT_EOF
     # Verificar por ESTADO, e o estado que decide e a UI, medida SEM credencial
     # e COM. Sem credencial tem de ser 401: e assim que se prova que o token
     # segura, e que nao ha carve-out em acao.
-    local i sem com ui
+    local i up ui
     for i in $(seq 1 36); do
-        sem="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        up="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
             "http://$ip:$OPENDESIGN_PORT/api/health" 2>/dev/null)"
-        [ "$sem" != "000" ] && break
+        [ "$up" != "000" ] && break
         sleep 5
     done
-    com="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
-        "http://$ip:$OPENDESIGN_PORT/api/agents" 2>/dev/null)"
     ui="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$ip:$OPENDESIGN_PORT/" 2>/dev/null)"
 
-    if [ "$com" = "200" ]; then
-        echo -e "${YELLOW}ATENCAO: a API respondeu 200 SEM credencial.${NC}" >&2
-        echo -e "${YELLOW}  O token nao esta sendo conferido — o carve-out de loopback esta em${NC}" >&2
-        echo -e "${YELLOW}  acao, ou OD_DISABLE_API_AUTH esta ligado. Nao publique assim.${NC}" >&2
-    else
-        echo -e "${GREEN}✓ Token conferido: /api/agents devolve $com sem credencial.${NC}"
-    fi
-    if [ "$ui" = "401" ]; then
-        echo -e "${GREEN}✓ UI servida e protegida ($ui).${NC}"
+    # O estado que decide agora e a UI servida, e nao o token: com
+    # OD_DISABLE_API_AUTH=1 a API responde 200 sem credencial, por desenho. E o
+    # 404 continua sendo o sinal de STATIC_DIR fora do lugar.
+    if [ "$ui" = "200" ]; then
+        echo -e "${GREEN}✓ UI servida (200) em loopback, com o auth delegado ao ${NC}"
+        echo -e "${GREEN}  proxy: OD_DISABLE_API_AUTH=1 e a rota de escrita passa por peer de loopback.${NC}"
     else
         echo -e "${YELLOW}A UI respondeu $ui.${NC}" >&2
-        echo -e "${YELLOW}  Se for 404 com a API de pe, o STATIC_DIR fell fora: confira o layout${NC}" >&2
-        echo -e "${YELLOW}  $OPENDESIGN_ROOT/apps/web/out.${NC}" >&2
+        if [ "$ui" = "404" ]; then
+            echo -e "${YELLOW}  404 com a API de pe: o STATIC_DIR fell fora. Confira o layout${NC}" >&2
+            echo -e "${YELLOW}  $OPENDESIGN_ROOT/apps/web/out.${NC}" >&2
+        fi
+        return 1
     fi
-    echo -e "${GREEN}✓ OpenDesign nativo em $ip:$OPENDESIGN_PORT, escutando na tailnet.${NC}"
+    echo -e "${GREEN}✓ OpenDesign nativo em loopback:$OPENDESIGN_PORT.${NC}"
+    echo -e "${YELLOW}  A publicacao precisa apontar para o LOOPBACK, nao para o IP da tailnet:${NC}" >&2
+    echo -e "${YELLOW}    sudo tailscale serve --bg --https=$OPENDESIGN_SERVE_PORT http://127.0.0.1:$OPENDESIGN_PORT${NC}" >&2
     return 0
 }
 
