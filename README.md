@@ -889,57 +889,195 @@ OpenDesign nativo, e a escolha é sua sobre qual dos dois fica.
 
 **Rollback** na seção `podman` do [`ROLLBACK.md`](ROLLBACK.md).
 
-### O que hoje é montado à mão, e o que falta para virar passo
+### Provisionar os três serviços numa VM nova
 
-Três serviços da VM foram montados à mão. Nenhum tem passo no `setup.sh`:
+Os três serviços da VM de agentes (OpenCode, OpenDesign, Hermes) não têm passo no
+`setup.sh` ainda. O que segue é a ordem medida, e **as armadilhas que custaram uma
+rodada cada** — todas verificadas por estado, nenhuma por leitura.
 
-| | como está na VM | falta |
-|---|---|---|
-| **OpenCode** | unit de usuário, `service start` | **nada** — declarado agora |
-| **OpenDesign** | `podman compose` a partir de `~/Developer/open-design/deploy` | provider de compose, clone, `.env` a 600, e `--no-build` |
-| **Hermes** | `podman run`, container único | idem, mais o registro de auth, que é humano |
+| | como roda | auth | o que ainda é manual |
+|---|---|---|---|
+| **OpenCode** | unit de usuário, `service start` | senha em `service.json` | **nada** — `setup_opencode_service` já declara |
+| **OpenDesign** | `podman compose`, bridge, publicação em loopback | basic auth, `OD_API_TOKEN` | `.env` e o override local |
+| **Hermes** | `podman run`, um container | **basic auth por scrypt** | o registro no Portal, que é humano |
 
-**A ordem numa instalação limpa** tem uma dependência real: o provider de compose. O
-`podman` vem do módulo `podman`, mas `podman compose` respondeu *"looking up compose
-provider failed"* — sem `podman-compose` nem `docker-compose`. Sem isso, **os dois**
-caminhos de container não existem, e o sintoma não parece o que é.
+A ordem tem uma dependência real e ela vem primeiro:
 
 ```bash
-sudo dnf install -y podman-compose      # antes de qualquer container
+sudo dnf install -y podman-compose      # sem isso os DOIS caminhos de container falham
 ```
 
-O `--no-build` do OpenDesign não é opcional: o compose base traz `image:` e
-`build:` juntos, e sem a flag o Podman tenta **compilar da fonte** — operação longa
-com aparência legítima. Detalhes em "OpenDesign via container".
+Sem provider, `podman compose` responde *"looking up compose provider failed"* — e o
+sintoma não parece o que é.
 
-**O bind e a porta do Hermes não passam por `service set`** — o dashboard não tem
-esse caminho. O bind vem de flag, e o `public_url` de variável de ambiente. Os três
-juntos, e a ordem importa:
+#### O OpenDesign: três armadilhas, e uma delas apaga o estado
+
+**O `--no-build` é obrigatório.** A base traz `image:` e `build:` juntos, o que é
+normal para quem desenvolve do repo. Sem a flag o Podman tenta **compilar da
+fonte**, e a compilação é uma operação longa com aparência legítima.
+
+**A origem da tailnet precisa estar na lista de permidos.** A base já tem a linha
+certa — `OD_ALLOWED_ORIGINS: ${OPEN_DESIGN_ALLOWED_ORIGINS:-}` — e o que falta é o
+**valor no `.env`**. Sem ele a página carrega e a API morre, e o navegador acusa
+cross-origin sem explicar nada:
 
 ```bash
-# 1. registrar a auth do DASHBOARD. É um comando DIFERENTE de `hermes portal`, que
-#    registra a credencial de INFERÊNCIA. Registrar antes de decidir o bind grava a
-#    URL canônica errada, e o login falha com redirect_uri_mismatch.
-hermes dashboard register
+# no .env do deploy
+OPEN_DESIGN_ALLOWED_ORIGINS=https://<maquina>.<tailnet>.ts.net:8444
+```
 
-# 2. 0.0.0.0 DENTRO do container (engata o gate) · 3. mapeado só para o loopback do
-#    host (mantém a LAN de fora) · 4. public_url, senão o app deriva a callback do
-#    bind e o OAuth não casa
+Medido: sem a linha, a origem da tailnet leva **403** e `localhost` leva **200**.
+Com a linha, as três origens levam **200**.
+
+⚠️ **O `docker-compose.linux.yml` do upstream não pode ser aplicado neste
+ambiente.** Ele traz os mounts das CLIs do host e o PATH que as aponta, mas fundir
+os dois arquivos falha:
+
+```
+ValueError: can't merge value of [OD_PORT] of type <class 'int'> and <class 'str'>
+```
+
+A base declara `OD_PORT: 7456` (inteiro) e o override declara
+`OD_PORT: ${OPEN_DESIGN_PORT:-7456}` (texto, depois de interpolada). O
+`podman-compose` não funde int com str. A solução é um **override local** com só o
+que falta, e ele está em `deploy/docker-compose.local.yml`.
+
+⚠️ **O `podman-compose` SUBSTITUI a lista de volumes do serviço, não acrescenta.**
+Verificado com `podman compose config`: um override que só somasse os host-bins
+fazia `open_design_data:/app/.od` sumir do merge — e a recreate seguinte começava
+com o estado do OpenDesign **vazio**. O override local tem que repetir o volume de
+dados.
+
+⚠️ **O `,z` no fim do mount não é opcional, e o erro que aparece sem ele não
+aparece.** As permissões Unix dos diretórios do host são `755` e não são o motivo.
+O que barra é o **SELinux**: medido, `~/.local/bin` é `gconf_home_t` e
+`~/.opencode/bin` é `user_tmp_t`, e nenhum dos dois é legível de dentro do
+container. O sintoma é `Permission denied` — que parece problema de permissão e é de
+rótulo. `z` (compartilhado, e não `Z` privado) porque o host também usa esses
+diretórios, e os dois precisam do mesmo rótulo.
+
+```yaml
+# deploy/docker-compose.local.yml — o que o override do upstream não consegue aplicar
+services:
+  open-design:
+    environment:
+      PATH: /mnt/host-local-bin:/mnt/host-opencode:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - open_design_data:/app/.od          # repetir: a lista é substituída, não somada
+      - ${HOME}/.local/bin:/mnt/host-local-bin:ro,z
+      - ${HOME}/.opencode/bin:/mnt/host-opencode:ro,z
+```
+
+```bash
+podman compose -f docker-compose.yml -f docker-compose.local.yml up -d --no-build
+```
+
+⚠️ **Nunca despeje `podman compose config` sem filtrar.** Ele renderiza o ambiente
+**já interpolado**, e o `OD_API_TOKEN` sai em claro. Use `--services`, ou um
+`grep -v` de `TOKEN|KEY|SECRET`. Isso já aconteceu uma vez aqui: o token apareceu
+inteiro na conversa e precisou ser rotacionado.
+
+#### O muro de libc, e ele vai nos dois sentidos
+
+Este é o achado que decide a arquitetura, e é o mesmo dos dois lados.
+
+**Do host para dentro do container, não funciona.** O container é **Alpine
+3.24.2** (musl) e não tem `/lib64/ld-linux-x86-64.so.2`. O binário do opencode
+declara `PT_INTERP=/lib64/ld-linux-x86-64.so.2` — glibc, dinâmico. O `gcompat`
+**está instalado** e traz **zero** loaders. Resultado: toda CLI do host montada no
+container morre com `not found`, que é o sintoma de loader ausente e parece de
+permissão. A UI do OpenDesign mostra *"Nenhum agente detectado ainda"*, porque
+detecta por `PATH` e a execução é que falha depois.
+
+**Do container para o host, o inverso também é verdade.** A imagem traz **16
+módulos nativos** já compilados, e entre eles `@img/sharp-linuxmusl-x64` e
+`better_sqlite3` compilados para musl. **Copiar `/app` para o Fedora não carrega** —
+é o mesmo muro do outro lado. Um nativo só funciona **compilando da fonte**, que é
+justamente o que o `Dockerfile` faz:
+
+| requisito | valor | de onde |
+|---|---|---|
+| Node | `~24` | a VM tem `24.21.0` pelo mise — casa |
+| pnpm | `10.33.2` | `corepack prepare pnpm@10.33.2 --activate` |
+| build | `gcc-c++`, `make`, `python3` | o `Dockerfile` usa `apk add python3 make g++` |
+
+⚠️ **Só o `node` na sessão não interativa não conta.** O PATH vem do shell rc, e um
+`ssh` cru não o tem. O node do mise está em
+`~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
+explicitamente antes de qualquer build.
+
+#### O Hermes: senha local em vez do OAuth do Portal
+
+O dashboard aceita **dois** provedores, e o próprio `--help` do binário diz: *"a
+public bind always requires an auth provider (**password or OAuth**)"*. O
+`--insecure` é **NO-OP** desde o endurecimento de junho de 2026 — ele não desliga
+mais nada.
+
+A senha é um provedor de primeira classe, e é a peça que resolve o
+`redirect_uri_mismatch`: a função `_settings()` do provider **levanta
+`SkipRegistration`** quando o usuário não está definido, ou seja, **com a senha
+configurada o registro no Portal é dispensado** — e é justamente esse registro que
+grava a URL canônica errada e produz o erro.
+
+```bash
+# o texto puro NUNCA vai para o container: entra o hash scrypt
+podman exec hermes-dash /opt/hermes/.venv/bin/python -c \
+  "import sys; sys.path.insert(0,'/opt/hermes')
+from plugins.dashboard_auth.basic import hash_password
+print(hash_password('a-senha'))"
+# -> scrypt$16384$8$1$<salt_b64>$<dk_b64>
+
 podman run -d --name hermes-dash \
   -v ~/Developer/.hermes:/opt/data:Z \
   -p 127.0.0.1:9119:9119 \
   -e HERMES_DASHBOARD_PUBLIC_URL=https://<maquina>.<tailnet>.ts.net:8445 \
+  -e HERMES_DASHBOARD_BASIC_AUTH_USERNAME=<usuario> \
+  -e HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=<hash> \
   <imagem por digest> dashboard --host 0.0.0.0 --no-open
 ```
 
-⚠️ **`:Z` é obrigatório, e o que falha sem ele é enganoso.** O SELinux bloqueia
-`/opt/data`, o `01-hermes-setup` sai com 1, e o container morre com **exit 2 e
-nenhuma mensagem útil no fim do log** — a causa está no começo.
+⚠️ **`:Z` é obrigatório no bind mount, e o que falha sem ele é enganoso.** O
+SELinux bloqueia `/opt/data`, o `01-hermes-setup` sai com 1, e o container morre com
+**exit 2 e nenhuma mensagem útil no fim do log** — a causa está no começo.
 
 ⚠️ **O bind mount em rootless tem um custo que ninguém escolhe explicitamente:**
-`~/Developer/.hermes` precisa ser do **subuid** — o `hermes` é uid 10000 dentro da
-imagem — então o dono no host vira algo como `534287`, e **`rvlmt` não lê o `.env`
-nem o `auth.json` sem `sudo`**. O caminho é `podman unshare chown 10000:10000`.
+`~/Developer/.hermes` precisa ser do **subuid** (o `hermes` é uid 10000 dentro da
+imagem), então o dono no host vira algo como `534287` e **`rvlmt` não lê o `.env`
+nem o `auth.json` sem `sudo`** — nem para fazer `stat`.
+
+**Para onde o login vai depois de configurado**, medido: `/` responde **302** para
+`/login?next=%2F`, que é um formulário local com `name="username"` e
+`name="password"`, e o envio é
+`POST /auth/password-login` com `{provider, username, password, next}`. A resposta
+é **200** com `hermes_session_at` (12 h) e `hermes_session_rt` (30 dias), e **401**
+com a senha errada. O `redirect_uri_mismatch` não tem mais onde aparecer.
+
+**O bind e a porta não passam por `service set`.** O bind vem de flag e o
+`public_url` de variável de ambiente. E a lição de ordem continua valendo para quem
+for pelo OAuth: **`hermes dashboard register` antes de decidir o bind**, porque
+registrar primeiro grava a URL canônica errada.
+
+**O container do Hermes não usa compose nenhum** — é `podman run` direto, e o
+`docker-compose` que existe no repo do Hermes descreve um estado que nada produz.
+Mesma classe do drop-in do opencode: um arquivo que descreve uma configuração que o
+script não cria.
+
+#### As senhas provisórias, e o que elas custam
+
+`hermes` e `opencode` como senha são **adivinháveis** por qualquer um que saiba que
+você as usa. Isso é exposição conhecida, e é o que a senha compra: a separação
+entre uma pessoa da tailnet e a sua sessão — **não** a máquina, que quem alcança a
+tailnet já acessa. A barreira é real e fina.
+
+O que reduz a exposição sem trocar a convenção: o **hash scrypt** no ambiente, o
+texto puro num arquivo `600`, e `~/Developer/.hermes` em `700`.
+
+| serviço | onde a senha mora | como trocar |
+|---|---|---|
+| OpenCode | `~/.config/opencode/service.json` | `opencode service set password <nova>` |
+| Hermes | env `…_BASIC_AUTH_PASSWORD_HASH` | regerar o hash e recriar o container |
+| OpenDesign | `OD_API_TOKEN` no `.env` | trocar no `.env` e `compose up -d` |
+
 
 ### O disco da VM, e por que não é assunto de install
 
