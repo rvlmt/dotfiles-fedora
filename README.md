@@ -18,6 +18,11 @@ rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
 
 ## Estrutura
 
+- **`AUDITORIA.md`** — **comece por aqui para saber o que o script faz.** É o
+  documento de auditoria e de reprodução manual: perfis e módulos, portas, o que
+  cada um instala, o custo de disco de uma instalação limpa, o que exige mão
+  humana, e as decisões conhecidas com o que cada uma custa. Toda tabela tem uma
+  medição por trás, e onde o número é de uma máquina isso está marcado.
 - **`setup.sh`** — provisiona o servidor Fedora. Um arquivo só (cores,
   confirmação, geração de chave SSH, config git/gh, instalação das CLIs de
   IA, os módulos — tudo junto); idempotente, pode ser executado várias vezes
