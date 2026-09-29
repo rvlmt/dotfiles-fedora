@@ -1429,6 +1429,19 @@ e o `pm` reporta `node: staged entry failed verification ... exited 127`. Nem o
 `libatomic.so.1` **existe dentro do container Alpine** e não existe no host — é o
 mesmo muro de libc do OpenDesign, no sentido inverso. O `libX11.so.6` cai no
 mesmo grupo, e o script **não o verificava em lugar nenhum**.
+⚠️ **Medido numa segunda VM, e é a correção desta afirmação:** `libatomic` e
+`libX11` **JÁ VIERAM** numa Fedora 44 Workstation Edition recém-criada. A frase
+"não existe no host" era verdadeira para a outra VM — de imagem menor — e falsa
+para esta. A afirmação honesta é que **depende da imagem**, e é por isso que
+estão na lista do `base` e não num passo opcional.
+
+O que não mudou é o porquê de estarem lá: o `pm` baixa binários para a
+máquina-alvo e **verifica rodando o binário**, e sem as duas bibliotecas falha com
+`error while loading shared libraries` e reporta `staged entry failed
+verification ... exited 127`. `libX11` **não era verificado em lugar nenhum**
+antes de entrar na lista, e foi ela que faltou na máquina onde a `libatomic` já
+estava presente.
+
 
 🛠️ **Agora os dois são instalados pelo módulo `base`**, junto com o resto:
 
