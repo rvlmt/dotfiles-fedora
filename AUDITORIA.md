@@ -218,6 +218,7 @@ Nada disto é instalação — é configuração, ou é opt-in.
 | `sudo dnf install podman-compose` | **só** no modo container |
 | `sudo tailscale serve …` | **só** se rodar `ai-clis` antes do módulo `tailscale` |
 | `ocx start` | OpenCodex, opt-in, proxy de terceiros |
+| **`tailscale up` sem chave** | imprime uma URL e espera autenticação humana. Ver §9.7 |
 
 ⚠️ **O prompt do modo do OpenDesign não tem default, e isso é deliberado.** Sem
 resposta — EOF, ou o passo pulado com `--only` — a saída correta é **não instalar**.
@@ -300,3 +301,92 @@ medições de disco.
 
 O que **não** muda: as armadilhas de layout, de ordem e de heap. Essas estão
 descritas acima com a medição que as revelou, e nenhuma delas se resolve sozinha.
+
+## 9. O que a VM limpa mostrou
+
+Tudo nesta seção é medido numa **Fedora 44 Workstation Edition recém-criada**,
+nunca vista pelo script antes. A VM de agentes é Fedora 43, então não é repetição:
+são duas imagens diferentes, e o que está aqui só apareceu na segunda.
+
+### 9.1. O primeiro bloqueio: o `sshd` não estava no ar
+
+| | |
+|---|---|
+| sintoma | porta 22 **"connection refused"** — não filtrada |
+| prova | `tailscale ping` responde e o nó está online: os pacotes chegam, e a máquina recusa porque não há ouvinte |
+| causa | o script nunca sobe o serviço; o `sshd-hardening` fazia só `reload`, que falha contra unidade parada |
+| entrada possível | só o console, para um `systemctl enable --now sshd` à mão |
+
+Corrigido nos módulos `ssh` e `sshd-hardening`. A duplicação é deliberada: o
+`ssh` sobe cedo porque é o que permite desligar `PasswordAuthentication` sem
+janela de risco, e o `sshd-hardening` cobre o caso de `--only=sshd-hardening`.
+
+### 9.2. `libatomic` e `libX11` **já vêm** nesta imagem
+
+A afirmação "não vem no Fedora" era verdadeira na VM de agentes, de imagem menor,
+e **falsa nesta**. As duas estão instaladas numa Workstation Edition recém-criada.
+
+O que não muda é o porquê de estarem na lista do `base`: o `pm` do Hermes baixa
+binários para a máquina-alvo e **verifica rodando**, então biblioteca faltando
+vira `staged entry failed verification ... exited 127`. E `libX11` não era
+verificado em lugar nenhum antes de entrar na lista — foi ela que faltou na
+máquina onde a `libatomic` já estava.
+
+### 9.3. O que o mise grava, e por que ainda acompanha a última
+
+`~/.config/mise/config.toml` depois do `base`:
+
+```
+[tools]
+devcontainer-cli = "0.89.0"
+node = "lts"
+```
+
+**Um alias é gravado como alias, e um número explícito como número.** O que decide
+isso é a forma do argumento, não o `--pin`. Passar `node@lts` é o que preserva o
+alias, e é por isso que a máquina continua acompanhando: cada execução re-resolve
+o `lts` e reescreve a linha.
+
+O aviso do `mise install` — *"installed but not activated"* — é **esperado**: ele
+instala e não ativa; quem ativa é o `use` logo em seguida. Trocar a ordem deixaria
+o runtime instalado e não ativado.
+
+### 9.4. O `base` não é um módulo pequeno
+
+`sudo dnf upgrade --refresh` numa imagem Workstation puxou **835 pacotes** —
+`linux-firmware`, `iwlwifi-mvm-firmware`, `nvidia-gpu-firmware`, entre outros.
+São centenas de MB de firmware numa máquina que talvez nem tenha GPU.
+
+Vale decidir conscientemente: quem não quer um upgrade completo do sistema no
+módulo `base` precisa saber que ele está lá.
+
+### 9.5. O `sshd-hardening` vai pular nesta VM
+
+O módulo tem uma guarda que é uma das melhores peças do script: se
+`~/.ssh/authorized_keys` está vazio, ele **não** desabilita login por senha, porque
+faria isso trancar a máquina para fora. Medido aqui: `authorized_keys` está vazio,
+então o hardening vai pular e avisar.
+
+A correção é deliberada e manual: cadastrar a chave pública de onde você acessa
+antes de rodar o módulo.
+
+### 9.6. O repositório é privado, e o `git clone` falha
+
+`gh repo view` confirma: `PRIVATE`. Uma VM nova não consegue `git clone` direto sem
+`gh` autenticado, o que por sua vez depende da GitHub App, que depende de uma
+chave privada colada por alguém. **O primeiro passo do procedimento numa VM limpa
+não é coberto pelo script.**
+
+Neste teste o repositório foi levado por `tar` sobre `ssh`, e o `tree` conferido
+nos dois lados.
+
+### 9.7. O `tailscale up` não tem caminho não interativo
+
+O módulo roda `sudo tailscale up` sem chave de autenticação: ele imprime uma URL e
+espera a autenticação humana. Numa máquina já autenticada, o módulo detecta e não
+faz nada — medido aqui, "Tailscale já conectado", e o `BackendState` continuou
+`Running` com o mesmo IP.
+
+Mas provisionar do zero exige abrir a URL. Um `--authkey` lido do ambiente seria o
+caminho, e é o que falta para o perfil `vm` ser automatizável de ponta a ponta.
+
