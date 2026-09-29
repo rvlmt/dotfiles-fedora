@@ -299,62 +299,57 @@ o kernel.
 
 ## Runtime Node no host
 
-O Node e o npm do host vêm do `mise`, com versão pinada — **não** do `dnf`. O
-`setup.sh` não instala mais `nodejs`/`npm` de propósito, para que o runtime não
-dependa da versão que o Fedora decidir empacotar a cada atualização:
+O Node e o npm do host vêm do `mise`, **não** do `dnf`. O `setup.sh` não instala
+`nodejs`/`npm` de propósito, para que o runtime não dependa da versão que o
+Fedora decidir empacotar a cada atualização.
+
+⚠️ **Nenhuma versão é pinada por número, e isso é decisão.** O script usa:
 
 ```bash
-mise use -g --pin node@24.21.0 devcontainer-cli@0.89.0
+mise use -g node@lts devcontainer-cli@<última>
 ```
+
+O Node acompanha o alias **`lts`**, e não `latest`: `lts` é a linha de suporte
+estendido, que é o que um runtime de host quer, enquanto `latest` traz major novo
+com frequência. Medido: `node@lts` e `node@24` resolvem para a mesma versão, e
+`@latest` **não é alias no mise** — devolve vazio.
+
+O `devcontainer-cli` **não tem alias nenhum**: `ls-remote` devolve vazio para
+`@latest` e para `@lts`, então a última versão real é lida do registro, e a
+constante `MISE_DEVCONTAINER_FALLBACK` cobre o caso sem rede.
+
+Um pin fixo tem um custo que só aparece tarde: se a versão sair do registro,
+`mise install` falha e, como a chamada não tem `|| true`, o módulo `base` inteiro
+cai sem dizer qual versão deixou de existir. Acompanhar a última troca esse modo
+de falha por um que não existe. O `--pin` também saiu de propósito — ele grava a
+versão **resolvida** num config local, e é exatamente o número fixo que a decisão
+remove.
 
 O consumo **baseline** é o Dev Container CLI, que é controller de host. O
 `setup.sh` cria ainda `~/.local/bin/devcontainer` apontando para o shim do `mise`,
 o que dá um atalho curto que funciona inclusive fora de shell interativo — situação
 em que `mise activate` não se aplica, como em serviço systemd ou script.
 
+⚠️ **Dentro de um projeto com `mise.toml` ou `.tool-versions` próprios, o shim
+resolve o runtime daquele diretório**, não o do host. Para forçar o do host, use
+a forma `mise exec`:
+
+```bash
+mise exec node@lts -- node --version
+mise exec devcontainer-cli -- devcontainer --version
+```
+
 Se você aceitou o módulo `ai-clis`, há consumo adicional, e ele é consequência
 dessa escolha, não um invariante do host:
 
-- `codex` e `ocx`/`opencodex` resolvem `#!/usr/bin/env node`,
-  ou seja, o mesmo Node do mise. `claude`, `opencode` e `cursor-agent` são
-  binários nativos e não usam Node.
+- `codex` e `ocx`/`opencodex` resolvem `#!/usr/bin/env node`, ou seja, o mesmo
+  Node do mise. `claude`, `opencode` e `cursor-agent` são binários nativos e não
+  usam Node.
 - O instalador do `agy` cria o serviço `antigravity-cli-daemon`, que executa
   `npm exec` como filho. Serviço systemd não lê `~/.zshrc` nem o `~/.bashrc`, então
   o `setup.sh` cria um drop-in em
   `~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`
-  para que ele encontre o mise. **É isso que permite remover o RPM `nodejs22*` com
-  segurança** — remover antes quebraria o daemon.
 
-Rollback de cada peça em [`ROLLBACK.md`](ROLLBACK.md), seções `ai-clis` e `base`.
-
-### Ressalva: shim resolve por diretório
-
-Os shims consultam a configuração do diretório em que são chamados. Dentro de um
-repositório com `.tool-versions`/`mise.toml` próprios, `node` e `devcontainer`
-resolvem a versão **daquele projeto**, e não o pin do host. Esse é o comportamento
-desejado ao trabalhar em um projeto; por isso, quando o pin do host importar,
-use a forma `mise exec ... --` da seção seguinte.
-
-### O host não deve ter Node do dnf
-
-Este repositório é o padrão, não um registro do que uma máquina específica fez. O
-invariante é: **o Node do host vem do mise, e nenhum RPM `nodejs*` está
-instalado.** O `setup.sh` não instala `nodejs`/`npm` justamente para que o
-runtime não dependa da versão que o Fedora decidir empacotar.
-
-Se um host tiver esses pacotes por outro caminho, a remoção precisa de `sudo` e
-é de quem administra a máquina:
-
-```bash
-sudo dnf remove 'nodejs22*'
-command -v node && node --version   # deve resolver para o shim do mise
-```
-
-Ordem importa, porque serviço systemd não lê `~/.bashrc` nem o `zshrc`: o daemon
-do `agy` executa `npm exec` e precisa do PATH do mise por um drop-in em
-`~/.config/systemd/user/antigravity-cli-daemon.service.d/10-mise-path.conf`, que
-o `setup.sh` cria no módulo `ai-clis`. Remover o RPM antes disso quebra o daemon.
-Rollback em [`ROLLBACK.md`](ROLLBACK.md).
 
 ## Dev Container CLI no host Fedora
 
@@ -364,24 +359,24 @@ Esta seção não altera a arquitetura de execução dos agents. Os
 devcontainers de aplicação não recebem credenciais nem CLIs de agent; o
 template `agent-sandbox` é tratado separadamente.
 
-A instalação é gerenciada e pinada pelo `mise`, incluindo um runtime Node
-próprio para o CLI:
+  A instalação é gerenciada pelo `mise`, incluindo um runtime Node próprio
+  para o CLI — sem pin de número, como o resto do host:
 
 ```bash
-mise use -g --pin node@24.21.0 devcontainer-cli@0.89.0
-mise exec node@24.21.0 devcontainer-cli@0.89.0 -- node --version
-mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer --version
+  mise use -g node@lts devcontainer-cli@<última>
+mise exec node@lts -- node --version
+mise exec node@lts -- devcontainer --version
 ```
 
 Force as versões globais também nos comandos executados dentro de um
 repositório, para que um `mise.toml` local não substitua o runtime do CLI:
 
 ```bash
-mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer up \
+mise exec node@lts -- devcontainer up \
   --docker-path podman \
   --workspace-folder /caminho/do/projeto
 
-mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer exec \
+mise exec node@lts -- devcontainer exec \
   --docker-path podman \
   --workspace-folder /caminho/do/projeto \
   <comando-do-aplicativo>
@@ -409,7 +404,7 @@ como boundary do host.
 
 ### Ciclo de vida dos devcontainers
 
-O CLI `0.89.0` não oferece um `down` completo. O cleanup usa o label
+O CLI da série `0.8x` não oferece um `down` completo. O cleanup usa o label
 `devcontainer.local_folder` e deve ser feito em etapas, revisando a lista
 antes de remover qualquer container:
 
@@ -436,7 +431,7 @@ podman ps -a \
   --format '{{.ID}} {{.Names}} {{.Status}}'
 
 # 6. Recriar quando o cleanup estiver aprovado.
-mise exec node@24.21.0 devcontainer-cli@0.89.0 -- devcontainer up \
+mise exec node@lts -- devcontainer up \
   --docker-path podman \
   --workspace-folder "${WORKSPACE}"
 ```
@@ -1023,14 +1018,14 @@ justamente o que o `Dockerfile` faz:
 
 | requisito | valor | de onde |
 |---|---|---|
-| Node | `~24` | a VM tem `24.21.0` pelo mise — casa |
-| pnpm | `10.33.2` | `corepack prepare pnpm@10.33.2 --activate` |
+| Node | `~24` | o mise resolve `lts`, que é a linha `24` — casa |
+| pnpm | a mais recente | `corepack prepare pnpm@latest --activate` — ver a ressalva do major |
 | build | `gcc-c++`, `make`, `python3` | o `Dockerfile` usa `apk add python3 make g++` |
 
 ⚠️ **Só o `node` na sessão não interativa não conta.** O PATH vem do shell rc, e um
 `ssh` cru não o tem. O node do mise está em
-`~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
-explicitamente antes de qualquer build.
+  `~/.local/share/mise/installs/node/lts/bin` (o mise grava `lts` como link) — é
+  preciso colocá-lo no PATH explicitamente antes de qualquer build.
 
 #### A raiz do build passou a ser o próprio clone
 
