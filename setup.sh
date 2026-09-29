@@ -56,12 +56,27 @@ GITHUB_KEYS_USER="rvlmt"
 GITHUB_KEYS_BEGIN="# >>> dotfiles-fedora: chaves de dispositivos (GitHub) >>>"
 GITHUB_KEYS_END="# <<< dotfiles-fedora: chaves de dispositivos (GitHub) <<<"
 
-# Runtime do host, pinado aqui para que setup, shell de login e devcontainers
-# concordem. Quem fornece Node/npm no host é o mise — o pacote nodejs do dnf
-# não é instalado de propósito, para que o runtime do host não dependa da
+# Runtime do host. Quem fornece Node/npm no host é o mise — o pacote nodejs do
+# dnf não é instalado de propósito, para que o runtime do host não dependa da
 # versão que o Fedora decidir empacotar. Ver README, "Runtime Node no host".
-MISE_NODE_VERSION="24.21.0"
-MISE_DEVCONTAINER_VERSION="0.89.0"
+#
+# Nenhum dos dois é pinado por NÚMERO. Um pin fixo tem um custo que só aparece
+# tarde: se a versão sair do registro, `mise install` falha, e como a chamada não
+# tem `|| true` o módulo `base` inteiro cai sem dizer qual versão não existia
+# mais. Acompanhar a última troca esse modo de falha por um que não existe.
+#
+# O Node usa o alias `lts`, e não `latest`: `lts` é a linha de suporte estendido,
+# que é a que o runtime do host quer — um `latest` de Node traz major novo com
+# frequência e o mise resolve o alias para a major atual. Medido: `node@lts` e
+# `node@24` resolvem ambos para a mesma versão, e `@latest` NÃO é alias no mise
+# (devolve vazio).
+#
+# O `devcontainer-cli` não tem alias nenhum no mise — `ls-remote` devolve vazio
+# para `@latest` e para `@lts` — então a última versão real é lida do registro
+# em `ensure_host_node`, e a constante abaixo é o fallback quando o registro não
+# responde.
+MISE_NODE_SPEC="lts"
+MISE_DEVCONTAINER_FALLBACK="0.89.0"
 MISE_BIN_PATH="$HOME/.local/bin/mise"
 MISE_SHIMS_PATH="$HOME/.local/share/mise/shims"
 
@@ -245,18 +260,50 @@ OPENCODE_SERVE_PORT="8443"
 # (Enter aceita, digitar outra coisa sobrescreve só nesta execução).
 prompt_git_identity() {
     if [ -z "$GIT_NAME" ]; then
-        read -rp "Nome completo para o Git [$DEFAULT_GIT_NAME]: " GIT_NAME
+        pergunta "Nome completo para o Git [$DEFAULT_GIT_NAME]: " GIT_NAME
         GIT_NAME="${GIT_NAME:-$DEFAULT_GIT_NAME}"
     fi
     if [ -z "$GIT_EMAIL" ]; then
-        read -rp "E-mail (Git e SSH) [$DEFAULT_GIT_EMAIL]: " GIT_EMAIL
+        pergunta "E-mail (Git e SSH) [$DEFAULT_GIT_EMAIL]: " GIT_EMAIL
         GIT_EMAIL="${GIT_EMAIL:-$DEFAULT_GIT_EMAIL}"
     fi
+}
+
+# Lê uma resposta do operador, e degrada de forma explícita sob `--yes`.
+#
+# Sem esta função, um `read` em EOF devolve 1 e o `set -e` aborta o script — que
+# é o que fazia a recusa de "precisa de um terminal" existir. Com `--yes` não há
+# terminal, então TODO `read` que sobraria abortaria o script no meio, e a flag
+# seria exatamente a promessa que não cumpre.
+#
+# A degradação é "vazio", e cada chamador já tem um default para o vazio: a
+# identidade do Git cai no default, o App ID no default declarado, o hostname
+# mantém o atual. É a mesma semântica de responder "só enter", que é o que a
+# pessoa teria feito.
+pergunta() {
+    local prompt="$1" varname="$2"
+    if [ "${ASSUME_YES:-0}" = "1" ]; then
+        printf -v "$varname" '%s' ""
+        return 0
+    fi
+    read -rp "$prompt" "$varname" || printf -v "$varname" '%s' ""
 }
 
 confirm() {
     local prompt="$1"
     local reply
+    # `--yes` responde SIM a tudo, e é o que torna o modo não interativo possível.
+    # O default continua sendo NÃO: sem a flag, um Enter não instala nada. É a
+    # diferença entre "responde por mim" e "instale por omissão".
+    #
+    # `ASSUME_YES` é inicializado aqui, e não na linha de argumentos, porque esta
+    # função é definida antes dela e a chamadora de `confirm` mais acima já
+    # precisa do valor. Sob `set -u`, ler a variável antes de existir aborta o
+    # script — e a checagem aqui é o que evita isso.
+    if [ "${ASSUME_YES:-0}" = "1" ]; then
+        echo -e "${prompt} ${GREEN}[--yes: assumindo sim]${NC}"
+        return 0
+    fi
     read -rp "$prompt [y/N] " reply
     [[ "$reply" =~ ^[Yy]$ ]]
 }
@@ -310,12 +357,26 @@ ensure_mise() {
 ensure_host_node() {
     ensure_mise
     prepend_mise_shims
-    local mise_bin_path
+    local mise_bin_path dc_ver node_ver
     mise_bin_path="$(mise_bin)"
-    "$mise_bin_path" install "node@$MISE_NODE_VERSION" "devcontainer-cli@$MISE_DEVCONTAINER_VERSION"
-    "$mise_bin_path" use -g --pin "node@$MISE_NODE_VERSION" "devcontainer-cli@$MISE_DEVCONTAINER_VERSION"
+
+    # O mise não tem alias para o devcontainer-cli, então a última versão real é
+    # lida do registro. A última LINHA do `ls-remote` é a maior: o mise lista em
+    # ordem. Sem rede o registro falha e o fallback declarado no topo entra, que é
+    # preferível a derrubar o `base` inteiro por causa disso.
+    dc_ver="$(timeout 60 "$mise_bin_path" ls-remote devcontainer-cli 2>/dev/null | tail -1 | tr -d '\r')"
+    [ -n "$dc_ver" ] || dc_ver="$MISE_DEVCONTAINER_FALLBACK"
+
+    node_ver="$(timeout 60 "$mise_bin_path" ls-remote "node@$MISE_NODE_SPEC" 2>/dev/null | tail -1 | tr -d '\r')"
+    [ -n "$node_ver" ] || node_ver="$MISE_NODE_SPEC"
+
+    "$mise_bin_path" install "node@$MISE_NODE_SPEC" "devcontainer-cli@$dc_ver"
+    # `use -g` sem `--pin`: o pin gravaria a versão RESOLVIDA num config local, e
+    # é exatamente o número fixo que esta decisão remove. O `--pin` é o que fazia
+    # a máquina ficar presa na primeira versão resolvida.
+    "$mise_bin_path" use -g "node@$MISE_NODE_SPEC" "devcontainer-cli@$dc_ver"
     prepend_mise_shims
-    echo -e "${GREEN}✓ Runtime do host: node@$MISE_NODE_VERSION, devcontainer-cli@$MISE_DEVCONTAINER_VERSION${NC}"
+    echo -e "${GREEN}✓ Runtime do host: node@$node_ver (lts), devcontainer-cli@$dc_ver${NC}"
 }
 
 # Link ~/.local/bin/devcontainer → shim do mise. ~/.local/bin já está no PATH
@@ -924,11 +985,32 @@ _setup_open_design_native() {
     }
     [ -x "$nb/node" ] || { echo -e "${YELLOW}node do mise ausente; pulei o OpenDesign.${NC}" >&2; return 1; }
     export PATH="$nb:$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    #
+    # O pnpm acompanha a versão publicada mais recente, e o motivo de isso ser
+    # opcional está medido: o repo do OpenDesign declara
+    # `"packageManager": "pnpm@10.33.2"` no próprio `package.json`, mas o
+    # corepack desta máquina NÃO honra essa declaração — medido, `pnpm --version`
+    # dentro do clone devolve a versão global, não a declarada. Ou seja, a
+    # declaração do projeto é letra morta aqui, e quem manda é o que este passo
+    # ativa.
+    #
+    # ⚠️ O custo é um salto de major, e ele é aceito por decisão: medido na
+    # instalação mais recente, `pnpm@latest` é a 12.x, contra a 10.33.2 com que o
+    # build foi validado, e o lockfile do projeto é `lockfileVersion: '9.0'`. Se
+    # `pnpm install --frozen-lockfile` recusar por causa da major, a falha aparece
+    # aqui, no módulo do OpenDesign, e é a primeira coisa a checar.
+    #
+    # O `--activate` é global, então isto mexe no pnpm default da máquina, não só
+    # no build. Rodar o módulo numa máquina com outro projeto em pnpm altera o
+    # pnpm daquele projeto — o preço de não fixar.
     if [ ! -x "$nb/pnpm" ]; then
         corepack enable pnpm >/dev/null 2>&1
-        corepack prepare pnpm@10.33.2 --activate >/dev/null 2>&1
+        corepack prepare pnpm@latest --activate >/dev/null 2>&1
     fi
-    [ -x "$nb/pnpm" ] || { echo -e "${YELLOW}pnpm nao ficou disponivel; pulei o OpenDesign.${NC}" >&2; return 1; }
+    local pnpm_ver
+    pnpm_ver="$(pnpm --version 2>/dev/null | head -1)"
+    [ -n "$pnpm_ver" ] || { echo -e "${YELLOW}pnpm nao ficou disponivel; pulei o OpenDesign.${NC}" >&2; return 1; }
+    echo -e "${BLUE}  pnpm em uso: $pnpm_ver${NC}"
 
     # O modo nativo compila de fonte e nao tem imagem para baixar, entao o repo
     # e clonado aqui. Antes este passo IMPRIMIA um placeholder e parava, o que
@@ -1597,8 +1679,13 @@ install_common_ai_clis() {
     fi
     export PATH="$HOME/.bun/bin:$npm_prefix_bin:$HOME/.local/bin:$PATH"
 
-    install_npm_global "@anthropic-ai/claude-code" "claude"
-    install_npm_global "@openai/codex" "codex"
+    # As três agent CLIs seguem a versão publicada mais recente, e não por
+    # uniformidade estética. A pergunta que `install_npm_global` faz é PRESENÇA do
+    # binário, e presença não é versão: uma máquina que rodou o módulo uma vez
+    # fica presa na primeira versão que caiu, para sempre, e nada no repositório
+    # avisa. `claude` e `codex` eram as duas que ainda usavam presença.
+    install_npm_global_latest "@anthropic-ai/claude-code" "claude"
+    install_npm_global_latest "@openai/codex" "codex"
     # DeepSeek Harness. O README o descreve como developer preview com
     # "COMPATIBILITY-BREAKING CHANGES" explícito, e a documentação oficial só
     # mostra `npx`. O `npm install -g` abaixo é o mesmo caminho que as outras
@@ -1883,7 +1970,7 @@ OPT_IN_STEPS="toolbx gui-access"
 
 usage() {
     cat <<EOF
-Uso: ./setup.sh [--profile=host|vm] [--only=modulo1,modulo2] [--skip=modulo1,modulo2]
+Uso: ./setup.sh [--profile=host|vm] [--only=modulo1,modulo2] [--skip=modulo1,modulo2] [--yes]
 
 Perfis:
   host   Workstation pessoal com GUI e hospedeiro de VMs. Padrão.
@@ -1895,7 +1982,13 @@ Perfis:
 Módulos:
   --only=modulo1,modulo2   Roda apenas os módulos listados, dentro do perfil.
   --skip=modulo1,modulo2  Roda o perfil inteiro, exceto os módulos listados.
-  -h, --help               Mostra esta ajuda.
+    --yes, -y               Responde sim a tudo, para rodar sem terminal.
+                            Usa a senha padrão do dashboard (e a diz), deixa a
+                            senha do OpenCode ser a aleatória do instalador, e
+                            instala o OpenDesign no modo NATIVO.
+                            A GitHub App fica inativa: a private key é um
+                            segredo que existe fora da máquina.
+                            Sem esta flag, um Enter não instala nada.
 
 Módulos de cada perfil:
   host: ${HOST_STEPS// /, }
@@ -1909,11 +2002,13 @@ EOF
 PROFILE="host"
 ONLY=""
 SKIP=""
+ASSUME_YES=0
 for arg in "$@"; do
     case "$arg" in
         --profile=*) PROFILE="${arg#*=}" ;;
         --only=*) ONLY="${arg#*=}" ;;
         --skip=*) SKIP="${arg#*=}" ;;
+        --yes|-y) ASSUME_YES=1 ;;
         -h|--help) usage; exit 0 ;;
         *)
             echo "Argumento desconhecido: $arg" >&2
@@ -2026,7 +2121,19 @@ should_run() {
 #
 # A escolha é recusar aqui, com mensagem, e não "seguir com o default". Seguir
 # produziria um provisionamento parcial e silencioso, que é pior que não rodar.
-if [ ! -t 0 ]; then
+#
+# `--yes` é a exceção, e a exceção é explícita: com a flag, a recusa não acontece
+# porque não há pergunta a fazer. O que muda com a flag, e o que NÃO muda:
+#
+#   --yes responde sim a toda confirmação, usa a senha padrão do dashboard (e a
+#   diz), deixa a senha do OpenCode ser a aleatória do instalador, e instala o
+#   OpenDesign no modo nativo — a única decisão que ele toma sozinho e que não é
+#   um "sim". A GitHub App fica INATIVA, porque a private key é um segredo que
+#   existe fora da máquina e um App ID inventado marcaria o módulo como
+#   configurado sem funcionar.
+#
+# O default continua sendo NÃO. Sem a flag, um Enter não instala nada.
+if [ ! -t 0 ] && [ "${ASSUME_YES:-0}" != "1" ]; then
     echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
     echo "" >&2
     echo "stdin não é um terminal (pipe, redirecionamento ou CI). Nessas condições o" >&2
@@ -2034,6 +2141,7 @@ if [ ! -t 0 ]; then
     echo "a recusa é aqui." >&2
     echo "" >&2
     echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
+    echo "Para rodar sem interação (pipe ou CI): './setup.sh --yes'." >&2
     echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
     exit 1
 fi
@@ -2063,6 +2171,19 @@ GH_APP_KEY_FILE="$GH_APP_DIR/private-key.pem"
 GH_APP_ID_FILE="$GH_APP_DIR/app-id"
 
 prompt_github_app() {
+    # `--yes` NÃO pode preencher isto, e o motivo não é limitação do script: a
+    # private key é um segredo que existe fora da máquina. Inventar um App ID
+    # deixaria o módulo "configurado" sem nada funcionando, que é o pior desfecho
+    # possível — o `gh` voltaria a pedir login e o relatório diria que está tudo
+    # certo. Então o módulo fica INATIVO, e isso é dito.
+    if [ "${ASSUME_YES:-0}" = "1" ] && [ ! -s "$GH_APP_KEY_FILE" ]; then
+        echo -e "${YELLOW}GitHub App pulada (--yes).${NC}"
+        echo -e "  A private key é um segredo que existe fora da máquina, e um App ID"
+        echo -e "  inventado deixaria o módulo marcado como configurado sem funcionar."
+        echo -e "  O módulo fica inativo e o \`gh\` volta a pedir login. Para ativar:"
+        echo -e "    ./setup.sh --profile=vm --only=gh-app"
+        return 1
+    fi
     echo -e "${BLUE}GitHub App — identidade da máquina no GitHub${NC}"
     echo -e "  É o que permite abrir PR, escrever issue e comentar sem token de conta."
     echo -e "  A App precisa estar instalada nos repositórios que a VM vai tocar."
@@ -2073,13 +2194,13 @@ prompt_github_app() {
     local app_id="" key="" linha
     if [ -s "$GH_APP_KEY_FILE" ] && [ -s "$GH_APP_ID_FILE" ]; then
         echo -e "  Já há uma App configurada. Em branco mantém; qualquer outro valor substitui."
-        read -r -p "  App ID: " app_id
+        pergunta "  App ID: " app_id
         if [ -z "$app_id" ]; then
             echo -e "${GREEN}  Mantida a App já configurada em $GH_APP_DIR.${NC}"
             return 0
         fi
     else
-        read -r -p "  App ID [${DEFAULT_GH_APP_ID}]: " app_id
+        pergunta "  App ID [${DEFAULT_GH_APP_ID}]: " app_id
         app_id="${app_id:-$DEFAULT_GH_APP_ID}"
         if [ -z "$app_id" ]; then
             echo -e "${YELLOW}  Sem App ID: o módulo gh-app fica inativo e o gh exigirá login.${NC}"
@@ -2245,7 +2366,7 @@ CONFIRM_HOSTNAME=""
 if should_run "hostname"; then
     CURRENT_HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
     echo "Hostname atual: $CURRENT_HOSTNAME"
-    read -rp "Novo hostname (deixe em branco para manter '$CURRENT_HOSTNAME'): " NEW_HOSTNAME
+    pergunta "Novo hostname (deixe em branco para manter '$CURRENT_HOSTNAME'): " NEW_HOSTNAME
     if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$CURRENT_HOSTNAME" ]; then
         confirm "Alterar o hostname para '$NEW_HOSTNAME'?" && CONFIRM_HOSTNAME=1
     else
@@ -2304,16 +2425,25 @@ OPENCODE_PASSWORD_SET=0
 if [ "$CONFIRM_AI_CLIS" = "1" ]; then
     confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a que o instalador gerar)" && CONFIRM_OPENCODE_PASSWORD=1
     if [ "$CONFIRM_OPENCODE_PASSWORD" = "1" ]; then
-        echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
-        echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
-        if [ -f "$HOME/.config/opencode/service.json" ]; then
-            echo -e "  Em branco, mantém a senha atual de ~/.config/opencode/service.json."
+        if [ "${ASSUME_YES:-0}" = "1" ]; then
+            # `--yes` NÃO escolhe uma senha aqui de propósito. Forçar a senha
+            # padrão seria pior que não escolher: ela é o nome do serviço, e a
+            # senha do instalador é aleatória e fica no `service.json`, que é 600.
+            # Um segredo escolhido em silêncio é um segredo que ninguém muda.
+            echo -e "  ${GREEN}--yes: a senha do servidor fica a aleatória do instalador.${NC}"
+            echo -e "  Fica em ~/.config/opencode/service.json (600)."
         else
-            echo -e "  Em branco, aceita a senha aleatória que o instalador vai gerar."
+            echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
+            echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
+            if [ -f "$HOME/.config/opencode/service.json" ]; then
+                echo -e "  Em branco, mantém a senha atual de ~/.config/opencode/service.json."
+            else
+                echo -e "  Em branco, aceita a senha aleatória que o instalador vai gerar."
+            fi
+            read -r -s -p "  Senha nova (vazio = manter): " OPENCODE_PASSWORD
+            echo
+            OPENCODE_PASSWORD_SET=1
         fi
-        read -r -s -p "  Senha nova (vazio = manter): " OPENCODE_PASSWORD
-        echo
-        OPENCODE_PASSWORD_SET=1
     fi
 fi
 
@@ -2340,6 +2470,16 @@ if should_run "open-design" || should_run "open-design-container"; then
     echo -e "              precisa escutar no IP da tailnet, entao expoe a $OPENDESIGN_PORT em HTTP sem TLS"
     echo -e "    ${YELLOW}container${NC} so existe atras do serve, com TLS, e nenhuma CLI do host roda dentro"
     echo
+    if [ "${ASSUME_YES:-0}" = "1" ]; then
+        # `--yes` não tem como perguntar, e os dois modos têm consequências
+        # opostas — então ele escolhe o que é o modo canônico: `nativo`. Escolher
+        # `container` aqui seria instalar o modo alternativo, e ele exige um
+        # pacote que o perfil `vm` não instala. A escolha fica dita em voz alta
+        # porque é a única coisa que `--yes` decide sozinho e que não é um
+        # "sim".
+        OPENDESIGN_MODE="nativo"
+        echo -e "  ${GREEN}--yes: instalando o modo NATIVO.${NC}"
+    else
     while :; do
         if ! read -r -p "  Modo [nativo/container]: " OPENDESIGN_MODE; then
             # EOF, e nao resposta invalida. A distincao importa: com entrada
@@ -2358,9 +2498,14 @@ if should_run "open-design" || should_run "open-design-container"; then
         esac
     done
     read -r -s -p "  OD_API_TOKEN (vazio = gerar um): " OPENDESIGN_TOKEN
+    fi
     echo
     OPENDESIGN_TOKEN_SET=1
+    # Token vazio gera um, e é o que `--yes` faz: `openssl rand -hex 32` não tem
+    # nada a perguntar. O token só importa se o auth estiver ligado, e no modo
+    # nativo ele não está — o portão é o `tailscale serve`.
     [ -z "$OPENDESIGN_TOKEN" ] && OPENDESIGN_TOKEN="$(openssl rand -hex 32)"
+    echo -e "  token do daemon: gerado (não é usado no modo nativo; o portão é o serve)"
 fi
 
 HERMES_DASH_PASSWORD=""
@@ -2377,9 +2522,18 @@ if should_run "hermes-dashboard"; then
     echo -e "  ${YELLOW}ATENÇÃO: a senha provisoria do padrão e a mesma que o nome do serviço.${NC}"
     echo -e "  Ela é adivinhável por quem conheça a convenção, e o que ela protege é a"
     echo -e "  separação entre uma pessoa da tailnet e a sua sessão — não a máquina."
-    read -r -s -p "  Senha (vazio = a provisoria '$HERMES_DASH_USER'): " HERMES_DASH_PASSWORD
-    echo
-    [ -z "$HERMES_DASH_PASSWORD" ] && HERMES_DASH_PASSWORD="$HERMES_DASH_USER"
+    if [ "${ASSUME_YES:-0}" = "1" ]; then
+        # `--yes` assume a senha padrão, e DIZ qual é. Uma senha escolhida em
+        # silêncio é uma senha que ninguém vai saber depois; o que o script grava
+        # é o hash, e o texto claro só existe no arquivo 600 que ele gera.
+        HERMES_DASH_PASSWORD="$HERMES_DASH_USER"
+        echo -e "  ${GREEN}--yes: usando a senha padrão '$HERMES_DASH_USER'.${NC}"
+        echo -e "  ${YELLOW}Ela é a mesma que o nome do serviço. Troque depois.${NC}"
+    else
+        read -r -s -p "  Senha (vazio = a provisoria '$HERMES_DASH_USER'): " HERMES_DASH_PASSWORD
+        echo
+        [ -z "$HERMES_DASH_PASSWORD" ] && HERMES_DASH_PASSWORD="$HERMES_DASH_USER"
+    fi
     HERMES_DASH_PASSWORD_SET=1
 fi
 
@@ -2425,7 +2579,26 @@ fi
 # próximo comando sudo trava esperando senha de novo no meio do script sem
 # aviso. Isso já aconteceu numa execução real. Pedimos a senha uma vez aqui
 # e mantemos o cache "quente" em background até o script terminar.
-sudo -v
+  #
+  # ⚠️ `--yes` remove as perguntas DO SCRIPT, e não as do `sudo`. Medido: sem
+  # terminal, `sudo -v` falha com "um terminal é necessário para ler a senha", e a
+  # flag não muda isso. É uma limitação do `sudo`: ele lê a senha de um terminal,
+  # e um pipe não é um terminal.
+  #
+  # A saída é dizer o que fazer, em vez de deixar o erro cru do `sudo` no meio do
+  # log. O caminho simples é validar o sudo ANTES, num terminal — o timestamp é
+  # exatamente o que este script quer manter quente. As alternativas são
+  # `NOPASSWD` para o `dnf` da distro, ou um askpass.
+  if ! sudo -v 2>/dev/null; then
+      if [ "${ASSUME_YES:-0}" = "1" ]; then
+          echo -e "${YELLOW}Não consegui validar o sudo sem terminal.${NC}" >&2
+          echo -e "${YELLOW}  O --yes tira as perguntas do script, não as do sudo.${NC}" >&2
+          echo -e "${YELLOW}  Antes de rodar, valide o sudo num terminal: sudo -v${NC}" >&2
+          echo -e "${YELLOW}  (alternativas: NOPASSWD para o dnf, ou um askpass)${NC}" >&2
+          exit 1
+      fi
+      sudo -v
+  fi
 ( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
 SUDO_KEEPALIVE_PID=$!
 trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
