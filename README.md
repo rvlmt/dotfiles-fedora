@@ -687,11 +687,13 @@ curando a própria memória e criando skills depois de tarefas complexas. 60+
 ferramentas, cliente MCP, e 7 backends de execução de shell. MIT, repo
 `NousResearch/hermes-agent`.
 
-#### Rota A — `install.sh` (o que a doc oferece primeiro)
+#### Rota A — `install.sh`, a escolhida, e as quatro guardas que ela custou
+
+A doc oficial oferece esta rota primeiro, e é a que o módulo `hermes-cli` roda:
 
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh \
-  | bash -s -- --non-interactive --verbose
+  | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG"
 ```
 
 E o que ele **de fato** faz, lido no script: **não baixa binário do agente, não
@@ -701,26 +703,17 @@ verificado**, deixa o gerenciador do próprio projeto (`pm`, com `uv.lock`)
 resolver as dependências sobre um **Python 3.14 gerenciado**, e compila a
 fonte. Nenhuma chamada a `docker` ou `podman` no script inteiro.
 
-Quatro coisas que decidem contra ela num `setup.sh`:
+⚠️ **As quatro objeções a esta rota continuam sendo verdade, e as quatro viraram
+guardas no `setup.sh`.** Elas não sumiram por ignoradas — cada uma está escrita
+como comentário no ponto do código que a neutraliza, que é o jeito de não perder
+a medida:
 
-- ⚠️ **Bloqueia num harness com pseudo-TTY.** Os estágios `setup` e `gateway`
-  leem `/dev/tty` e só se pulam quando `/dev/tty` **não abre**. Qualquer
-  alocador de pty — `expect`, `script(1)`, `docker run -t`, alguns runners de CI
-  — faz a verificação passar e o instalador **travar para sempre** esperando o
-  assistente. O mesmo script funciona num CI e empaca noutro. Por isso
-  `--non-interactive` é obrigatório e não uma conveniência: o `setup.sh` roda sob
-  pty, e sem a flag ele não termina.
-- **Instalar não é configurar.** O install novo tem `model: ""` — um sentinela
-  explícito de "ainda não configurado" — e `LLM_MODEL` não é mais lido do `.env`.
-  É preciso `hermes config set model.provider` e `model.default`. Nenhuma flag do
-  instalador faz isso.
-- **Não é idempotente.** A segunda execução é um *update*: `git merge
-  --ff-only`, e quando não dá, `git reset --hard origin/main` — com uma ref de
-  resgate escrita antes, então nada se perde, mas seus commits saem da branch. E
-  `git stash` e as refs de backup **acumulam** a cada rodada suja.
-- **Escreve nos rc do shell.** Acrescenta uma linha de `PATH` em `~/.zshrc` (e
-  outros). Idempotente por guarda, mas o `zshrc` aqui é um symlink versionado, e
-  o detalhe merece verificação antes, não depois.
+| objeção | o que o módulo faz |
+|---|---|
+| **trava sob pty** — os estágios `setup` e `gateway` leem `/dev/tty` e só se pulam quando `/dev/tty` **não abre** | passa **`--non-interactive`**, obrigatório e não conveniência: o `setup.sh` roda sob pty, então `/dev/tty` abre e sem a flag o passo **não termina** |
+| **instalar não é configurar** — o install novo tem `model: ""`, sentinela explícita de "ainda não configurado", e `LLM_MODEL` não é mais lido do `.env` | nenhum instalador faz isso; o módulo avisa quando `~/.hermes/auth.json` está sem provider, e `hermes config set model.provider` / `model.default` é passo posterior |
+| **não é idempotente** — a segunda execução é um *update*: `git merge --ff-only`, e quando não dá, `git reset --hard origin/main` | o módulo **pula o instalador** quando `git describe --tags` já é a `HERMES_CLI_TAG`, então o ciclo de update nunca roda sozinho |
+| **escreve nos rc do shell** — acrescenta uma linha de `PATH` em `~/.zshrc` | medido: a guarda `append_shell_path` do instalador casa com a linha 11 do `zshrc` versionado deste repo, então **não escreve**. Sem isso, escreveria dentro do arquivo do repo |
 
 O que ela **não** sobrescreve, e isso é bem feito: `~/.hermes/.env` e
 `config.yaml` só são criados se ausentes, e o instalador **para** se o
@@ -730,8 +723,10 @@ O lado bom que existe: o instalador expõe um protocolo de estágios de verdade 
 `--manifest` imprime a lista em JSON com `needs_user_input`, `--stage NOME` roda
 um isolado, `--commit SHA` fixa a revisão (validada por ancestralidade antes do
 checkout). O cabeçalho do script diz que esse protocolo *"kept for Hermes-Setup"*,
-isto é, existe um driver externo que já o consome. **O caminho de automação
-pretendido é estágio a estágio, não o `curl | bash` de uma vez.**
+isto é, existe um driver externo que já o consome. Vale registrar que o módulo
+**não** usa esse protocolo: ele usa o `curl | bash` de uma vez, e é a
+`--non-interactive` que mantém isso terminando.
+
 
 #### Rota B — imagem oficial
 
@@ -1344,27 +1339,39 @@ não do pacote.
 estado de tracking de um modo que não casa com esse arranjo.
 
 
-#### A CLI do Hermes nativa na VM, e o que ela custou
+#### A CLI do Hermes é instalada pelo instalador que a doc prescreve
 
-O dashboard roda em container, mas a **CLI é nativa** — e essa distinção não é
-preferência, é consequência da libc. Instalada em `rc.9-v0.21.5`, a mesma versão
-`0.21.5` que a imagem carrega.
+O "Quick Install" do README upstream é **uma linha**:
 
 ```bash
-# 1. uv. O mise não conhece uv, então é o instalador oficial, sem sudo e sem
-#    tocar no shell rc — o PATH é gerenciado por este repo, e o instalador
-#    편집aria o rc por conta própria.
-curl -LsSf -o /tmp/uv-install.sh https://astral.sh/uv/install.sh
-UV_INSTALL_DIR="$HOME/.local/bin" INSTALLER_NO_MODIFY_PATH=1 sh /tmp/uv-install.sh
-
-# 2. a fonte, na tag que casa com a imagem
-git clone https://github.com/NousResearch/Hermes-Agent.git
-cd Hermes-Agent && git checkout rc.9-v0.21.5
-
-# 3. o install. Ele traz o PRÓPRIO uv, pinado por sha256 a partir de
-#    pm/lock.json — o uv do passo 1 é para o resto, não para este script.
-bash setup-hermes.sh --runtime-only
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
+
+E é essa linha que o módulo `hermes-cli` roda, com o pin de tag em cima:
+
+```bash
+curl -fsSL "$HERMES_INSTALL_URL" \
+  | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG"
+```
+
+⚠️ **Esta seção descrevia um caminho montado à mão, e estava errada em três
+pontos.** O texto antigo recipe `curl` do uv do astral + `git clone` +
+`setup-hermes.sh --runtime-only` + symlink, e dizia a tag **`rc.9-v0.21.5`** — que
+é a *mesma* `0.21.5` da `rc.14-v0.21.5` e está marcada como `abandoned-` pelo
+upstream. Quem seguisse o README instalava a tag abandonada.
+
+O caminho antigo perdia três garantias do instalador oficial:
+
+| | antes | oficial |
+|---|---|---|
+| **uv** | `astral.sh/uv/install.sh`, sem pin | artefato pinado do `pm/lock.json`, com **sha256 conferido** (`UV_PIN_VERSION="0.12.3"`) |
+| **árvore** | `~/Hermes-Agent`, symlink manual | `$HERMES_HOME/hermes-agent`, o padrão do instalador |
+| **log** | nenhum | `~/.hermes/logs/install.log` |
+| **PATH** | symlink manual para `~/Hermes-Agent/hermes` | publicado pela própria `source_completion` |
+
+A flag `--runtime-only` **existe** — medido no `setup-hermes.sh` do clone, linhas
+20, 24 e 179. Não era dedução; era o caminho certo com uma dependência fora do
+lugar.
 
 ⚠️ **A instalação falha sem `libatomic`, e o erro é de biblioteca, não de
 permissão.** O `pm` baixa um node pinado e **verifica rodando `node --version`**; o
@@ -1377,34 +1384,32 @@ error while loading shared libraries: libatomic.so.1: cannot open shared object 
 e o `pm` reporta `node: staged entry failed verification ... exited 127`. Nem o
 `setup-hermes.sh` nem o README mencionam a dependência. A ironia útil: a
 `libatomic.so.1` **existe dentro do container Alpine** e não existe no host — é o
-mesmo muro de libc do OpenDesign, no sentido inverso.
+mesmo muro de libc do OpenDesign, no sentido inverso. O `libX11.so.6` cai no
+mesmo grupo, e o script **não o verificava em lugar nenhum**.
+
+🛠️ **Agora os dois são instalados pelo módulo `base`**, junto com o resto:
 
 ```bash
-sudo dnf install -y libatomic     # libatomic.x86_64 em qualquer Fedora
+sudo dnf install -y --skip-unavailable libatomic libX11
 ```
 
-⚠️ **A CLI não é colocada no PATH por ninguém.** O `setup-hermes.sh` cria
-`~/.hermes/` com o estado (`SOUL.md`, `cron`, `hooks`, `pairing`, `cache`…) e
-**não** cria `~/.hermes/bin` — que fica ausente, e é um caminho que o launcher
-procura. O executável real é `~/Hermes-Agent/hermes`, um script Python. Sem um
-link, `hermes` não existe como comando:
+Antes eram dois `return 1` no meio do caminho, exigindo um `sudo` manual em dois
+lugares — e o `libX11` passava sem aviso nenhum.
 
-```bash
-ln -sfn "$HOME/Hermes-Agent/hermes" "$HOME/.local/bin/hermes"
+⚠️ **O instalador tentaria anexar uma linha de PATH no `~/.zshrc`, e aqui ele
+não vai.** O `append_shell_path` do `install.sh` tem guarda própria:
+
+```
+^[[:space:]]*([^#[:space:]].*)?PATH=.*\.local/bin
 ```
 
-`~/.local/bin` é onde este repo já põe `agy`, `cursor-agent`, `gh-app` e
-`bunx`, então é o lugar certo por convenção — e é também o diretório que o
-container do OpenDesign monta.
+e a linha 11 do `zshrc` versionado deste repo já casa com ela (medido, `grep -E`
+no arquivo real). O detalhe importa porque `~/.zshrc` aqui é **symlink para o
+arquivo do repositório** — sem essa guarda, o instalador escreveria dentro do
+arquivo versionado, que é a mesma armadilha do `--no-modify-path` do opencode.
+Não há `--no-modify-path` no instalador do Hermes; a proteção vem de o zshrc
+deste repo já satisfazer a guarda.
 
-**Dois homes do Hermes, e eles não compartilham estado.** O nativo usa
-`~/.hermes/`; o container usa `~/Developer/.hermes/` (o `HERMES_HOME=/opt/data`).
-Nomes iguais, caminhos diferentes, e o segundo é do **subuid** — sem `sudo` não
-se nem faz `stat` dele. Configurar provider num não aparece no outro.
-
-**E sem provider a CLI é inerte.** Estado medido em `auth.json`: `providers: []`,
-e o `credential_pool` com `nous` em **0** entradas. A CLI conecta, autentica e não
-gera nada. Um `hermes model` resolve, e é a única coisa que falta.
 
 #### O container não roda NENHUMA CLI do host, por duas causas
 
@@ -1415,7 +1420,7 @@ reporta as duas com a mesma mensagem:
 |---|---|---|
 | `opencode` | ELF glibc | **libc**: Alpine é musl, sem `/lib64/ld-linux-x86-64.so.2` |
 | `agy` | ELF glibc | **libc**, idem |
-| `hermes` | symlink para `~/Hermes-Agent/hermes` | **caminho**: o container monta `~/.local/bin`, mas não `~/Hermes-Agent` |
+| `hermes` | launcher em `~/.local/bin` | **caminho**: o container monta `~/.local/bin`, mas não `~/.hermes` |
 
 E o diagnóstico do app é impreciso nos dois casos: ele diz *"foi encontrado mas não
 pode ser iniciado — seu wrapper ou shim aponta para um caminho ausente"*, o que é
