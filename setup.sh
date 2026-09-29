@@ -371,9 +371,25 @@ ensure_host_node() {
     [ -n "$node_ver" ] || node_ver="$MISE_NODE_SPEC"
 
     "$mise_bin_path" install "node@$MISE_NODE_SPEC" "devcontainer-cli@$dc_ver"
-    # `use -g` sem `--pin`: o pin gravaria a versão RESOLVIDA num config local, e
-    # é exatamente o número fixo que esta decisão remove. O `--pin` é o que fazia
-    # a máquina ficar presa na primeira versão resolvida.
+    # `use -g` sem `--pin`. O motivo, medido numa VM limpa, é mais específico do
+    # que se supunha: o que decide o que fica gravado NÃO é o `--pin`, é a forma
+    # do argumento.
+    #
+    # Medido, com o `~/.config/mise/config.toml` resultante:
+    #
+    #     [tools]
+    #     devcontainer-cli = "0.89.0"
+    #     node = "lts"
+    #
+    # Ou seja: um ALIAS (`lts`) é gravado como alias, e um NÚMERO explícito é
+    # gravado como número. O `--pin` não é o que transforma um em outro. Passar
+    # `node@lts` é o que preserva o alias, e é por isso que a máquina continua
+    # acompanhando: cada execução re-resolve o `lts` e reescreve a linha.
+    #
+    # O `install` acima resolve e instala `24.21.0`, e por isso o aviso dele —
+    # "installed but not activated — they are not in any config file" — é
+    # ESPERADO: `install` não ativa, `use` ativa. As duas chamadas são uma função
+    # só, e trocar a ordem deixaria o runtime instalado e não ativado.
     "$mise_bin_path" use -g "node@$MISE_NODE_SPEC" "devcontainer-cli@$dc_ver"
     prepend_mise_shims
     echo -e "${GREEN}✓ Runtime do host: node@$node_ver (lts), devcontainer-cli@$dc_ver${NC}"
