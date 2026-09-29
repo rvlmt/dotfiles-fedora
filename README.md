@@ -1010,7 +1010,7 @@ justamente o que o `Dockerfile` faz:
 `~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
 explicitamente antes de qualquer build.
 
-#### O Hermes ficou só nativo, e o que isso custou
+#### O dashboard do Hermes é NATIVO, e a UI não custa container
 
 O dashboard do Hermes — o container em `127.0.0.1:9119`, publicado em `:8445` —
 **foi removido por decisão de projeto**. A máquina fica com a CLI nativa
