@@ -119,12 +119,15 @@ HERMES_SERVE_PORT="8445"
 HERMES_DASH_USER="hermes"
 HERMES_PW_FILE="$HOME/.config/hermes/dashboard-password"
 HERMES_CLI_DIR="$HOME/Hermes-Agent"
-# A tag que casa com a imagem do container. Medido: a imagem carrega a 0.21.5, e
-# a `version` do pyproject NAO serve para comparar — na fonte ela e "0.0.0" e o
-# numero real vem do nome da tag. Instalar o HEAD daria um Hermes diferente do que
-# o dashboard está servindo, e as duas coisas divergindo em silêncio é a pior
-# forma de divergir.
-HERMES_CLI_TAG="rc.9-v0.21.5"
+# A `version` do pyproject NAO serve para comparar — na fonte ela e "0.0.0" e o
+# numero real vem do NOME da tag. E o nome da tag carrega o status no prefixo:
+# `abandoned-rc.9-v0.21.5` e a mesma 0.21.5 da `rc.14-v0.21.5`, marcada como
+# abandonada pelo upstream. Instalei a `rc.9` primeiro por ter lido a tag da imagem
+# do container, sem olhar o prefixo — e ela estava abandonada.
+#
+# Antes de fixar uma tag, leia o NOME INTEIRO: `git tag | grep <versao>` mostra o
+# prefixo `abandoned-` na propria linha.
+HERMES_CLI_TAG="rc.14-v0.21.5"
 # O nome que o `tailscale serve` usa e o DNSName do no, e ele NAO e o hostname da
 # maquina: no nó medido, `hostname` da `fedora-vm` e o DNSName termina em
 # `.sawfish-banjo.ts.net`. Montar a URL com o hostname produz um public_url que o
@@ -511,161 +514,23 @@ except Exception: print('?')" 2>/dev/null)"
     return 0
 }
 
-# Declara o container do dashboard do Hermes. Sem sudo: o que precisa de
-# privilégio na montagem é o ROLLBACK, e mesmo lá o caminho é o container.
-setup_hermes_dashboard() {
-    if ! command -v podman &> /dev/null; then
-        echo -e "${YELLOW}Podman ausente; pulei o Hermes.${NC}" >&2
-        return 1
-    fi
-    if ! podman image exists "$HERMES_IMAGE" 2>/dev/null; then
-        echo -e "${BLUE}Baixando a imagem do Hermes (2,8 GB, só na primeira vez)…${NC}"
-        if ! podman pull "$HERMES_IMAGE"; then
-            echo -e "${YELLOW}Não consegui baixar a imagem do Hermes.${NC}" >&2
-            return 1
-        fi
-    fi
-
-    # O estado do agente (config.yaml, auth.json, sessões) é deste diretório. Ele
-    # precisa ser do SUBUID dentro do bind mount, porque o hermes roda como uid
-    # 10000 na imagem — e é isso que faz o dono no host virar um número como
-    # 534287, com o usuário comum sem conseguir nem fazer stat. O custo é
-    # deliberado e está documentado: o diretório protege o estado, e o que
-    # protege a sessão é a senha do dashboard, não o dono do arquivo.
-    if [ ! -d "$HERMES_HOME_DIR" ]; then
-        mkdir -p "$HERMES_HOME_DIR" || {
-            echo -e "${YELLOW}Não criei $HERMES_HOME_DIR; pulei o Hermes.${NC}" >&2
-            return 1
-        }
-    fi
-    if ! podman unshare chown 10000:10000 "$HERMES_HOME_DIR" 2>/dev/null; then
-        echo -e "${YELLOW}Não consegui ajustar o dono de $HERMES_HOME_DIR para o subuid.${NC}" >&2
-    fi
-
-    # O hash é gerado pelo código do próprio Hermes, num container descartável da
-    # MESMA imagem — a versão do scrypt tem que ser a que o servidor vai usar para
-    # conferir, e computar fora seria uma chance de divergir em silêncio.
-    # A CLI nativa: o setup-hermes.sh cria ~/.hermes/ com o estado mas NAO cria
-    # ~/.hermes/bin, e sem um link em ~/.local/bin a CLI nao existe como comando.
-    # O link precisa ser recreated em cada run porque o destino e um clone.
-    if [ -x "$HOME/Hermes-Agent/hermes" ]; then
-        ln -sfn "$HOME/Hermes-Agent/hermes" "$HOME/.local/bin/hermes"
-    fi
-
-    local pw="${HERMES_DASH_PASSWORD:-$HERMES_DASH_USER}"
-    local hash
-    hash="$(podman run --rm --entrypoint /opt/hermes/.venv/bin/python "$HERMES_IMAGE" -c \
-        "import sys; sys.path.insert(0,'/opt/hermes')
-from plugins.dashboard_auth.basic import hash_password
-print(hash_password($pw))" 2>/dev/null | tail -1)"
-    unset pw
-    case "$hash" in
-        scrypt\$*) : ;;
-        *)
-            echo -e "${YELLOW}Não consegui gerar o hash scrypt; pulei o Hermes.${NC}" >&2
-            return 1
-            ;;
-    esac
-
-    podman rm -f "$HERMES_CONTAINER" >/dev/null 2>&1 || true
-    # `:Z` é obrigatório no bind mount. Sem ele o SELinux barra /opt/data, o
-    # setup inicial sai com 1, e o container morre com exit 2 e nenhuma mensagem
-    # útil no FIM do log — a causa está no começo.
-    #
-    # `-p 127.0.0.1:9119:9119` mantém a LAN de fora, e `--host 0.0.0.0` dentro
-    # do container é o que engata o portão de auth: o dashboard só exige login
-    # quando escuta fora do loopback.
-    if ! podman run -d --name "$HERMES_CONTAINER" \
-        -v "$HERMES_HOME_DIR:/opt/data:Z" \
-        -p "${HERMES_DASH_HOST}:${HERMES_DASH_PORT}:${HERMES_DASH_PORT}" \
-        -e HERMES_DASHBOARD_PUBLIC_URL="$HERMES_PUBLIC_URL" \
-        -e HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$HERMES_DASH_USER" \
-        -e HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="$hash" \
-        "$HERMES_IMAGE" dashboard --host 0.0.0.0 --no-open >/dev/null; then
-        echo -e "${YELLOW}Não consegui subir o container do Hermes.${NC}" >&2
-        return 1
-    fi
-    unset HERMES_DASH_PASSWORD
-
-    local i
-    for i in $(seq 1 30); do
-        if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-                "http://${HERMES_DASH_HOST}:${HERMES_DASH_PORT}/" 2>/dev/null)" != "000" ]; then
-            break
-        fi
-        sleep 10
-    done
-
-    # Verificar por ESTADO, e o estado que interessa é a quantidade de provedores
-    # na página de login. Com o registro do Portal presente na .env a página
-    # renderiza DOIS botões — o de senha e o "Sign in with Nous Research" — e o
-    # segundo leva ao fluxo OAuth, que falha com redirect_uri_mismatch. Um botão
-    # só é a prova de que o portal ficou de fora.
-    local page providers
-    page="$(curl -s --max-time 10 "http://${HERMES_DASH_HOST}:${HERMES_DASH_PORT}/login" 2>/dev/null)"
-    providers="$(printf '%s' "$page" | grep -c 'provider=nous' || true)"
-    if [ "${providers:-0}" -gt 0 ]; then
-        echo -e "${YELLOW}A página ainda oferece o login do Nous Portal ($providers link(s)).${NC}" >&2
-        echo -e "${YELLOW}  Isso é a variável HERMES_DASHBOARD_OAUTH_CLIENT_ID, que a UI do${NC}" >&2
-        echo -e "${YELLOW}  Hermes mostra como não reconhecida. Remova por ela, sem sudo:${NC}" >&2
-        echo -e "${YELLOW}    abra o dashboard, procure a variável e apague.${NC}" >&2
-    fi
-
-    mkdir -p "$(dirname "$HERMES_PW_FILE")" && chmod 700 "$(dirname "$HERMES_PW_FILE")"
-    ( umask 077; cat > "$HERMES_PW_FILE" <<PWEOF
-Dashboard do Hermes — credencial
-================================
-
-  usuario  $HERMES_DASH_USER
-
-O container recebe o HASH scrypt desta senha, nunca o texto puro. Para trocar,
-regere o hash e recrie o container:
-
-  podman run --rm --entrypoint /opt/hermes/.venv/bin/python $HERMES_IMAGE -c \
-    "import sys; sys.path.insert(0,'/opt/hermes')
-from plugins.dashboard_auth.basic import hash_password
-print(hash_password('SENHA_NOVA'))"
-PWEOF
-    )
-    chmod 600 "$HERMES_PW_FILE"
-
-    echo -e "${GREEN}✓ Hermes no ar em ${HERMES_DASH_HOST}:${HERMES_DASH_PORT} (autenticacao por senha).${NC}"
-    echo -e "${GREEN}  Credencial em $HERMES_PW_FILE (600) — usuario: $HERMES_DASH_USER${NC}"
-    return 0
-}
-
-# Publica o dashboard na tailnet, em porta própria. A verificação é por PORTA, e
-# não pela lista de publicações: o `tailscale serve` guarda várias publicações ao
-# mesmo tempo (8443, 8444, 8445), e um guard que recusa por "já existe algo
-# publicado" derrubaria as que já funcionam.
-setup_hermes_serve() {
-    local target="${HERMES_DASH_HOST}:${HERMES_DASH_PORT}"
-    command -v tailscale &> /dev/null || {
-        echo -e "${YELLOW}Tailscale ausente; pulei a publicação do Hermes.${NC}" >&2
-        return 1
-    }
-    tailscale status >/dev/null 2>&1 || {
-        echo -e "${YELLOW}Tailscale não conectado; pulei a publicação do Hermes.${NC}" >&2
-        return 1
-    }
-    local current
-    current="$(tailscale serve status 2>/dev/null || true)"
-    if printf '%s' "$current" | grep -qF -- "$target"; then
-        echo -e "${GREEN}✓ Hermes já publicado na tailnet (:$HERMES_SERVE_PORT → $target).${NC}"
-        return 0
-    fi
-    if printf '%s' "$current" | grep -q -- ":$HERMES_SERVE_PORT"; then
-        echo -e "${YELLOW}A porta $HERMES_SERVE_PORT já publica outro alvo; não sobrescrevi.${NC}" >&2
-        return 1
-    fi
-    if sudo tailscale serve --bg --https="$HERMES_SERVE_PORT" "http://$target"; then
-        echo -e "${GREEN}✓ Hermes publicado na tailnet (:$HERMES_SERVE_PORT → $target).${NC}"
-    else
-        echo -e "${YELLOW}Não consegui publicar via tailscale serve.${NC}" >&2
-        echo -e "${YELLOW}  Publicar manualmente: sudo tailscale serve --bg --https=$HERMES_SERVE_PORT http://$target${NC}" >&2
-        return 1
-    fi
-}
+# O dashboard do Hermes — o container em :9119, publicado em :8445 — foi
+# REMOVIDO por decisão de projeto: a máquina fica só com a CLI nativa
+# (`setup_hermes_cli`). O que motivou, medido:
+#
+#   A CLI nativa é a única que roda. O binário `opencode` e o `agy` que o
+#   OpenDesign usa como agentes são ELF glibc, e o container do OpenDesign é
+#   Alpine; dentro dele nenhuma CLI do host executa. A dashboard em container não
+#   compartilhava estado com a CLI de qualquer jeito — `~/Developer/.hermes` contra
+#   `~/.hermes` — então configurar provider num não aparecia no outro.
+#
+# O estado do dashboard foi PRESERVADO, não apagado: `~/Developer/.hermes` com
+# 7138 arquivos e 919 MB, mais uma cópia em `~/Developer/.hermes-backup-*`. Os dois
+# são do subuid e só se leem de dentro de um container, que é o mesmo custo de
+# antes — e vale saber que um backup nesse regime só se restaura por container.
+#
+# Para trazer de volta, o que faltaria reverter: o `podman run` com o digest
+# pinado, o `:Z` no bind, e `sudo tailscale serve --bg --https=8445`.
 
 setup_opencode_service() {
     # A v2 do opencode NÃO cria unit nenhuma. `opencode service start` executa
@@ -1329,7 +1194,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex hermes-cli hermes zshrc"
+ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex hermes-cli zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -1342,7 +1207,7 @@ ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-harden
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
 HOST_STEPS="base hostname ssh device-keys git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
-VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening podman ai-clis hermes-cli hermes zshrc"
+VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening podman ai-clis hermes-cli zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
 OPT_IN_STEPS="toolbx gui-access"
