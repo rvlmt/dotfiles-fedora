@@ -191,47 +191,67 @@ A App em si **não** é removida: ela vive no GitHub, e o que este rollback desf
 _Developer settings → GitHub Apps_, e é decisão sua, porque afeta outras máquinas
 se a App estiver instalada em mais de uma.
 
-### O OpenDesign não é um módulo do script (ainda)
+### O OpenDesign está em modo NATIVO — desfazer é desfazer a unit
 
-Ele não tem seção própria aqui porque **não existe passo que o instale** — foi
-montado à mão nesta VM e o procedimento está no `README.md`, seção "OpenDesign via
-container". O que segue desfaz **aquele montaje**, não um módulo do script.
+O que está instalado nesta VM é o modo **nativo**: a unit `open-design.service`
+com a raiz em `~/Developer/open-design-native-root/`. Medido no provisionamento:
+**0 containers, 0 imagens, 0 volumes** — o modo container nunca chegou a ser o
+estado instalado, ele é o módulo alternativo `open-design-container` que o
+`setup.sh` ainda oferece.
+
+Por isso o rollback do container que ficava aqui era, na prática, a sequência de
+limpeza de um estado inexistente. O que desfaz o que existe:
+
+```bash
+# 1. guardar o token ANTES do passo 3 — a .env e a unica copia dele
+cp ~/Developer/open-design-native-root/.env ~/.od.env.keep
+chmod 600 ~/.od.env.keep
+
+# 2. derrubar e desabilitar
+systemctl --user disable --now open-design.service
+
+# 3. remover a raiz do build
+rm -rf ~/Developer/open-design-native-root
+```
+
+O passo 1 importa pelo mesmo motivo de sempre: a `.env` guarda o `OD_API_TOKEN`,
+e o token **não tem rotação pela doc** — o caminho é gerar outro com
+`openssl rand -hex 32` e reiniciar. Perdido, o daemon seguinte gera outro e o que
+estava salvo deixa de valer.
+
+⚠️ **A raiz do build é estado, mas é estado regenerável.** Ela é `pnpm install` +
+`pnpm build` do repo `~/Developer/open-design`; apagar não perde trabalho, só
+tempo de reconstrução. O que **não** é regenerável é o token do passo 1.
+
+**A pasta `open-design-native-root` é um nome provisório.** Ela existe para não
+colidir com o clone do repo em `~/Developer/open-design`, que a doc e os exemplos
+do próprio OpenDesign esperam. A intenção registrada é que a **próxima**
+instalação use só `~/Developer/open-design` e não crie a raiz paralela — mas
+mudar agora exigiria mover a raiz e reapontar a unit, e a troca é reversível
+com o caminho de volta em cima. **Não foi feito nesta VM**, e o nome atual
+funciona; o que fica é o registro, para a próxima.
+
+### O modo CONTAINER, para quem tiver instalado por ele
+
+Válido só se a unit `open-design-container.service` existir. Ela é o outro modo
+do mesmo módulo, não um serviço extra.
+
+```bash
+podman ps -a --filter name=open-design --format 'table {{.Names}}\t{{.Status}}'
+podman volume ls | grep open-design
+```
 
 ⚠️ **Parar antes de apagar o volume.** Ele é o estado do daemon — projetos,
 skills, histórico. `podman volume rm` é o passo que perde trabalho, e ele é
 independente de parar o container.
 
 ```bash
-# 1. conferir o que existe
-podman ps -a --filter name=open-design --format 'table {{.Names}}\t{{.Status}}'
-podman volume ls | grep open-design
-
-# 2. guardar o token ANTES de qualquer coisa, se ainda não foi guardado em outro lugar
-#    (está em ~/open-design/deploy/.env, a 600 — e o .env só vai embora com o repo)
-cp ~/open-design/deploy/.env ~/.od.env.keep
-chmod 600 ~/.od.env.keep
-
-# 3. derrubar o serviço
-cd ~/open-design/deploy && podman compose down
-
-# 4. o estado, só se for isso que se quer
-podman volume rm open-design_open_design_data
-
-# 5. o repo e o provider de compose
+systemctl --user disable --now open-design-container.service
 rm -rf ~/open-design
-sudo dnf remove -y podman-compose      # se não houver outro uso para ele
-
-# 6. a imagem, se o disco importa — 1,28 GB
-podman rmi ghcr.io/nexu-io/od:latest
+podman volume rm open-design_open_design_data    # o passo que perde trabalho
+podman rmi ghcr.io/nexu-io/od:latest             # 1,28 GB, se o disco importa
 ```
 
-**O `.env` guarda o `OD_API_TOKEN` e é a única cópia dele.** Depois do passo 3 o
-arquivo continua lá, mas se o passo 5 remover o repo, o token vai com ele — e o
-daemon seguinte gera outro, invalidando o que já estava salvo. Por isso o passo 2
-existe, e é o único que importa.
-
-O token **não tem rotação pela doc**: o caminho é gerar outro com
-`openssl rand -hex 32` e reiniciar.
 
 ## `tailscale` — desconectar ou remover
 
