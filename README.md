@@ -1075,10 +1075,62 @@ O layout que funciona é `apps/daemon/` e `apps/web/out`.
 `node::OOMErrorHandler`. Duas alavancas, porque o Next cria um worker por CPU e
 cada um tem heap próprio.
 
-**Um por máquina.** Os dois disputam a mesma porta interna, e deixar isso acontecer
-não dá erro visível: o segundo sobe, o primeiro fica com o processo no ar mas sem
-escutar, e a publicação continua respondendo pelo que ficou. O script recusa, com
-a mensagem dizendo qual remover.
+#### O adaptador do OpenCode fala com a 1.18.18, e a máquina tem a 2.0.18
+
+O modal de "associar CLI" chega ao daemon, passa a rota de escrita — e quebra **depois**,
+no CLI. Não é PATH, não é mount, não é libc, e não é o carve-out: é **contrato de
+versão**. E o contrato está escrito, em `docs/agent-adapters.md` do próprio projeto.
+
+**§5.6 diz como o agente roda**, e nenhuma das flags que o modal mandou aparece lá:
+
+```
+opencode run --format json     # prompt no stdin
+-s <session-id>                # turnos seguintes, sessão nativa
+--dangerously-skip-permissions # só se o `run --help` anunciar
+```
+
+O `2.0.18` cumpre os três: aceita `--format json`, aceita `-s`, e **não** anuncia
+`--dangerously-skip-permissions` — e a doc cobre esse caso ("older builds keep the
+compatible argv without it"). Prova funcional:
+
+| invocação | resultado |
+|---|---|
+| `opencode run --format json` | `{"type":"step_start",…,"sessionID":"ses_f129…"}` |
+| `opencode run --dir /tmp --pure` | recusa as flags e despeja o usage |
+
+**O fluxo do agente funciona no 2.0.18.** O que quebra é outra coisa, e o próprio
+daemon diz qual: `dist/runtimes/opencode-child-evidence.js`, o **adaptador de
+evidência de sessão filha**. O comentário dele explica as duas flags:
+
+> *`--pure` keeps a user-installed OpenCode plugin from executing inside the
+> evidence path, and `execAgentFile` supplies a neutral working directory*
+
+E no topo do arquivo, a versão que ele declara:
+
+```js
+export const OPENCODE_CHILD_EVIDENCE_CLI_VERSION = '1.18.18'
+```
+
+**A máquina tem a `2.0.18`.** Não é flag renomeada: é major atravessado, e o
+adaptador nem tem como avisar, porque o número está num `const` que nada compara
+contra o binário instalado. A segunda superfície quebrada confirma: o adaptador lê
+a transcript com `opencode export <id> --sanitize`, e no `2.0.18` o `export`
+existe mas **não tem `--sanitize`**.
+
+⚠️ **O `stdout` que o modal mostrava não era um segundo erro.** Era o **usage** do
+opencode depois de recusar as flags — daí o `level (choices: all, trace, debug, …)`
+e o `--print-logs`. Ler aquilo como uma segunda falha é ler a mensagem de_usage do
+erro anterior.
+
+**As três saídas, e o que cada uma custa:**
+
+| | o que |
+|---|---|
+| instalar a `1.18.18` do opencode | a evidência volta; a UI e os 7 agentes ficam, e o `setup_opencode_service` passa a fixar uma versão antiga sem pin declarado |
+| o container | o gateway do podman conta como loopback **dentro** dele, então a evidência funciona — e a CLI tem de ser musl, o que o próprio `deploy/.env.example` diz que a aplicação não faz |
+| aceitar que a evidência não roda | o agente roda, a verificação de sessão filha não; e nada no UI avisa que ela é o que falta |
+
+
 
 
 
