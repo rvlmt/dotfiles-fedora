@@ -200,6 +200,12 @@ OPENDESIGN_MODE=""                 # native | container, decidido na pergunta
 OPENDESIGN_PORT="7456"
 OPENDESIGN_IMAGE="ghcr.io/nexu-io/od@sha256:587a992857d0f8b71011e4bc55c5851e33ef9fc4c169fc17e6447700ac428f22"
 OPENDESIGN_SRC="$HOME/Developer/open-design"
+# REGISTRO, nao um bug: `-native-root` e um nome PROVISORIO, criado para nao
+# colidir com o clone em OPENDESIGN_SRC — que e o caminho que a doc e os exemplos
+# do proprio OpenDesign esperam. A intencao e que a proxima instalacao use SO
+# ~/Developer/open-design e nao crie a raiz paralela. Mudar agora exigiria mover a
+# raiz e reapontar a unit, e o nome atual funciona, entao fica para a proxima.
+# Ver ROLLBACK.md, secao "a pasta open-design-native-root e um nome provisorio".
 OPENDESIGN_ROOT="$HOME/Developer/open-design-native-root"
 OPENDESIGN_SERVE_PORT="8444"
 OPENDESIGN_DEPLOY_DIR="$OPENDESIGN_ROOT/apps/daemon"

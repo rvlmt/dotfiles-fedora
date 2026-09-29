@@ -1010,6 +1010,32 @@ justamente o que o `Dockerfile` faz:
 `~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
 explicitamente antes de qualquer build.
 
+#### A pasta `open-design-native-root` é um nome provisório, e isso é decisão
+
+O modo nativo constrói a raiz em `~/Developer/open-design-native-root/`, ao lado
+do clone em `~/Developer/open-design/`. O sufixo existe por uma razão só: **não
+colidir com o clone** — que é o caminho que a documentação e os exemplos do
+próprio OpenDesign esperam, e que um `git clone` insists em ocupar.
+
+A intenção registrada é que a **próxima** instalação use só
+`~/Developer/open-design/` e não crie a raiz paralela. **Não foi feito nesta
+máquina**: mudar exigiria mover a raiz construída e reapontar a unit, e o nome
+atual funciona — é reversível pelo caminho de volta, e o ganho é cosmeticidade de
+caminho.
+
+O que fica é o registro, em três lugares, para quem for o próximo a instalar:
+
+- no `setup.sh`, comentário em `OPENDESIGN_ROOT` logo acima da atribuição;
+- no `ROLLBACK.md`, seção *"a pasta `open-design-native-root` é um nome
+  provisório"*;
+- aqui.
+
+Uma consequência de manutenção: a unit
+`EnvironmentFile=~/Developer/open-design-native-root/.env` é o que amarra a unit
+à pasta, então trocar o caminho não é só editar uma variável — é mover a árvore
+e reapontar a unit, o que é o que torna a troca mais cara do que parece.
+
+
 #### O OpenDesign tem DOIS modos, e a pergunta é no bloco de inicial
 
 Não são dois ramos de uma coisa só: **não compartilham pré-requisito nenhum**, e
