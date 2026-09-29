@@ -1846,7 +1846,7 @@ link_zshrc() {
 
 # Módulos disponíveis, na ordem em que rodam. Esta lista é a união de tudo o
 # script sabe fazer; o que roda é decidido pelo perfil (ver PROFILE_STEPS).
-ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex hermes-cli open-design open-design-container zshrc"
+ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps ai-clis opencodex hermes-cli hermes-dashboard open-design open-design-container zshrc"
 
 # Módulos por camada. A regra é uma só: **um módulo mora no perfil da camada que
 # o executa.** Ver ARQUITETURA.md, "O plano dos perfis".
@@ -2348,7 +2348,12 @@ fi
 
 HERMES_DASH_PASSWORD=""
 HERMES_DASH_PASSWORD_SET=0
-if [ "${CONFIRM_HERMES:-0}" = "1" ]; then
+# A pergunta é condicionada ao PASSO, não a um `CONFIRM_HERMES` que nada
+# definia: medido, `CONFIRM_HERMES` era lido aqui e não tinha nenhuma atribuição
+# em todo o script, então `HERMES_DASH_PASSWORD` ficava vazio e a senha nunca era
+# perguntada. O padrão é o do `gh-app` mais abaixo — sem y/N, porque a pergunta É
+# a senha, e responder vazio tem o mesmo desfecho de responder não.
+if should_run "hermes-dashboard"; then
     echo -e "${BLUE}Senha do dashboard do Hermes${NC}"
     echo -e "  Ela substitui o login do Nous Portal: com a senha definida o dashboard"
     echo -e "  não registra nada no Portal, e o erro de redirect_uri_mismatch não ocorre."
@@ -2953,6 +2958,64 @@ if should_run "opencodex"; then
     else
         echo -e "${YELLOW}OpenCodex ignorado (proxy de provider de terceiros, opt-in).${NC}"
     fi
+fi
+
+# ==============================================================================
+# CLI do Hermes, dashboard e OpenDesign
+# ==============================================================================
+#
+# ⚠️ ESTES TRÊS BLOCOS FORAM ADICIONADOS DEPOIS. As funções `setup_hermes_cli`,
+# `setup_hermes_dashboard`, `setup_open_design` e `setup_open_design_container`
+# existiam, completas, e NÃO ERAM CHAMADAS DE LUGAR NENHUM. Medido: zero
+# chamadas fora da definição, e nenhum bloco `if should_run "hermes-…"` no fluxo
+# principal. O bloco de perguntas em 2319 perguntava o modo do OpenDesign e
+# guardava o token, e o script seguia para o fim sem instalar nada.
+#
+# O efeito era invisível numa máquina já montada — os três serviços foram
+# instalados à mão nesta VM, e a mão não aparece no log do script. Numa máquina
+# limpa o resultado era silencioso e errado: o script terminava com sucesso
+# tendo perguntado sobre o OpenDesign e não o having instalado.
+#
+# É o caso mais perigoso de divergência entre o que um script parece fazer e o
+# que ele faz, porque nenhum dos dois lados reclama.
+#
+# A ordem não é arbitrária. O OpenDesign detecta os agentes pelo PATH, e o
+# `hermes` é um deles (medido: 7 agentes, um deles `hermes`), então a CLI do
+# Hermes precisa estar ANTES do OpenDesign — senão o daemon lista seis em vez de
+# sete. E o dashboard usa a CLI, então vem logo depois dela.
+
+if should_run "hermes-cli"; then
+    echo -e "\n${BLUE}==> CLI do Hermes${NC}"
+    if ! setup_hermes_cli; then
+        echo -e "${YELLOW}CLI do Hermes não ficou pronta; o dashboard e o OpenDesign dependem dela.${NC}" >&2
+    fi
+fi
+
+if should_run "hermes-dashboard"; then
+    echo -e "\n${BLUE}==> Dashboard do Hermes${NC}"
+    if ! command -v hermes &> /dev/null; then
+        echo -e "${YELLOW}CLI do Hermes ausente; rode o módulo hermes-cli primeiro.${NC}" >&2
+    elif ! setup_hermes_dashboard; then
+        echo -e "${YELLOW}Dashboard do Hermes não subiu; a unit foi declarada mesmo assim.${NC}" >&2
+    fi
+fi
+
+# O modo vem da pergunta do bloco de inicialização. Sem resposta — EOF, ou o
+# operador pulou o passo com `--only` — não há o que despachar, e a resposta
+# correta é não instalar, que é o mesmo desfecho de responder "não".
+if should_run "open-design" || should_run "open-design-container"; then
+    echo -e "\n${BLUE}==> OpenDesign${NC}"
+    case "${OPENDESIGN_MODE:-}" in
+        nativo)
+            setup_open_design || echo -e "${YELLOW}OpenDesign nativo não completou; ver a saída acima.${NC}" >&2
+            ;;
+        container)
+            setup_open_design_container || echo -e "${YELLOW}OpenDesign em container não completou; ver a saída acima.${NC}" >&2
+            ;;
+        *)
+            echo -e "${YELLOW}OpenDesign: nenhum modo escolhido, não instalei.${NC}"
+            ;;
+    esac
 fi
 
 # ==============================================================================
