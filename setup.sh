@@ -3322,8 +3322,24 @@ if should_run "ai-clis"; then
     _falta=0
     while IFS='|' read -r _cli _dir; do
         [ -z "$_cli" ] && continue
-        _bin=$(command -v "$_cli" 2>/dev/null || echo "$HOME/.bun/bin/$_cli")
-        if [ ! -x "$_bin" ]; then
+        # ⚠️ O `command -v` sozinho produz um FALSO NEGATIVO aqui, e medido: o
+        # relatório dizia "opencode: binário ausente" no mesmo módulo que tinha
+        # acabado de instalar o opencode, de ligá-lo e de publicá-lo. O binário
+        # estava lá — `opencode v2.0.19` respondeu — mas `command -v` é falso
+        # porque `~/.opencode/bin` não está no PATH de uma sessão não interativa,
+        # e o único fallback era `~/.bun/bin`, onde o opencode nunca é instalado.
+        #
+        # A correção é perguntar aos DOIS lugares onde os instaladores deste
+        # script depositam as CLIs: o Bun (`~/.bun/bin`) e o instalador do
+        # opencode (`~/.opencode/bin`). Um relatório que afirma que algo falta
+        # quando existe é pior do than um que não afirma nada.
+        _bin=""
+        for _cand in "$(command -v "$_cli" 2>/dev/null)" \
+                     "$HOME/.bun/bin/$_cli" \
+                     "$HOME/.opencode/bin/$_cli"; do
+            [ -n "$_cand" ] && [ -x "$_cand" ] && { _bin="$_cand"; break; }
+        done
+        if [ -z "$_bin" ]; then
             printf '  %-14s %-22s %s\n' "$_cli" "binário ausente" "rode o módulo ai-clis"
             _falta=1
         elif [ -e "$HOME/$_dir" ]; then
@@ -3342,7 +3358,7 @@ CLI_LIST
     if [ "$_falta" = "1" ]; then
         echo -e "${YELLOW}  As CLIs acima sem config ou sem binário ainda não estão prontas para uso.${NC}"
     fi
-    unset _cli _dir _bin _falta
+    unset _cli _dir _bin _falta _cand
 fi
 
 # A mensagem final é por perfil porque o próximo passo mudou de destino: o devpod
