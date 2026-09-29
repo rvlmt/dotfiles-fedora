@@ -2644,6 +2644,11 @@ if should_run "base"; then
         curl wget btop tar openssl \
         dnf5-plugins \
         libatomic libX11
+    # ⚠️ "não vem no Fedora" era verdade para uma imagem e falsa para outra:
+    # medido numa Fedora 44 Workstation Edition recém-criada, as DUAS já vêm
+    # instaladas. A afirmação honesta é que depende da imagem — e é por isso que
+    # estão na lista do `base`, e não num passo opcional que se pode pular.
+    #
     # `libatomic` e `libX11` não são enfeite. O `pm` do Hermes — o provisionador
     # que o instalador oficial usa para trazer o uv pinado e o runtime — baixa
     # binários para a máquina-alvo, e os dois que ele baixava medidos nesta VM
@@ -2696,6 +2701,24 @@ fi
 # ==============================================================================
 if should_run "ssh"; then
     echo -e "\n${BLUE}==> SSH (Ed25519)${NC}"
+
+    # Este módulo é o do SERVIDOR, e não só o da chave de cliente. Medido numa VM
+    # Fedora recém-criada: o `sshd` não está no ar, a porta 22 dá "connection
+    # refused", e a única entrada é o console. Como o módulo `ssh` é o primeiro
+    # do perfil `vm` depois do `base`, é aqui que o serviço precisa subir — e
+    # subir cedo é o que permite ao `sshd-hardening` desligar a senha sem risco.
+    #
+    # O `sshd-hardening` também faz isto, e a duplicação é deliberada: ele roda
+    # depois e cobre o caso de alguém rodar `--only=sshd-hardening`. A segunda
+    # chamada cai no `is-active` e não faz nada.
+    if ! systemctl is-active sshd &> /dev/null; then
+        sudo systemctl enable --now sshd \
+            && echo -e "${GREEN}✓ sshd no ar e habilitado no boot.${NC}" \
+            || echo -e "${YELLOW}Não consegui subir o sshd.${NC}" >&2
+    else
+        echo -e "${YELLOW}sshd já está rodando.${NC}"
+    fi
+
     generate_ssh_key "$GIT_EMAIL"
 
     SSH_CONFIG="$HOME/.ssh/config"
@@ -2885,6 +2908,40 @@ fi
 # ==============================================================================
 if should_run "sshd-hardening"; then
     echo -e "\n${BLUE}==> Hardening do sshd${NC}"
+
+    # ⚠️ ESTE ERA O PRIMEIRO BLOQUEIO NUMA VM REALMENTE LIMPA, e ele é medido.
+    #
+    # Numa Fedora recém-criada o `sshd` NÃO está no ar: a porta 22 responde
+    # "connection refused" — não filtrada — e o `tailscale ping` funciona, ou
+    # seja, os pacotes chegam e a máquina recusa porque não há ouvinte. A única
+    # forma de entrar era o console, para um `systemctl enable --now sshd` à mão.
+    #
+    # A causa é que este script nunca sobe o serviço. O módulo `ssh` gera a chave e
+    # mexe no `~/.ssh/config`; o `sshd-hardening` escreve a config do servidor e
+    # fazia só um `reload` — que falha num serviço parado. O resultado era sshd
+    # configurado e nunca iniciado, sem caminho de entrada, e sem nenhuma mensagem
+    # reclamando.
+    #
+    # O `enable --now` vai ANTES do hardening, por dois motivos. O primeiro é
+    # óbvio: sem serviço no ar não há SSH. O segundo é o que o lockout evita: a
+    # linha seguinte desabilita `PasswordAuthentication`, e se o `enable` viesse
+    # depois, a janela entre os dois seria um serviço no ar com senha ligada —
+    # breve, mas existente. Subir primeiro garante que, no momento em que a senha
+    # é desligada, a chave já é o único caminho.
+    #
+    # `--now` e não `enable` sozinho: `enable` só marca para o próximo boot, e numa
+    # VM que acabou de provisionar isso não acontece até o próximo reinício.
+    if ! systemctl is-active sshd &> /dev/null; then
+        if sudo systemctl enable --now sshd; then
+            echo -e "${GREEN}✓ sshd no ar e habilitado no boot (não estava rodando).${NC}"
+        else
+            echo -e "${YELLOW}Não consegui subir o sshd; sem ele não há acesso por SSH.${NC}" >&2
+            echo -e "${YELLOW}  Tente no console: sudo systemctl enable --now sshd${NC}" >&2
+        fi
+    else
+        echo -e "${YELLOW}sshd já está rodando.${NC}"
+    fi
+
     SSHD_CONFIG="/etc/ssh/sshd_config.d/99-dotfiles-hardening.conf"
     if [ ! -f "$SSHD_CONFIG" ]; then
         # Desabilitar PasswordAuthentication sem ter nenhuma chave em
