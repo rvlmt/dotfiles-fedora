@@ -1075,7 +1075,44 @@ O layout que funciona é `apps/daemon/` e `apps/web/out`.
 `node::OOMErrorHandler`. Duas alavancas, porque o Next cria um worker por CPU e
 cada um tem heap próprio.
 
-#### O adaptador do OpenCode fala com a 1.18.18, e a máquina tem a 2.0.18
+#### `export` não sumiu: virou `session export` — e a correção é uma linha
+
+O que escrevi acima sobre `--sanitize` estar ausente **estava incompleto**, e a
+forma de descobrir foi a que a regra manda: ler a lista de subcomandos do próprio
+binário, não supor pelo `--help` pontual.
+
+```
+uninstall  acp  api  debug  mcp  plugin  models  stats  mini  run  session  service  reload  pair  serve
+```
+
+Não há `export` no topo — há **`session export`**, com a mesma função:
+
+```
+opencode session export --sanitize    Redact sensitive transcript and file data
+```
+
+A descrição é literalmente a que o adaptador precisa. Medido: com uma sessão
+criada por `opencode run --format json`, o `session export --sanitize` devolve
+**16.200 bytes** com `info.id` correto e `info.parentID` — que é `null` para a
+sessão **raiz**, e é o campo que o adaptador compara com a sessão filha que está
+verificando.
+
+E `acp` na lista confirma a outra hipótese que valia: `opencode acp` é *"Start an
+Agent Client Protocol server"*, o mesmo `streamFormat: "acp-json-rpc"` que o
+`/api/agents` reporta para o opencode.
+
+⚠️ **`--pure` continua ausente no 2.0.18** — é a outra flag do adaptador, e ela
+não tem substituto na lista. As duas coisas que o adaptador faz são isolar um
+plugin instalado pelo usuário e dar um diretório de trabalho neutro, e é o
+`execAgentFile` que as monta. Sem `--pure`, a garantia de que um plugin não roda
+dentro do caminho de evidência **não existe no 2.0.18** — e isso não é uma flag a
+menos, é uma propriedade de segurança que a flag entregava.
+
+⚠️ **O `parentID` só existe para sessão FILHA.** Medido numa sessão raiz, ele é
+`null`. A comparação do adaptador é `info.parentID !== candidate.rootSessionId`,
+então o campo existe, e o que falta no 2.0.18 é só a semântica do `--pure`.
+
+
 
 O modal de "associar CLI" chega ao daemon, passa a rota de escrita — e quebra **depois**,
 no CLI. Não é PATH, não é mount, não é libc, e não é o carve-out: é **contrato de
