@@ -501,7 +501,7 @@ não a ferramenta mais sensível.
 |---|---|---|---|
 | OpenCode | `127.0.0.1:49374` | `:8443` | **só a API** é basic auth; a página é pública |
 | OpenDesign | `127.0.0.1:7456` | `:8444` | basic auth com `OD_API_TOKEN`; o 401 é texto puro |
-| Hermes (dashboard) | `127.0.0.1:9119` | `:8445` | **Nous Portal**, gate verificado |
+| ~~Hermes (dashboard)~~ | — | — | **Removido** — ficamos só com a CLI nativa. Ver "O Hermes ficou só nativo". |
 | _(reservado)_ | — | `:443`, para o próximo serviço | — |
 
 #### O que cada link mostra de fato
@@ -581,12 +581,16 @@ forma: escuta em loopback + `tailscale serve` com TLS. As portas são **uma por
 serviço, em sequência**, para que a tabela fique legível — e `8443` é o opencode nos
 dois nós, host e VM.
 
-⚠️ **A faixa 8443–8445 é do `serve`, não das aplicações.** Nenhuma aplicação escuta
-nesses números: são portas do `tailscaled`, e cada uma faz proxy para o loopback da
-aplicação. Duas camadas, e o número publicado vem do namespace do `serve` — não do
-interno. A consequência prática: se uma aplicação voltar a escutar em `0.0.0.0` na
-porta interna, **não** colide com a publicação, e o conflito fica explícito em vez de
-virar diagnóstico confuso.
+⚠️ **A faixa 8443–8444 é do `serve`, não das aplicações.** Nenhuma aplicação
+escuta nesses números: são portas do `tailscaled`, e cada uma faz proxy para o
+loopback da aplicação. Duas camadas, e o número publicado vem do namespace do
+`serve` — não do interno. A consequência prática: se uma aplicação voltar a
+escutar em `0.0.0.0` na porta interna, **não** colide com a publicação, e o
+conflito fica explícito em vez de virar diagnóstico confuso.
+
+⚠️ **Para desligar uma publicação, use `serve --https=<porta> off`, nunca
+`serve reset`.** As publicações ficam lado a lado, e o reset derruba as outras
+junto. Foi o que quase aconteceu com o `8445` ao remover o container do Hermes.
 
 ⚠️ **O bind do Hermes tem uma assimetria que os outros dois não têm.** O dashboard
 só exige login quando escuta **fora** do loopback, então `--host 127.0.0.1` publicado
@@ -1006,6 +1010,55 @@ justamente o que o `Dockerfile` faz:
 `~/.local/share/mise/installs/node/24.21.0/bin` — é preciso colocá-lo no PATH
 explicitamente antes de qualquer build.
 
+#### O Hermes ficou só nativo, e o que isso custou
+
+O dashboard do Hermes — o container em `127.0.0.1:9119`, publicado em `:8445` —
+**foi removido por decisão de projeto**. A máquina fica com a CLI nativa
+(`setup_hermes-cli`). Não é preferência de estilo; são duas medições:
+
+**A CLI nativa é a única que roda.** `opencode` e `agy`, os agentes que o
+OpenDesign usa, são **ELF glibc**; o container do OpenDesign é Alpine. Dentro dele
+nenhuma CLI do host executa — o Hermes inclusive, que entra pelo mesmo mount. A
+dashboard em container não tinha capacidade que a nativa não tenha, e ocupava
+2,81 GB de imagem.
+
+**Os dois homes não compartilhavam estado.** O nativo usa `~/.hermes`; o container
+usava `~/Developer/.hermes`. Provider configurado num **não** aparecia no outro, o
+que tornava a dashboard quase decorativa para o uso real.
+
+O que foi **preservado**, e não apagado:
+
+| | |
+|---|---|
+| `~/Developer/.hermes` | 7138 arquivos, **919 MB** — `config.yaml`, `auth.json`, sessões |
+| `~/Developer/.hermes-backup-*` | cópia idêntica, tirada antes de qualquer troca |
+
+⚠️ **O backup também cai no subuid, e isso é o surpreendente.** Fazer o backup de
+dentro de um container funciona — ele lê como uid 10000 — mas o `tar` extrai com
+esse dono, e o resultado é um diretório `700` que o `rvlmt` **não consegue abrir**.
+O `podman unshare chown -R 1000:1000` **não resolve**: o bloqueio não é o uid, é o
+rótulo `container_file_t` com categoria MCS própria, que o host não atravessa.
+Medido: os dois diretórios têm categorias diferentes (`c44,c215` e `c58,c660`) e
+os dois são ilegíveis do host. Um backup nesse regime só se **restaura por
+container** — aceitável, e significa que não é um backup que você pode inspecionar.
+
+Duas lições do container valem mesmo depois dele ir embora, porque são armadilhas
+de qualquer bind mount rootless com estado:
+
+- **`:Z` é obrigatório** no bind mount. Sem ele o SELinux barra o caminho, o setup
+  inicial sai com 1, e o container morre com **exit 2 e nenhuma mensagem útil no
+  FIM do log** — a causa está no começo.
+- **O `public_url` vem de variável de ambiente e tem que existir ANTES do start**,
+  e é o **DNSName** do nó, não o `hostname` da máquina. Medido: `hostname` dá
+  `fedora-vm` e o DNSName termina em `.sawfish-banjo.ts.net`. Montar a URL com o
+  hostname produz um `public_url` que o fluxo OAuth não reconhece, e o sintoma é
+  `redirect_uri_mismatch`. Registrar o dashboard **antes** de escolher o bind grava
+  a URL canônica errada — foi assim que o erro nasceu.
+
+Para trazer de volta, o que reverter: o `podman run` com o digest pinado, o `:Z` no
+bind, o hash scrypt no lugar da senha, e `sudo tailscale serve --bg --https=8445`.
+
+
 #### A CLI do Hermes nativa na VM, e o que ela custou
 
 O dashboard roda em container, mas a **CLI é nativa** — e essa distinção não é
@@ -1092,62 +1145,6 @@ o container consegue usar é vazia por construção.
 Isso é o argumento medido a favor do **nativo**: no modo nativo os três aparecem
 disponíveis, porque os binários glibc executam no glibc.
 
-
-#### O Hermes: senha local em vez do OAuth do Portal
-
-O dashboard aceita **dois** provedores, e o próprio `--help` do binário diz: *"a
-public bind always requires an auth provider (**password or OAuth**)"*. O
-`--insecure` é **NO-OP** desde o endurecimento de junho de 2026 — ele não desliga
-mais nada.
-
-A senha é um provedor de primeira classe, e é a peça que resolve o
-`redirect_uri_mismatch`: a função `_settings()` do provider **levanta
-`SkipRegistration`** quando o usuário não está definido, ou seja, **com a senha
-configurada o registro no Portal é dispensado** — e é justamente esse registro que
-grava a URL canônica errada e produz o erro.
-
-```bash
-# o texto puro NUNCA vai para o container: entra o hash scrypt
-podman exec hermes-dash /opt/hermes/.venv/bin/python -c \
-  "import sys; sys.path.insert(0,'/opt/hermes')
-from plugins.dashboard_auth.basic import hash_password
-print(hash_password('a-senha'))"
-# -> scrypt$16384$8$1$<salt_b64>$<dk_b64>
-
-podman run -d --name hermes-dash \
-  -v ~/Developer/.hermes:/opt/data:Z \
-  -p 127.0.0.1:9119:9119 \
-  -e HERMES_DASHBOARD_PUBLIC_URL=https://<maquina>.<tailnet>.ts.net:8445 \
-  -e HERMES_DASHBOARD_BASIC_AUTH_USERNAME=<usuario> \
-  -e HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=<hash> \
-  <imagem por digest> dashboard --host 0.0.0.0 --no-open
-```
-
-⚠️ **`:Z` é obrigatório no bind mount, e o que falha sem ele é enganoso.** O
-SELinux bloqueia `/opt/data`, o `01-hermes-setup` sai com 1, e o container morre com
-**exit 2 e nenhuma mensagem útil no fim do log** — a causa está no começo.
-
-⚠️ **O bind mount em rootless tem um custo que ninguém escolhe explicitamente:**
-`~/Developer/.hermes` precisa ser do **subuid** (o `hermes` é uid 10000 dentro da
-imagem), então o dono no host vira algo como `534287` e **`rvlmt` não lê o `.env`
-nem o `auth.json` sem `sudo`** — nem para fazer `stat`.
-
-**Para onde o login vai depois de configurado**, medido: `/` responde **302** para
-`/login?next=%2F`, que é um formulário local com `name="username"` e
-`name="password"`, e o envio é
-`POST /auth/password-login` com `{provider, username, password, next}`. A resposta
-é **200** com `hermes_session_at` (12 h) e `hermes_session_rt` (30 dias), e **401**
-com a senha errada. O `redirect_uri_mismatch` não tem mais onde aparecer.
-
-**O bind e a porta não passam por `service set`.** O bind vem de flag e o
-`public_url` de variável de ambiente. E a lição de ordem continua valendo para quem
-for pelo OAuth: **`hermes dashboard register` antes de decidir o bind**, porque
-registrar primeiro grava a URL canônica errada.
-
-**O container do Hermes não usa compose nenhum** — é `podman run` direto, e o
-`docker-compose` que existe no repo do Hermes descreve um estado que nada produz.
-Mesma classe do drop-in do opencode: um arquivo que descreve uma configuração que o
-script não cria.
 
 #### As senhas provisórias, e o que elas custam
 
