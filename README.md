@@ -516,10 +516,11 @@ A diferença entre o que a tabela diz e o que aparece na tela é o que vale aqui
 | `:8445` | a tela de login do **Nous Portal**, com e-mail, Google, Microsoft e GitHub |
 
 ⚠️ **No opencode, a página é pública e o que exige basic auth é a API.** A página
-responde **200** sem credencial nenhuma; o portão está em `/config`, que responde
-**401** sem senha e **200** com ela. Isso é o inverso do que a tabela dizia antes, e
-a distinção importa: quem publicar a porta e achar que "tem senha" porque a
-exigiu no lugar errado vai concluir que o servidor está aberto.
+responde **200** sem credencial nenhuma — o *fallback* da SPA entrega o mesmo shell
+para qualquer caminho. O portão está no namespace `/api/`, e a rota que o mede é
+`/api/session`: **401** sem senha, **200** com ela. É o inverso do que a tabela dizia
+antes, e a distinção importa: quem publicar a porta e testar o caminho errado vai
+concluir que o servidor está aberto.
 
 ⚠️ **O campo da senha diz "(opcional)" e não é.** A senha é a única coisa que separa
 a página pública de uma sessão funcional, e o rótulo é do upstream — não dá para
@@ -533,18 +534,46 @@ O Chrome renderiza isso como **página em branco** — sem a dica, sem o 401, se
 nada. Quem for pela primeira vez precisa saber o par de antemão; o servidor nunca
 vai dizer na cara que a credencial é a do `.env`.
 
-#### `/api/health` não é um endpoint do opencode, e mediu nada
+#### Qual rota medir, e por que 200 às vezes não quer dizer nada
 
-Vale registrar porque ele aparece em rodadas anteriores deste trabalho como se fosse
-prova funcional, e não era. Com credencial, `https://<host>:8443/api/health`
-responde **404** — a rota não existe. Sem credencial, responde 401, que é a camada de
-auth recusando **antes** do roteador. Ou seja: os dois números mediam a mesma coisa, e
-ninguém dos dois dizia se o servidor estava servindo.
+Medido, porque a versão anterior desta seção **afirmava um 401 que ninguém tinha
+medido** — o par "401 sem credencial, 200 com" foi extrapolado de um padrão em vez de
+verificado. A sonda que separa as duas coisas é **`/api/session`**: **401** sem
+senha, **200** com ela.
 
-A sonda que funciona é **`/config`**, e ela separa as duas coisas que importam:
-**401** sem senha, **200** com senha. No OpenDesign e no Hermes `/api/health` existe
-e responde **200**, o que torna a confusão maior ainda — o mesmo caminho é válido em
-um serviço e inexistente no outro.
+O que existe de fato, em duas metades que não se confundem:
+
+| rota | sem credencial | com credencial |
+|---|---|---|
+| `/api/session` | **401** | **200** |
+| `/api/health` | 401 | **404** |
+| `/api/doc` | 401 | **404** |
+| qualquer coisa fora de `/api/` | 200 | 200 |
+
+Duas leituras, e a segunda é a que quase me levou a escrever um achado falso:
+
+**O namespace `/api/` é o portão, e funciona.** `/api/health` e `/api/doc` devolvem
+401 sem credencial e **404** com ela — a rota realmente não existe, e o 401 era a
+camada de auth recusando antes do roteador. Os dois números mediam a mesma coisa, e
+`/api/health` nunca podeu ser prova de que o servidor servia.
+
+⚠️ **Fora de `/api/`, todo 200 é a mesma página, e isso não é dado nenhum.** `/`,
+`/config`, `/project`, `/agent`, `/file`, `/log` — e também uma rota inventada na
+verificação — devolvem **o mesmo HTML de 5986 bytes**, com o mesmo `sha256`. É o
+*fallback* da SPA, que entrega o shell para qualquer caminho. Um `200` ali não é
+exposição **e** não é prova de nada: precisa comparar o corpo, não o status. Foi
+exatamente por ler só o status que pareceu que `/config` estava servindo a
+configuração do servidor sem senha.
+
+A distinção final, que é a que importa para a tabela: **a página é pública e o que
+exige basic auth é a API.** Isso continua valendo — mas a rota que o demonstra é
+`/api/session`, e não `/config`, que só devolve o shell.
+
+No OpenDesign e no Hermes `/api/health` existe e responde **200**, o que aumenta a
+confusão: o mesmo caminho é válido em um serviço, inexistente no outro e enganoso no
+terceiro.
+
+
 
 
 As três publicações vivem na **VM de agentes**, no mesmo nó, e todas seguem a mesma
