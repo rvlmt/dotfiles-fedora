@@ -307,10 +307,15 @@ pergunta() {
 
 confirm() {
     local prompt="$1"
+    # O default é o SEGUNDO argumento, e não uma coisa implícita, porque "por
+    # padrão" e "sempre" são decisões diferentes e o script precisa dizer qual das
+    # duas está fazendo. `confirm "..."` sem o segundo argumento continua sendo NÃO,
+    # que é o comportamento de todos os call sites que não pensaram no assunto —
+    # nenhum deles mudou de comportamento por esta assinatura aceitar um argumento
+    # a mais.
+    local default="${2:-0}"
     local reply
     # `--yes` responde SIM a tudo, e é o que torna o modo não interativo possível.
-    # O default continua sendo NÃO: sem a flag, um Enter não instala nada. É a
-    # diferença entre "responde por mim" e "instale por omissão".
     #
     # `ASSUME_YES` é inicializado aqui, e não na linha de argumentos, porque esta
     # função é definida antes dela e a chamadora de `confirm` mais acima já
@@ -320,7 +325,18 @@ confirm() {
         echo -e "${prompt} ${GREEN}[--yes: assumindo sim]${NC}"
         return 0
     fi
-    read -rp "$prompt [y/N] " reply
+    # O sufixo diz o que o Enter faz, e dizer errado é pior que não dizer: um
+    # `[y/N]` com default "não" e um `[Y/n]` com default "sim" são a mesma
+    # pergunta com respostas opostas.
+    local sufixo="[y/N]"
+    [ "$default" = "1" ] && sufixo="[Y/n]"
+    read -rp "$prompt $sufixo " reply
+    # Enter vazio vale o default declarado. Sem estas duas linhas o default seria
+    # decorativo: o `read` devolveria string vazia, a comparação abaixo cairia em
+    # "não", e um `[Y/n]` aceitaria o não — o oposto do que a pergunta anuncia.
+    if [ -z "$reply" ]; then
+        return "$default"
+    fi
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
@@ -2309,7 +2325,7 @@ ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-harden
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
 HOST_STEPS="base hostname ssh device-keys git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
-VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening podman ai-clis hermes-cli hermes-dashboard open-design open-design-container zshrc"
+VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening firewalld podman ai-clis hermes-cli hermes-dashboard open-design open-design-container zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
 OPT_IN_STEPS="toolbx gui-access"
@@ -2722,13 +2738,42 @@ fi
 
 CONFIRM_DEVICE_KEYS=""
 if should_run "device-keys"; then
-    confirm "Autorizar nesta máquina as chaves de dispositivos que o GitHub reúne (github.com/${GITHUB_KEYS_USER}.keys)? O bloco gerenciado é reescrito a cada execução, e chaves fora dele ficam intocadas" \
+    # Default SIM, e o motivo é medido: a fonte é `https://github.com/<conta>.keys`,
+    # que é um arquivo PÚBLICO do GitHub — sem token, sem GitHub App, sem `gh`
+    # autenticado. Medido nesta VM: HTTP 200, 405 bytes, 5 chaves ed25519.
+    #
+    # Eu havia dito o contrário ("depende da sua chave privada"), e o `authorized_keys`
+    # da VM estava vazio só porque eu nunca tinha rodado este módulo. Um diagnóstico
+    # que aponta a dependência errada é pior que nenhum: leva a uma conclusão
+    # errada sobre o que é preciso para o script rodar.
+    #
+    # A pergunta continua existindo, e o default é o que a torna "por padrão" em
+    # vez de "sempre": quem não quiser digita "n", e nada é tocado.
+    confirm "Autorizar nesta máquina as chaves de dispositivos que o GitHub reúne (github.com/${GITHUB_KEYS_USER}.keys, arquivo público)? O bloco gerenciado é reescrito a cada execução, e chaves fora dele ficam intocadas" 1 \
         && CONFIRM_DEVICE_KEYS=1
 fi
 
 CONFIRM_SSHD_HARDENING=""
 if should_run "sshd-hardening" && [ ! -f /etc/ssh/sshd_config.d/99-dotfiles-hardening.conf ]; then
-    confirm "Desabilitar login por senha via SSH (só chave pública a partir daqui)?" && CONFIRM_SSHD_HARDENING=1
+    # Default SIM **na VM**, e NÃO no host. A assimetria é deliberada e é a diferença
+    # entre as duas máquinas, não uma inconsistência de escrita:
+    #
+    #   * na VM, este script é a história inteira. A senha do SSH é a credencial mais
+    #     exposta que a máquina tem, e o `sshd-hardening` é o módulo que existe para
+    #     desligá-la. Deixar o default em "não" significava que a proteção só
+    #     acontecia se alguém lembrasse de responder "y" numa lista de prompts.
+    #   * no host, é a máquina de todo dia, e desligar o login por senha é uma
+    #     decisão sobre o modo como a pessoa trabalha. O prompt continua, e continua
+    #     sem default.
+    #
+    # Em nenhum dos dois o module depende da resposta para não trancar ninguém: quem
+    # protege é o guard `[ ! -s authorized_keys ]` lá no módulo, que pula se não há
+    # chave. E o `device-keys` agora é default, e vem ANTES na lista — então na VM o
+    # arquivo já está populado quando esta pergunta é feita.
+    _sshd_default=0
+    [ "$PROFILE" = "vm" ] && _sshd_default=1
+    confirm "Desabilitar login por senha via SSH (só chave pública a partir daqui)?$( [ "$_sshd_default" = "1" ] && echo " A VM só tem chave." )" "$_sshd_default" \
+        && CONFIRM_SSHD_HARDENING=1
 fi
 
 # Existe um usuário não-root que consiga entrar? Pergunta feita SEM sudo, de
@@ -3315,13 +3360,20 @@ if should_run "sshd-hardening"; then
 
     SSHD_CONFIG="/etc/ssh/sshd_config.d/99-dotfiles-hardening.conf"
     if [ ! -f "$SSHD_CONFIG" ]; then
-        # Desabilitar PasswordAuthentication sem ter nenhuma chave em
-        # authorized_keys já cadastrada te tranca pra fora via SSH de vez —
-        # o script não popula esse arquivo (ele só gera/usa chaves pra
-        # autenticar ESTA máquina no GitHub, não pra permitir login de
-        # outras máquinas aqui). Se você contava só com o Tailscale SSH pra
-        # entrar (agora desligado por padrão — ver módulo "tailscale"),
-        # confirme que já tem uma chave pública aí antes de continuar.
+          # Desabilitar PasswordAuthentication sem ter nenhuma chave em
+          # authorized_keys já cadastrada te tranca pra fora via SSH de vez.
+          #
+          # ESTE COMENTÁRIO ESTAVA ERRADO e dizia o contrário. Ele afirmava que "o
+          # script não popula esse arquivo", e foi escrito antes de o módulo
+          # `device-keys` existir. Hoje o script popula, e por padrão: o módulo baixa
+          # o arquivo público `https://github.com/<conta>.keys` e reescreve o bloco
+          # gerenciado, preservando tudo o que está fora dele. Ver
+          # `sync_device_keys_from_github`.
+          #
+          # O guard abaixo é o que protege, e continua sendo a coisa que importa: se
+          # o `device-keys` falhou — sem rede, feed vazio, conta sem chaves —, o
+          # arquivo fica como estava e o hardening pula com aviso. A pergunta é a
+          # segunda camada, não a que evita o lockout.
         if [ ! -s "$HOME/.ssh/authorized_keys" ]; then
             echo -e "${YELLOW}~/.ssh/authorized_keys vazio ou inexistente — desabilitar login por senha agora te deixaria sem nenhum jeito de entrar via SSH. Adicione a chave pública da máquina de onde você acessa (ex.: 'cat ~/.ssh/id_ed25519.pub' no Mac, cole aqui em ~/.ssh/authorized_keys) antes de rodar este módulo. Pulando.${NC}"
         elif [ "$CONFIRM_SSHD_HARDENING" = "1" ]; then
@@ -3367,24 +3419,93 @@ EOF
 fi
 
 # ==============================================================================
-# firewalld: interface do Tailscale fica totalmente confiável (SSH, RDP, devpod,
-# etc.), o resto (LAN/internet) segue bloqueado pela zona padrão do firewalld.
+# firewalld: instalar, subir, e VERIFICAR que sobrou caminho de entrada.
+#
+# Este módulo roda nos DOIS perfis, e passou a rodar na VM em 2026-09-30. Antes ele
+# era só do host, e era aí que marcava `tailscale0` como `trusted`.
 # ==============================================================================
 if should_run "firewalld"; then
     echo -e "\n${BLUE}==> firewalld${NC}"
     sudo dnf install -y firewalld
     sudo systemctl enable --now firewalld
 
-    if ! sudo firewall-cmd --get-zones | grep -q trusted; then
-        echo -e "${YELLOW}Zona 'trusted' não encontrada — pulando regra de interface Tailscale.${NC}"
+    # ── O que este módulo NÃO faz mais, e por quê ────────────────────────────
+    #
+    # Ele marcava `tailscale0` na zona `trusted`, que libera TODO tráfego da
+    # interface. Foi removido por decisão do dono do repo, e a direção é a que o
+    # `ARQUITETURA.md` propunha desde o começo: a zona `trusted` é "o elo errado da
+    # cadeia" porque aceita tráfego que nada pediu.
+    #
+    # A premissa que sustentava a marcação era que a tailnet já autentica quem
+    # entra, e por isso a zona não acrescentaria risco. A medição diz que a
+    # markação também não acrescentava NADA: a publicação nas portas 8443-8445
+    # funciona porque a zona default do Fedora abre `1025-65535/tcp`, e não porque a
+    # interface estivesse em `trusted`. Tirar a marcação não tirou nada — e é
+    # por isso que a remoção é segura em vez de ser um risco novo.
+    #
+    # Quem QUER a marcação, agora, é uma decisão de fora do provisionamento, e o
+    # comando está no ARQUITETURA.md e no aviso abaixo. Uma marcação que o script
+    # aplica sozinho é uma marcação que ninguém revisou.
+    echo -e "${YELLOW}  A interface tailscale0 fica na zona padrão do firewalld, sem marcação.${NC}"
+    echo -e "${YELLOW}  Para marcá-la como confiável, à mão: sudo firewall-cmd --zone=trusted --change-interface=tailscale0 --permanent && sudo firewall-cmd --reload${NC}"
+
+    # ── Pós-condição: sobrou caminho de entrada? ──────────────────────────────
+    #
+    # A propriedade, não o estado do serviço. `active` no firewalld não diz nada
+    # sobre conseguir entrar na máquina — e o motivo de a pós-condição existir é
+    # medido, não hipotético: o primeiro bloqueio numa VM limpa foi o `sshd` nunca
+    # subir, que é a mesma classe de defeito, e o jeito de descobrir foi ficar sem
+    # entrada. Um firewall recém-abilitado é exatamente o componente que pode
+    # fechar o caminho que a pessoa usava para entrar.
+    #
+    # A pergunta é "a zona em que a tailscale0 caiu permite ssh?", e não "o
+    # firewalld está ligado?", porque a segunda é respondida por `systemctl` e a
+    # primeira é a que importa. É também a verificação que o ARQUITETURA.md nomeia
+    # para o guest: "`tailscale0` caiu numa zona que permite `ssh` — que é o que
+    # garante que o Mac consegue entrar".
+    #
+    # Sem `tailscale0` — Tailscale ainda não autenticou, ou não está instalado — não
+    # há o que verificar, e isso NÃO é falha: a interface ainda não existe.
+    if ! command -v firewall-cmd &> /dev/null; then
+        echo -e "${YELLOW}  firewall-cmd ausente; não consegui verificar o caminho de entrada.${NC}" >&2
+    elif ! ip link show tailscale0 &> /dev/null; then
+        echo -e "${YELLOW}  tailscale0 ainda não existe (Tailscale não conectou?); a zona será verificada no próximo run.${NC}"
     else
-        # Zona "trusted" libera TODO tráfego na interface tailscale0 (não só SSH) —
-        # aceitável aqui porque a própria tailnet já autentica quem entra nela.
-        sudo firewall-cmd --zone=trusted --change-interface=tailscale0 --permanent 2>/dev/null || true
-        sudo firewall-cmd --reload
-        echo -e "${GREEN}✓ Interface tailscale0 marcada como confiável no firewalld.${NC}"
+        _fw_zone="$(sudo firewall-cmd --get-zone-of-interface=tailscale0 2>/dev/null || true)"
+        # `--get-zone-of-interface` devolve VAZIO — e não um nome de zona — quando a
+        # interface não tem amarração própria e herda a default. Medido nesta VM.
+        # Ler isso como zona nenhuma daria um aviso falso em toda máquina que não
+        # tenha a marcação, que é o novo estado normal.
+        [ -z "$_fw_zone" ] && _fw_zone="$(sudo firewall-cmd --get-default-zone 2>/dev/null || true)"
+        _fw_zone="${_fw_zone:-desconhecida}"
+
+        if [ "$_fw_zone" = "desconhecida" ]; then
+            echo -e "${YELLOW}  Não consegui ler a zona da tailscale0; verifique o acesso a SSH à mão.${NC}" >&2
+        else
+            unset _rs
+            _rs="$(sudo firewall-cmd --zone="$_fw_zone" --service=ssh --query-port=22 2>/dev/null || true)"
+            if [ "$_rs" = "yes" ]; then
+                echo -e "${GREEN}  ✓ Zona da tailscale0: '$_fw_zone', e ela permite ssh.${NC}"
+            else
+                # A lista de serviços, não só a consulta por porta: a zona pode
+                # liberar o 22 pelo serviço `ssh` OU pela porta, e as duas coisas
+                # servem. Uma delas estar presente já é caminho de entrada.
+                unset _rs
+                _rs="$(sudo firewall-cmd --zone="$_fw_zone" --list-services 2>/dev/null | tr ' ' '\n' | grep -cx ssh || true)"
+                unset _sv
+                _sv="$(sudo firewall-cmd --zone="$_fw_zone" --list-ports 2>/dev/null | tr ' ' '\n' | grep -cE '^(22|22-)|(^|-)22/' || true)"
+                if [ "$_rs" != "0" ] || [ "$_sv" != "0" ]; then
+                    echo -e "${GREEN}  ✓ Zona da tailscale0: '$_fw_zone', e ela permite ssh.${NC}"
+                else
+                    echo -e "${YELLOW}  ⚠️ A zona '$_fw_zone' da tailscale0 NÃO parece permitir ssh.${NC}" >&2
+                    echo -e "${YELLOW}    Se você entrou por senha, ela acabou de ser desligada. Para desfazer:${NC}" >&2
+                    echo -e "${YELLOW}      sudo firewall-cmd --zone=$_fw_zone --add-service=ssh --permanent && sudo firewall-cmd --reload${NC}" >&2
+                fi
+            fi
+        fi
+        unset _fw_zone _rs _sv
     fi
-    echo -e "${YELLOW}Revise 'sudo firewall-cmd --list-all' e feche manualmente qualquer porta que não precise estar exposta na LAN/internet.${NC}"
+    echo -e "${YELLOW}  Revise 'sudo firewall-cmd --list-all' e feche manualmente qualquer porta que não devia estar aberta.${NC}"
 fi
 
 # ==============================================================================

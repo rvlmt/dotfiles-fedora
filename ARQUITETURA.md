@@ -121,26 +121,33 @@ obrigatório, não opcional. Essa é a parte da configuração de VM que o repo 
 delega, independentemente de quem constrói a VM.
 
 **`firewalld` é o guardião do egress da VM.** Marcar `tailscale0` como zona
-`trusted` — que libera todo tráfego — seria "o elo errado da cadeia" **se o host
-fosse o guardião**.
+`trusted` — que libera todo tráfego — é "o elo errado da cadeia", e o script não
+faz mais isso.
 
-⚠️ **Decisão: a exposição é aceita, e este documento passa a dizer o que o script
-faz.** A premissa que sustentava a crítica não se aplica: o `firewalld` roda no
-**host**, e o que se quer proteger é a **VM** de agentes — que tem o próprio
-`firewalld`, o próprio `sshd-hardening` e a superfície pequena de três serviços
-publicados atrás do `tailscale serve`. O host não é a máquina que recebe tráfego
-não confiável.
+**Resolvido em 2026-09-30.** O módulo `firewalld` instalava e subia o serviço, e
+**marcava `tailscale0` na `trusted`**. A marcação saiu. Este documento criticava
+o código desde o começo, o script fazia o contrário, e a divergência estava escrita
+aqui como "exposição aceita". Deixou de ser aceito: virou uma decisão de quem está
+na máquina, executada à mão, com o comando impresso pelo próprio módulo.
 
-O que a marcação concede, concreto: **qualquer nó da tailnet alcança todas as
-portas do host**, não só a 22. É uma exposição conhecida e consciente, e o preço
-está no `AUDITORIA.md`, na tabela de decisões.
+A medição que sustenta a remoção, e que este documento já tinha apontado: **a
+publicação nas 8443-8445 não depende da `trusted`.** Ela funciona porque a zona
+padrão do Fedora abre `1025-65535/tcp`. Pior que isso: o `firewalld` **não filtra**
+as portas do `tailscale serve` — medido com a `tailscale0` amarrada na zona
+`public`, que não abre porta alguma além de `ssh`, e as três respostas
+continuaram `200 / 200 / 302`. As regras netfilter do próprio Tailscale aceitam o
+tráfego antes das regras de zona. A `trusted` não estava segurando nada.
 
-A correção que este documento propunha — `tailscale0` sai do `trusted` e ganha
-uma zona própria — continua sendo a direção certa **para o host**, e é o item
-[#10](https://github.com/rvlmt/dotfiles-fedora/issues/10). Ela não é pré-requisito
-para provisionar a VM de agentes. O que mudou é a precedence: antes os dois
-documentos discordavam sobre o que o script faz, e discordar sobre o que o seu
-próprio script faz é pior do que a decisão em si.
+O que o módulo faz no lugar é a **pós-condição**: verificar que a zona em que a
+`tailscale0` caiu **permite `ssh`**, que é o que garante que o Mac consegue entrar.
+Um firewall recém-abilitado é exatamente o componente que pode fechar o caminho de
+entrada, e `active` no serviço não diz nada sobre isso.
+
+O que **continua** sendo a direção, e é o item
+[#10](https://github.com/rvlmt/dotfiles-fedora/issues/10): `tailscale0` ganhar uma
+**zona própria**, que permita só o que precisa, e só então fechar o `1025-65535` da
+`FedoraWorkstation` — que é o default do próprio Fedora, e está no XML do pacote.
+
 **Papel:** a fronteira.
 
 **Construção:** **manual, no Cockpit.** O repo não constrói o guest e não há
@@ -308,12 +315,14 @@ proporcional ao fato de o repo não ter verificação automática.
 - **`host`:** `virsh -c qemu:///system` responde, testado **dentro do grupo
   `libvirt`** (`sg libvirt -c ...`). Testar o grupo com `id -nG` seria mentira: o
   grupo só chega ao processo no próximo login, e é o `getgroups()` do processo que
-  o libvirt consulta. `tailscale0` fora da zona `trusted` e a VM sem rota para a LAN
-  são pós-condições **pendentes**, porque dependem da decisão de rede.
+  o libvirt consulta. `tailscale0` fora da zona `trusted` deixou de ser pendente: o
+  script não marca a interface desde 2026-09-30. A **VM sem rota para a LAN**
+  continua pendente, porque depende da decisão de rede.
 - **`vm`:** `userns=keep-id` efetivo; `podman.socket` desabilitado;
   **`podman-docker` ausente**; cgroup v2 presente; `user.max_user_namespaces` acima
   de zero; um container por projeto, sem volume compartilhado; e o `firewalld` do
-  guest **intocado**, com a verificação de que `tailscale0` caiu numa zona que
+  guest, que **agora roda nos dois perfis** (até 2026-09-30 era só do host), sem
+  marcar zona nenhuma, com a verificação de que `tailscale0` caiu numa zona que
   permite `ssh` — que é o que garante que o Mac consegue entrar.
 
 ### Ordem de implementação
@@ -343,7 +352,8 @@ grupo `libvirt` e `cockpit.socket`. Ele **não** declara a rede do libvirt — v
 2. As correções no template do devcontainer, que são do guest: colisão do nome de
    volume, base `bullseye` com LTS encerrado, ausência de `--pids-limit`, e
    `safe.directory '*'`.
-3. Tirar `tailscale0` da zona `trusted` no host, com a zona própria.
+3. Zona própria para a `tailscale0` no host — a marcação na `trusted` **saiu** em
+   2026-09-30, e o que resta é a zona que permite só o que precisa.
 4. O mecanismo do filtro de egress, **depois** de medido.
 
 O filtro é o último de propósito: é o único item que depende de uma medição que
@@ -386,7 +396,8 @@ explícitas? recusar?). Recusar é o comportamento seguro, não o completo.
 Não é base, e **não é decidível agora**. Duas coisas estão erradas no host e
 nenhuma delas tem correção possível antes de um dado que ainda não existe:
 
-1. `tailscale0` está na zona `trusted`, que aceita todo tráfego de toda a tailnet.
+1. ~~`tailscale0` está na zona `trusted`~~ — **resolvido em 2026-09-30**: o script
+   parou de marcar a interface, e a `trusted` virou comando à mão.
 2. A zona `FedoraWorkstation` tem `1025-65535/tcp` e `1025-65535/udp` abertos, e é
    o **default do próprio Fedora** — está no XML do pacote, com a intenção
    documentada de liberar portas altas para apps de desktop.
@@ -396,9 +407,16 @@ O que a medição mostrou, e que é o ponto não óbvio: **tirar a interface do
 libera toda porta alta, não porque a interface estivesse em `trusted`. A interface
 cairia no default e a exposição continuaria idêntica.
 
-A correção na ordem certa seria: `tailscale0` sai do `trusted`; `tailscale0` ganha
-uma **zona própria** que permite só o que precisa; e só então fecha o
-`1025-65535` da `FedoraWorkstation`, que é a [#10](https://github.com/rvlmt/dotfiles-fedora/issues/10).
+E a medição de 2026-09-30 foi além: **o `firewalld` não filtra as portas do
+`tailscale serve`.** Com a interface amarrada na zona `public` — que não abre porta
+nenhuma além de `ssh` — as três respostas continuaram `200 / 200 / 302`. As regras
+netfilter do próprio Tailscale aceitam antes das regras de zona. Ou seja: o que
+precisa ser fechado não é a `trusted`, e sim o `1025-65535` da zona padrão, e essa
+correção **depende do dado que ainda não existe** — quais serviços o host expõe.
+
+A correção na ordem certa é: `tailscale0` ganha uma **zona própria** que permite só
+o que precisa; e só então fecha o `1025-65535` da `FedoraWorkstation`, que é a
+[#10](https://github.com/rvlmt/dotfiles-fedora/issues/10).
 
 **Uma propriedade do `firewalld` que muda como isso vai ser implementado.** As
 regras do `firewalld` do Fedora exigem `subject.local == true`, e a sessão do
@@ -428,12 +446,19 @@ dentro da VM. Quem executa é soberano, e a decisão é de propósito.
 
 Na prática, `--profile=vm` num host instala o que a seção [O host](#o-host) diz
 que sai dele — Podman, `subuid`, keep-id, as CLIs de agente. E `--profile=host`
-dentro da VM instala `desktop-apps`, habilita o `firewalld` e marca `tailscale0`
-como `trusted` no guest, o que a [postura de rede](#pendência-a-postura-de-rede-do-host)
-reprova. As duas coisas são visíveis depois: o host fica com container, ou a VM
-fica com a postura de rede errada. E quem fez isso de propósito pode querer
-exatamente isso — um ambiente único que é as duas coisas, como o host era antes
-desta mudança.
+dentro da VM instala `desktop-apps`, `libvirt` e `cockpit-machines` (o `vm-host`),
+`toolbx` e o acesso gráfico. As duas coisas são visíveis depois: o host fica com
+container, ou a VM fica com um hypervisor e uma stack de desktop que não deveria
+ter. E quem fez isso de propósito pode querer exatamente isso — um ambiente único
+que é as duas coisas, como o host era antes desta mudança.
+
+**O exemplo de rede que esta seção citava mudou.** Até 2026-09-30, `--profile=host`
+dentro da VM marcava `tailscale0` na zona `trusted`, e esse era o exemplo do dano
+de rede. A marcação saiu do script, então o perfil errado agora produz lixo de
+software, e não posture de rede. Não é uma melhoria de segurança: é a remoção de
+um item que não devia ter sido automatizado. A [postura de rede do
+host](#pendência-a-postura-de-rede-do-host) continua pendente, e por um motivo
+diferente — o `1025-65535` da zona padrão.
 
 Por isso não há `systemd-detect-virt` recusando. Um aviso existiria e seria
 ignorado no caso legítimo, e um erro bloquearia um uso válido. O que substitui a

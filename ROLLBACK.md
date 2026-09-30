@@ -298,8 +298,21 @@ saber a senha dele, sim.
 
 ## `firewalld` — tirar a interface Tailscale da zona confiável
 
+**O script não marca mais a interface.** Desde 2026-09-30 o módulo `firewalld`
+instala, sobe, e verifica que a zona da `tailscale0` permite `ssh`; a marcação na
+`trusted` saiu porque era "o elo errado da cadeia" e, medido, nunca segurou a
+publicação. O comando abaixo é para **máquinas provisionadas antes dessa data** —
+ou para desfazer uma marcação que você mesmo tenha feito à mão.
+
 ```bash
 sudo firewall-cmd --zone=trusted --remove-interface=tailscale0 --permanent
+sudo firewall-cmd --reload
+```
+
+O caminho inverso, se você quiser a marcação:
+
+```bash
+sudo firewall-cmd --zone=trusted --change-interface=tailscale0 --permanent
 sudo firewall-cmd --reload
 ```
 
