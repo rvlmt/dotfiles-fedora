@@ -393,27 +393,28 @@ _sshd_hardened() {
 }
 
 
-# O nome de uma VM de agentes: `os-vm-<4 do machine-id>`.
+# O nome de uma VM de agentes: `vm-<os>-<4 do machine-id>`.
 #
-# O `DDMM` que estava na proposta inicial saiu, e a razão é que ele não acrescentava
-# nada: `/etc/machine-id` já é único por instalação, então o carimbo de data só
-# ocupava espaço — e pior, mudava com o dia, o que fazia um re-run no dia seguinte
-# propor outro nome para uma VM que já estava correta. Sem data no nome, essa
-# possibilidade não existe.
+# As três camadas são o que o nome diz: **é uma VM**, **de que sistema**, e **qual
+# delas** — que é a parte que o `machine-id` resolve. Medido nesta VM: `ID=fedora` e
+# `machine-id=c1049817…`, o que dá `vm-fedora-c104`.
 #
-# A fonte é o `/etc/machine-id` e não um sorteio, por dois motivos. O primeiro é que
-# é único por instalação sem que nada seja gravado: com sorteio, o módulo precisaria
-# guardar o nome em algum lugar para não mudar a cada run, e esse lugar seria estado
-# que só existe na máquina. O segundo é determinismo — rodar duas vezes dá o mesmo
-# nome, sem precisar de nada gravado.
+# O `DDMM` que estava na proposta inicial saiu, e a razão é que não acrescentava nada
+# sobre um id que já é único. Pior: mudava com o dia, o que faria um re-run no dia
+# seguinte propor outro nome para uma VM que já estava correta. O `os` também é
+# resolvido em vez de escrito à mão, para que uma mudança de imagem base apareça no
+# nome em vez de ficar escondida atrás de um literal.
+#
+# Por que o `machine-id` e não um sorteio: um nome sorteado precisa ser gravado em
+# algum lugar para não mudar a cada run, e esse lugar seria estado que só existe na
+# máquina. O id é determinístico — dois runs dão o mesmo nome, sem nada gravado.
 #
 # `product_uuid` seria o identificador natural, porque é o do hypervisor, e é
 # **ausente** nesta VM: `cat /sys/class/dmi/id/product_uuid` não existe.
 #
 # A ressalva é a de qualquer coisa derivada do `machine-id`: uma imagem **clonada**
-# copia o id junto, e duas VMs do mesmo template recebem o mesmo nome. É por isso que
-# o módulo confere a tailnet depois de aplicar e avisa se outro nó já estiver com ele
-# — a colisão apareceria ali, e é o único lugar onde dá para vê-la.
+# copia o id junto, e duas VMs do mesmo template recebem o mesmo nome. Por isso o
+# módulo confere a tailnet e avisa se outro nó já estiver com ele.
 #
 # MINÚSCULO. Um hostname vira rótulo de DNS, e este repo já tem um incidente medido
 # de nome que não bateu: o `400` do dashboard do Hermes quando o `public_url` ficou
@@ -421,12 +422,19 @@ _sshd_hardened() {
 # levaria a divergência para dentro do nome do nó da tailnet, que é o que o `Host:`
 # do navegador traz.
 suggest_vm_hostname() {
-    local mid
+    local os_id mid
+    # O SO vem de /etc/os-release, e não de um literal: o script recusaria rodar em
+    # outra distribuição (`uname -s` + `dnf`), então o campo é sempre `fedora` hoje —
+    # e é exatamente por isso que vale resolver, para que o dia em que a imagem base
+    # mudar o nome acompanhe em vez de mentir.
+    os_id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}")"
+    os_id="$(printf '%s' "$os_id" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+    [ -n "$os_id" ] || os_id="linux"
     mid="$(cat /etc/machine-id 2>/dev/null || true)"
-    # 4 caracteres do INÍCIO do machine-id. Medido nesta VM: `c104…` -> `os-vm-c104`.
+    # 4 caracteres do INÍCIO do machine-id.
     mid="${mid:0:4}"
     [ -n "$mid" ] || mid="semid"
-    printf 'os-vm-%s' "$mid"
+    printf 'vm-%s-%s' "$os_id" "$mid"
 }
 # Caminho do mise sem depender do PATH do shell que executou este script.
 mise_bin() {
@@ -2829,7 +2837,7 @@ if should_run "hostname"; then
     # oferecia aplicar "1234" como hostname. Reconhecer e não perguntar são coisas
     # diferentes, e só a segunda é a que o passo quer.
     if [ "$PROFILE" = "vm" ] \
-       && printf '%s' "$CURRENT_HOSTNAME" | grep -qE '^os-vm-[a-z0-9]{4}$'; then
+       && printf '%s' "$CURRENT_HOSTNAME" | grep -qE '^vm-[a-z0-9]+-[a-z0-9]{4}$'; then
         echo "Hostname atual: $CURRENT_HOSTNAME  —  já é um nome gerado por este script; mantido."
     elif [ "$PROFILE" = "vm" ]; then
         NEW_HOSTNAME_SUGGESTED="$(suggest_vm_hostname)"
@@ -3236,41 +3244,45 @@ if should_run "hostname"; then
         echo -e "${YELLOW}  Só minúsculas, dígitos e hífen, sem ponto, até 63 caracteres.${NC}" >&2
     fi
 
-    # ── A tailnet: conferência, e não ação ──────────────────────────────────
+    # ── A tailnet: relatório, e nunca ação ────────────────────────────────
     #
     # O hostname do SO alimenta o nome do nó na tailnet, mas SÓ enquanto o nó não
-    # está conectado. Medido nesta VM antes da mudança: hostname do SO e `HostName`
-    # do nó eram ambos `fedora-vm-mini` — e uma vez conectado, trocar o hostname do
-    # SO NÃO renomeia o nó. Num nó já provisionado, os dois divergem em silêncio.
+    # está conectado. Medido nesta VM: o hostname do SO e o `HostName` do nó eram
+    # ambos `fedora-vm-mini` — e uma vez conectado, trocar o hostname do SO NÃO
+    # renomeia o nó.
     #
-    # Por que é conferência e não ação: renomear um nó exigiria
-    # `tailscale set --hostname=`, que é privilégio de admin e mexe em como o nó é
-    # alcançado. Isso é decisão de quem administra a tailnet, não efeito colateral
-    # de provisionar uma máquina. O módulo diz o comando e não o executa.
+    # Este módulo **não renomeia o nó**, e a decisão é do dono do repo, com um
+    # motivo que a medição impõe: renomeado o nó, as três publicações do
+    # `tailscale serve` ficam chaveadas no nome ANTIGO, o `tailscaled` pede
+    # certificado para um nome que o nó não responde, e o TLS morre no handshake
+    # com `tlsv1 alert internal error (592)` — sem mensagem que aponte a causa. O
+    # próprio README traz o procedimento completo de republicação. Um script que
+    # renomeasse o nó quebraria os três serviços que ele mesmo publica, e o
+    # check de "já publicado" não perceberia: ele compara o BACKEND
+    # (`100.94.102.114:9119`), não o nome, e portanto passaria em cima da
+    # publicação quebrada.
     #
-    # E a checagem de COLISÃO cobre a ressalva do `machine-id`: uma imagem clonada
-    # tem o mesmo id, logo o mesmo nome. A colisão apareceria nos outros nós, que é
-    # o único lugar onde dá para vê-la antes de virar confusão.
+    # A filosofia fecha a conta: este script é de provisionar uma vez e virar
+    # desnecessário. Numa máquina nova o Tailscale ainda não existe quando este módulo
+    # roda — ele é a posição 2, e o `tailscale` é a 7 —, então não há o que renomear:
+    # o `tailscale up` posterior já pega o hostname novo. Numa máquina já
+    # provisionada, o nome do nó é um estado que a pessoa administra, e o script não
+    # mexe nele.
+    #
+    # O que sobra é o RELATO, e ele é estado, não opinião: os dois nomes, lado a
+    # lado, e o preço de reconciliá-los, com o README como fonte do procedimento.
     if command -v tailscale &> /dev/null && tailscale status &> /dev/null 2>&1; then
         _self="$(tailscale status --json 2>/dev/null | python3 -c "
 import json, sys
 try: print(json.load(sys.stdin).get('Self', {}).get('HostName', ''))
 except Exception: pass" 2>/dev/null)"
-        if [ -z "$_self" ]; then
-            echo -e "${YELLOW}  Não consegui ler o nome do nó na tailnet; pulei a conferência.${NC}"
-        elif [ -n "$NEW_HOSTNAME" ] && [ "${_self%,}" != "${NEW_HOSTNAME%,}" ]; then
-            echo -e "${YELLOW}  ⚠️ Divergência: o SO agora se chama '${NEW_HOSTNAME}', e o nó na${NC}" >&2
-            echo -e "${YELLOW}     tailnet ainda se chama '${_self%,}'. O Tailscale pegou o nome quando o${NC}" >&2
-            echo -e "${YELLOW}     nó conectou, e trocar o hostname do SO não o renomeia.${NC}" >&2
-            echo -e "${YELLOW}     MEDIDO nesta VM: a divergência, sozinha, não quebra nada — as três${NC}" >&2
-            echo -e "${YELLOW}     portas publicadas continuam respondendo.${NC}" >&2
-            echo -e "${YELLOW}     Se for renomear o nó, saiba o preço antes: renomeado o nó, o${NC}" >&2
-            echo -e "${YELLOW}     'tailscale serve' fica chaveado no nome ANTIGO, o tailscaled pede${NC}" >&2
-            echo -e "${YELLOW}     certificado para um nome que o nó não responde, e o TLS morre no${NC}" >&2
-            echo -e "${YELLOW}     handshake com 'tlsv1 alert internal error (592)' — sem mensagem${NC}" >&2
-            echo -e "${YELLOW}     que aponte a causa. O README traz o procedimento completo.${NC}" >&2
-            echo -e "${YELLOW}     Para renomear o nó: sudo tailscale set --hostname=${NEW_HOSTNAME}${NC}" >&2
-            echo -e "${YELLOW}     E logo depois, republicar as três publicações (ver README).${NC}" >&2
+        if [ -n "$NEW_HOSTNAME" ] && [ -n "$_self" ] && [ "${_self%,}" != "${NEW_HOSTNAME%,}" ]; then
+            echo -e "${YELLOW}  O nó na tailnet se chama '${_self%,}' e o SO se chama '${NEW_HOSTNAME}'.${NC}"
+            echo -e "${YELLOW}  São dois nomes diferentes de propósito: o Tailscale copiou o do SO quando${NC}"
+            echo -e "${YELLOW}  conectou, e este script não renomeia nós. Medido: a divergência sozinha não${NC}"
+            echo -e "${YELLOW}  quebra nada — as três portas continuam respondendo.${NC}"
+            echo -e "${YELLOW}  Se um dia os dois precisarem ser o mesmo, o procedimento e o preco${NC}"
+            echo -e "${YELLOW}  estão no README, na secao da armadilha do nome defasado.${NC}"
         fi
         unset _self
 
@@ -3290,8 +3302,9 @@ print(','.join(p.get('HostName', '') for p in peers.values()
             unset _colisao
         fi
     else
-        echo -e "${YELLOW}  Tailscale ainda não conectou; a conferência do nó fica para o próximo run.${NC}"
+        echo -e "${YELLOW}  Tailscale ainda não conectou; ele vai pegar o hostname novo ao subir.${NC}"
     fi
+    mkdir -p "$HOME/Developer"
     mkdir -p "$HOME/Developer"
 fi
 
