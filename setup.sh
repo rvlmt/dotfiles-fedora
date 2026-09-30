@@ -1246,9 +1246,35 @@ _setup_open_design_native() {
     # O `prepare` fica, e serve ao que for rodado FORA do clone -- o `pnpm` de uso
     # pessoal da maquina. Ele nao afeta o build do OpenDesign, e o comentario acima
     # deixa isso explicito para quem for mexer aqui.
-    if [ ! -x "$nb/pnpm" ]; then
-        corepack enable pnpm >/dev/null 2>&1
-        corepack prepare pnpm@latest --activate >/dev/null 2>&1
+    # Nao ha pnpm global nesta maquina, e essa e a REGRA aplicada: o consumidor do
+    # pnpm e o PROJETO, que declara a propria versao em
+    # `"packageManager": "pnpm@10.33.2"`, e o corepack baixa a que for pedida.
+    #
+    # O que saiu, e por que:
+    #
+    #   * `corepack prepare pnpm@latest --activate` — INUTIL aqui. Medido: dentro
+    #     do repo o corepack usa a versao declarada, nao a global. Ele so servia ao
+    #     pnpm de uso pessoal, e esta VM nao tem uso pessoal.
+    #   * `corepack enable pnpm` — tambem desnecessario. O `enable` cria o shim no
+    #     PATH global para o pnpm de linha de comando; dentro do repo o corepack
+    #     ja resolve a versao declarada sem shim nenhum.
+    #
+    # O que fica, e e o que de fato consome:
+    #
+    #   * `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`, no export acima — o corepack
+    #     pergunta `[Y/n]` na primeira vez, e num `setup.sh` nao ha quem responda.
+    #     Sem esta variavel o modulo trava. A resposta e conhecida antes da
+    #     pergunta, porque a versao e a que o projeto declara.
+    #   * a checagem de que o pnpm EXISTE, com a versao que o BUILD vai usar, lida
+    #     de dentro do repo — que e a informacao que importa, e nao a global.
+
+    # A versao que o BUILD vai usar, medida de onde o build roda: dentro do clone.
+    local pnpm_ver
+    pnpm_ver="$(cd "$OPENDESIGN_SRC" 2>/dev/null && pnpm --version 2>/dev/null | tail -1)"
+    if [ -z "$pnpm_ver" ] && [ -d "$OPENDESIGN_SRC" ]; then
+        echo -e "${YELLOW}Nao consegui o pnpm dentro do clone; o build do OpenDesign vai falhar.${NC}" >&2
+        echo -e "${YELLOW}  Verifique: cd $OPENDESIGN_SRC && pnpm --version${NC}" >&2
+        return 1
     fi
     local pnpm_ver
     pnpm_ver="$(pnpm --version 2>/dev/null | head -1)"
@@ -2895,10 +2921,35 @@ if should_run "base"; then
     # precisam de `tar`, então quem chama é quem instala. Medido numa VM de
     # agente: o `base` morria dentro do instalador do mise, e `tar` não estava
     # instalado.
+    # REGRA: TODO PACOTE DECLARA QUEM O CONSOME. Se ninguem declara, ele sai.
+    #
+    # A lista anterior carregava `tree`, `tmux`, `zellij`, `ripgrep`, `fd-find`,
+    # `btop` e `wget`: medido, a UNICA ocorrencia de cada um desses nomes no script
+    # inteiro era a propria lista de pacotes. Nenhum e invocado, nenhum instalador
+    # deste repo o exige, e a VM de agentes nao tem uso pessoal — e uma maquina de
+    # servico. Um pacote sem consumidor e entulho que se paga em download e imagem.
+    #
+    # A regra tem duas metades, e a segunda e a que impede a lista de inflar de
+    # novo: quando o consumidor e um INSTALADOR EXTERNO, isso e dito na linha. E o
+    # caso do `tar` e do `unzip`, que o script nao chama — quem chama e o mise e o
+    # Bun, dentro dos instaladores que o proprio modulo `base` executa. A lista
+    # cresceu a primeira vez porque o `base` morria dentro do instalador do mise sem
+    # o `tar` (medido), e o `unzip` veio junto porque o Bun descompacta com ele em
+    # vez de `tar -xzf`.
+    #
+    # Consumo por este script, medido por contagem de invocacao fora de comentario:
+    #
+    #   git 17x   gh 15x   jq 12x   openssl 13x   curl 26x   dnf 27x
+    #   dnf5-plugins: o `config-manager` do tailscale, do brave e do vscode
+    #   libatomic / libX11: o build do OpenDesign e o `pm` do Hermes
+    #
+    # E o que saiu, com a medicao: `tree`, `tmux`, `zellij`, `ripgrep`, `fd-find`,
+    # `btop`, `wget`. Ferramentas de leitura convenience para pessoa, numa maquina
+    # que nao tem pessoa.
     sudo dnf install -y --skip-unavailable \
-        git gh jq tree tmux zellij ripgrep fd-find unzip \
-        curl wget btop tar openssl \
+        git gh jq curl openssl \
         dnf5-plugins \
+        tar unzip \
         libatomic libX11
     # ⚠️ "não vem no Fedora" era verdade para uma imagem e falsa para outra:
     # medido numa Fedora 44 Workstation Edition recém-criada, as DUAS já vêm
