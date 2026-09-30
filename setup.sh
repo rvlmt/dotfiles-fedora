@@ -1276,9 +1276,6 @@ _setup_open_design_native() {
         echo -e "${YELLOW}  Verifique: cd $OPENDESIGN_SRC && pnpm --version${NC}" >&2
         return 1
     fi
-    local pnpm_ver
-    pnpm_ver="$(pnpm --version 2>/dev/null | head -1)"
-    [ -n "$pnpm_ver" ] || { echo -e "${YELLOW}pnpm nao ficou disponivel; pulei o OpenDesign.${NC}" >&2; return 1; }
     echo -e "${BLUE}  pnpm em uso: $pnpm_ver${NC}"
 
     # O modo nativo compila de fonte e nao tem imagem para baixar, entao o repo
