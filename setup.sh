@@ -1268,7 +1268,36 @@ _setup_open_design_native() {
     #   * a checagem de que o pnpm EXISTE, com a versao que o BUILD vai usar, lida
     #     de dentro do repo — que e a informacao que importa, e nao a global.
 
-    # A versao que o BUILD vai usar, medida de onde o build roda: dentro do clone.
+    # `corepack enable` VOLTOU, e a razao de ter saidido esta escrita aqui para
+    # ninguem tira de novo.
+    #
+    # A PR #72 removeu esta linha alegando que era desnecessaria, porque o
+    # corepack resolve a versao declarada DENTRO do repo mesmo sem o shim global.
+    # A medição estava certa. A conclusão estava errada, e o erro foi de método:
+    # eu removi um passo DOCUMENTADO sem que nenhuma medição contradição a
+    # documentação. E a documentação diz, no `CONTRIBUTING.md` do próprio projeto:
+    #
+    #     corepack enable           # selects the pinned pnpm from packageManager
+    #
+    # e repete em dois lugares do README: `corepack enable && pnpm install`.
+    #
+    # O que o passo faz tem nome no projeto: ele SELECIONA o pnpm fixado no
+    # `packageManager`. Sem ele, a resolucao funciona por um caminho lateral do
+    # corepack, que e o que a medicao encontrou -- e um caminho lateral nao e o
+    # que a documentacao prescreve, mesmo que funcione hoje.
+    #
+    # A regra e a do inicio desta sessao: a documentacao da aplicacao vem antes da
+    # medicao propria. Eu medi o objeto certo e ignorei o manual.
+    #
+    # O `corepack prepare pnpm@latest` NAO volta: ele fixava um pnpm global, e o
+    # projeto declara o seu, entao o global nao e consumidor de nada aqui. Essa
+    # parte da PR #72 continua certa.
+    corepack enable pnpm >/dev/null 2>&1
+
+    # A versao que o BUILD vai usar, lida de dentro do clone, que e onde o build
+    # roda. Fora do repo o corepack devolve o default global — e foi exatamente
+    # isso que a PR #73 corrigiu: o numero que este passo anunciava era o global,
+    # enquanto o build usava o do projeto.
     local pnpm_ver
     pnpm_ver="$(cd "$OPENDESIGN_SRC" 2>/dev/null && pnpm --version 2>/dev/null | tail -1)"
     if [ -z "$pnpm_ver" ] && [ -d "$OPENDESIGN_SRC" ]; then
