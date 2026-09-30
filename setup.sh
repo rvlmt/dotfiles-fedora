@@ -717,6 +717,70 @@ except Exception: print('?')" 2>/dev/null)"
 }
 
 # Declara e sobe o dashboard do Hermes como SERVICO de usuario. Sem container e
+# Publica o dashboard do Hermes na tailnet, em :8445.
+#
+# A MEDICAO QUE MOTIVOU ESTA FUNCAO: o modulo declarava e ligava o dashboard, e a
+# unit recebia `HERMES_DASHBOARD_PUBLIC_URL=https://<dns>:8445` -- e NADA
+# publicava essa porta. O `HERMES_SERVE_PORT` aparecia no arquivo de senha e na
+# unit, e em nenhum `tailscale serve`. Resultado: o dashboard respondia no IP da
+# tailnet, e o link que ele mesmo anunciava nao existia.
+#
+# Idempotente por comparacao de texto, como os outros dois, e revalida depois de
+# agir: o formato de `tailscale serve status` muda entre versoes do Tailscale.
+#
+# O guarda aqui e POR PORTA, e nao "ja existe alguma coisa publicada". Os outros
+# dois publicam o mesmo host, e um guarda global faria o segundo se recusar a
+# publicar por causa do primeiro.
+setup_hermes_serve() {
+    local dns ip target
+    dns="$(_tailnet_dnsname)"
+    ip="$(tailscale ip -4 2>/dev/null | head -1)"
+    [ -n "$ip" ] || { echo -e "${YELLOW}Sem IP de tailnet; pulei a publicação do Hermes.${NC}" >&2; return 1; }
+    # O dashboard escuta no IP DA TAILNET, e nao em loopback: e o host interno
+    # da UI do Hermes, e o `serve` e o proxy. Medido nesta VM: `127.0.0.1:9119`
+    # recusa, e `<ip-tailnet>:9119` devolve 200 em /login.
+    target="$ip:$HERMES_DASH_PORT"
+
+    if ! command -v tailscale &> /dev/null; then
+        echo -e "${YELLOW}Tailscale ausente; pulei a publicação do Hermes.${NC}" >&2
+        return 1
+    fi
+
+    local current
+    current="$(tailscale serve status 2>/dev/null || true)"
+
+    if printf '%s' "$current" | grep -qF -- "$target"; then
+        echo -e "${GREEN}✓ Hermes já publicado na tailnet (:$HERMES_SERVE_PORT → $target).${NC}"
+        return 0
+    fi
+    # So reclama se a MESMA porta ja estiver ocupada por outra coisa.
+    if printf '%s' "$current" | grep -qF ":$HERMES_SERVE_PORT"; then
+        echo -e "${YELLOW}A porta :$HERMES_SERVE_PORT já está publicada por outro serviço:${NC}"
+        printf '%s\n' "$current" | sed 's/^/    /'
+        echo -e "${YELLOW}  Não sobrescrevi.${NC}" >&2
+        return 1
+    fi
+
+    if ! sudo tailscale serve --bg --https="$HERMES_SERVE_PORT" "http://$target"; then
+        echo -e "${YELLOW}Não consegui publicar o Hermes na tailnet.${NC}" >&2
+        echo -e "${YELLOW}  Manualmente: sudo tailscale serve --bg --https=$HERMES_SERVE_PORT http://$target${NC}" >&2
+        return 1
+    fi
+
+    # Revalidar depois de agir: se a premissa de formato da linha acima estiver
+    # errada, isto mostra o estado real em vez de o script afirmar sucesso.
+    local after
+    after="$(tailscale serve status 2>/dev/null || true)"
+    if printf '%s' "$after" | grep -qF -- "$target"; then
+        echo -e "${GREEN}✓ Hermes publicado na tailnet (:$HERMES_SERVE_PORT → $target).${NC}"
+        echo -e "${GREEN}  https://$dns:$HERMES_SERVE_PORT${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}  O 'serve' aceitou o comando, mas o alvo não aparece no status:${NC}" >&2
+    printf '%s\n' "$after" | sed 's/^/    /' >&2
+    return 1
+}
+
 # sem sudo.
 setup_hermes_dashboard() {
     local dns ip
@@ -790,14 +854,28 @@ setup_hermes_dashboard() {
     # --skip-build abaixo tem aspas duplas, e isso FECHA a string do shell — o
     # resto da unit vira comando e o ExecStart nunca chega ao arquivo. Foi
     # exatamente o que aconteceu, e o `systemctl start` falhava sem dizer por que.
-    read -r -d '' expected <<UNIT_EOF
+    # `|| true` e obrigatorio: `read -d ''` procura um byte NUL, nao o acha, e
+    # devolve 1 no EOF. Com `set -e` na linha 2 do script, isso ABORTA a
+    # execucao — e como aborta no meio de uma funcao, o chamador so ve a
+    # unit faltando, sem nenhuma mensagem. Medido: este modulo nunca
+    # completou em nenhuma maquina; a unit do dashboard so existia porque
+    # tinha sido escrita a mao. O mesmo vale para a unit do OpenDesign.
+    read -r -d '' expected <<UNIT_EOF || true
 [Unit]
 Description=Dashboard do Hermes (nativo, gerado por dotfiles-fedora)
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$HOME/Hermes-Agent
+# O diretorio de trabalho e a raiz do clone do instalador OFICIAL. Antes
+# apontava para ~/Hermes-Agent, que era a arvore do caminho montado a mao e nao
+# existe mais desde que o modulo hermes-cli usa o instalador oficial.
+# SEM CRASE NESTE COMENTARIO: o here-doc deste bloco nao tem aspas, e num
+# here-doc sem aspas a CRASE e substituicao de comando. Um comentario com
+# crase vira execucao — e o sintoma e o shell tentando rodar a palavra do
+# comentario, nao um erro de sintaxe. Medido: a unit falhava com
+# "hermes-cli: command not found" e "~/Hermes-Agent: No such file or directory".
+WorkingDirectory=$HERMES_CLI_DIR
 Environment=HERMES_DASHBOARD_PUBLIC_URL=https://$dns:$HERMES_SERVE_PORT
 Environment=PATH=$HOME/.local/bin:$HOME/.hermes/tools/bin:/usr/local/bin:/usr/bin:/bin
 # --skip-build porque o web_dist ja foi construido no primeiro start. Sem ele, o
@@ -807,7 +885,7 @@ ExecStart=$HOME/.local/bin/hermes dashboard --host $ip --port $HERMES_DASH_PORT 
 Restart=always
 RestartSec=5
 # Os tres codigos de saida, com os nomes de sysexits.h. Sao os mesmos que a unit
-# do gateway (`hermes gateway install`) escreve, e o Hermes avisa quando a do
+# do gateway (hermes gateway install) escreve, e o Hermes avisa quando a do
 # dashboard nao os tem. Medido nesta maquina: com a porta ocupada, o processo
 # devolve 75 e sai em 2,3s.
 #   75 = EX_TEMPFAIL — drenagem graciosa; o systemd DEVE reiniciar
@@ -889,20 +967,55 @@ UNIT_EOF
     fi
     unset HERMES_DASH_PASSWORD
     echo -e "${GREEN}✓ Dashboard nativo em $ip:$HERMES_DASH_PORT.${NC}"
+
+    # Publicar NAO é opcional aqui, e é a última coisa que faltava: a unit acima
+    # recebe `HERMES_DASHBOARD_PUBLIC_URL=https://<dns>:8445`, e sem o `serve` esse
+    # link não existe — o dashboard so responderia no IP cru da tailnet, sem TLS.
+    #
+    # A falha da publicação não derruba o dashboard: um dashboard no ar e
+    # inacessível pelo link ainda é melhor do que nenhum dashboard, e o motivo da
+    # falha sai na saída.
+    setup_hermes_serve \
+        || echo -e "${YELLOW}O dashboard está no ar mas não foi publicado na tailnet.${NC}" >&2
     return 0
 }
 
-# Gera o hash scrypt com o codigo do proprio Hermes. As dependencias nao estao em
-# venv nenhum: o pm guarda os wheels descompactados em
-# ~/.hermes/cache/uv/archive-v0/<hash>/, e e dali que o processo do dashboard
-# carrega. Montar o PYTHONPATH com eles e a forma de rodar o MESMO codigo fora
-# do processo.
+
+
+# Gera o hash scrypt usando o codigo do PROPRIO Hermes, que e a unica forma de o
+# hash casar com o que o dashboard verifica depois.
+#
+# A invocacao mudou com o instalador oficial, e a antiga aponta para dois
+# caminhos que nao existem mais. Medido numa VM limpa:
+#
+#   - `~/Hermes-Agent` era a arvore do clone no caminho MONTADO A MAO. O
+#     instalador oficial deixa em `~/.hermes/hermes-agent`.
+#   - o `PYTHONPATH` era uma lista de `~/.hermes/cache/uv/archive-v0/<hash>/`,
+#     com `find | head -1` — e esse cache tem 106 entradas, das quais a primeira
+#     em ordem alfabetica e `referencing-0.37.0`, um pacote sem relacao nenhuma.
+#     Apontar para um archive arbitrario e esperar que o import funcione e a
+#     definicao de deducao em vez de medicao.
+#
+# O que funciona, e foi medido: o `python3` do SISTEMA com o `PYTHONPATH` apontado
+# para a raiz do clone. O modulo `hash_password` so precisa de `hashlib` e
+# `secrets`, que sao da stdlib, entao ele importa sem nenhuma dependencia
+# instalada. O `python` dos tools do Hermes, por contraste, NAO serve: medido
+# `ModuleNotFoundError: No module named 'httpx'`.
+#
+# A forma segue o que o proprio docstring da funcao prescreve:
+#
+#   python -c "from plugins.dashboard_auth.basic import hash_password; print(...)"
+#
+# E `basic` e um PACOTE (`__init__.py`), nao um `basic.py` — o que o caminho de
+# import ja refletia corretamente, e o que fez o erro parecer outro.
+#
+# O `[ -z "$pp" ] && return 0` antigo devolvia SUCESSO quando nao achava nada, e o
+# chamador tratava hash vazio como falha. "Nao achei" nao e "deu certo": aqui a
+# ausencia sai como falha, e o chamador ja diz o que fazer.
 _hermes_scrypt_hash() {
     local pw="$1"
-    local pp
-    pp="$(find "$HOME/.hermes/cache/uv/archive-v0" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | tr '\n' ':')"
-    [ -z "$pp" ] && return 0
-    PYTHONPATH="${pp}${HOME}/Hermes-Agent" python3 -c "
+    [ -d "$HERMES_CLI_DIR/plugins" ] || return 1
+    PYTHONPATH="$HERMES_CLI_DIR" python3 -c "
 import sys
 from plugins.dashboard_auth.basic import hash_password
 print(hash_password(sys.argv[1]))" "$pw" 2>/dev/null | tail -1
@@ -1166,7 +1279,13 @@ ODENV
     # $' ou " ABRE e FECHA a string, e o resto da unit vira comando — foi o que
     # aconteceu aqui, e o ExecStart nunca chegava ao arquivo. Ver o mesmo
     # comentario em setup_hermes_dashboard.
-    read -r -d '' expected <<UNIT_EOF
+    # `|| true` e obrigatorio: `read -d ''` procura um byte NUL, nao o acha, e
+    # devolve 1 no EOF. Com `set -e` na linha 2 do script, isso ABORTA a
+    # execucao — e como aborta no meio de uma funcao, o chamador so ve a
+    # unit faltando, sem nenhuma mensagem. Medido: este modulo nunca
+    # completou em nenhuma maquina; a unit do dashboard so existia porque
+    # tinha sido escrita a mao. O mesmo vale para a unit do OpenDesign.
+    read -r -d '' expected <<UNIT_EOF || true
 [Unit]
 Description=OpenDesign nativo (gerado por dotfiles-fedora)
 After=network-online.target
