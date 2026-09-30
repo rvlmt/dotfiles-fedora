@@ -16,6 +16,19 @@ Os dois repos são independentes de propósito — nenhum depende do outro pra
 rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
 (`zshrc`, módulos com `--only`/`--skip`).
 
+## Testes
+
+```bash
+./tests/run.sh
+```
+
+A suíte roda o `setup.sh` **de verdade**, com `sudo`, `dnf`, `podman`,
+`systemctl`, `tailscale` e `gh` falsos no `PATH` e um `HOME` temporário: nada
+toca a máquina. São **96 checagens** de eixos de perfil, forma do arquivo e do
+bloco de chaves de dispositivo. O que ela **não** cobre está escrito em
+[`tests/README.md`](tests/README.md), junto com o motivo — inclusive de dois
+scripts que ficaram de fora por pararem serviços reais.
+
 ## Estrutura
 
 - **`AUDITORIA.md`** — **comece por aqui para saber o que o script faz.** É o

@@ -310,7 +310,7 @@ Se um dia a base mudar, a mudança deve ficar **num módulo só**, e não espalh
 
 Cada perfil verifica no final o que ele mesmo deixou. Não é suíte de testes — são
 afirmações que o script faz sobre o próprio resultado, e são a resposta
-proporcional ao fato de o repo não ter verificação automática.
+proporcional ao que a suíte cobre: `tests/` verifica eixos, forma e o bloco de chaves, e o que ele não cobre continua sendo proportionally maior do que ele.
 
 - **`host`:** `virsh -c qemu:///system` responde, testado **dentro do grupo
   `libvirt`** (`sg libvirt -c ...`). Testar o grupo com `id -nG` seria mentira: o
