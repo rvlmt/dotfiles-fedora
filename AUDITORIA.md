@@ -461,14 +461,34 @@ numa pergunta de default sim autoriza, e que um Enter numa de default não conti
 recusando — a garantia de que nenhum dos outros prompts mudou de comportamento por a
 assinatura passar a aceitar um argumento a mais.
 
-⚠️ **E ele não protege ninguém que clonar este repositório.** O harness inteiro —
-as 81 verificações, o `ptyfile2.py`, os arquivos de entrada — vive **fora** do
-repo, em `/tmp`, e some com a máquina. Então a cobertura existe enquanto esta sesión
-durar, e isso é uma frase honesta sobre o estado, não uma propriedade do código. É a
-mesma razão pela qual o `ARQUITETURA.md` diz que as pós-condições do script são "a
-resposta proporcional ao fato de o repo não ter verificação automática". Trazer o
-harness para dentro é uma decisão do dono do repo, e está na lista de perguntas em
-aberto — não é algo que um agente decida por conta própria e empurre junto.
+✅ **O harness agora está no repositório, em `tests/`, e a cobertura deixou de ser uma
+propriedade desta sessão.** Até 2026-10-01 ele vivia em `/tmp` — as 96 checagens, o
+`ptyfile2.py` e os arquivos de entrada — e morria com a máquina. Era uma frase honesta
+sobre o estado, e ao mesmo tempo uma frase que tornava a cobertura disposable.
+
+Trazer os arquivos foi a parte fácil, e é por isso que vale registrar o que apareceu no
+caminho: **quatro dos nove scripts que eu chamava de teste não eram testes.** Três
+imprimiam observações e saíam com `0` sempre. E dois deles paravam **serviços reais**,
+sem stub: `systemctl --user stop opencode.service` e
+`systemctl --user stop hermes-dashboard.service`, numa máquina que pode ter o serviço no
+ar. Num host provisionado por este repo o `opencode.service` está no ar, e o primeiro
+deles pararia o serviço de que uma sessão de agente depende.
+
+Sobre a causa dos reinícios desta máquina durante aquele trabalho, o registro honesto é
+este: o `opencode.service` já estava `failed`, então o `stop` foi no-op, e **não há
+medição que ligue um ao outro**. O que é medido é que o teste é inseguro por
+construção. A distinção é a mesma que a auditoria aplica a um diagnóstico: correlação
+não é prova, e uma afirmação sobre causa que não foi medida é um defeito, mesmo
+quando a hipótese parece óbvia.
+
+E dois outros caíram por **teste podre com causa documentada**: `test-own-opencode.sh` e
+`test-serve.sh` contam falhas e saem com `1` corretamente, mas dirigem
+`setup_opencode_service` por `OPENCODE_BIND` e `OPENCODE_PORT` — variáveis que o
+`setup.sh` diz, na linha 110, não existirem no opencode v2, com a medição do binário de
+203 MB ao lado. O código abandonou uma entrada que o produto nunca teve, e eles
+continuam afirmando que ela funciona. Estão em `tests/fora/`, com o motivo escrito.
+
+
 ### A décima: um check que não está errado no que pergunta, e sim em quem pergunta
 
 Esta é a melhor das dez como caso didático, porque o check **parece** perfeito. Ele
