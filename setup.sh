@@ -392,6 +392,42 @@ _sshd_hardened() {
     printf '%s\n' "$_t" | grep -qx 'permitrootlogin no'
 }
 
+
+# O nome de uma VM de agentes: `os-vm-<4 do machine-id>`.
+#
+# O `DDMM` que estava na proposta inicial saiu, e a razão é que ele não acrescentava
+# nada: `/etc/machine-id` já é único por instalação, então o carimbo de data só
+# ocupava espaço — e pior, mudava com o dia, o que fazia um re-run no dia seguinte
+# propor outro nome para uma VM que já estava correta. Sem data no nome, essa
+# possibilidade não existe.
+#
+# A fonte é o `/etc/machine-id` e não um sorteio, por dois motivos. O primeiro é que
+# é único por instalação sem que nada seja gravado: com sorteio, o módulo precisaria
+# guardar o nome em algum lugar para não mudar a cada run, e esse lugar seria estado
+# que só existe na máquina. O segundo é determinismo — rodar duas vezes dá o mesmo
+# nome, sem precisar de nada gravado.
+#
+# `product_uuid` seria o identificador natural, porque é o do hypervisor, e é
+# **ausente** nesta VM: `cat /sys/class/dmi/id/product_uuid` não existe.
+#
+# A ressalva é a de qualquer coisa derivada do `machine-id`: uma imagem **clonada**
+# copia o id junto, e duas VMs do mesmo template recebem o mesmo nome. É por isso que
+# o módulo confere a tailnet depois de aplicar e avisa se outro nó já estiver com ele
+# — a colisão apareceria ali, e é o único lugar onde dá para vê-la.
+#
+# MINÚSCULO. Um hostname vira rótulo de DNS, e este repo já tem um incidente medido
+# de nome que não bateu: o `400` do dashboard do Hermes quando o `public_url` ficou
+# sem hostname. Maiúscula passaria no `hostnamectl` — o systemd aceita —, mas
+# levaria a divergência para dentro do nome do nó da tailnet, que é o que o `Host:`
+# do navegador traz.
+suggest_vm_hostname() {
+    local mid
+    mid="$(cat /etc/machine-id 2>/dev/null || true)"
+    # 4 caracteres do INÍCIO do machine-id. Medido nesta VM: `c104…` -> `os-vm-c104`.
+    mid="${mid:0:4}"
+    [ -n "$mid" ] || mid="semid"
+    printf 'os-vm-%s' "$mid"
+}
 # Caminho do mise sem depender do PATH do shell que executou este script.
 mise_bin() {
     if command -v mise &> /dev/null; then
@@ -2377,7 +2413,7 @@ ALL_STEPS="base hostname ssh device-keys git podman gh-app tailscale sshd-harden
 #
 # O que é comum aos dois fica nos dois, idêntico — é a maior parte do script.
 HOST_STEPS="base hostname ssh device-keys git tailscale sshd-hardening firewalld vm-host toolbx gui-access desktop-apps opencodex zshrc"
-VM_STEPS="base ssh device-keys git gh-app tailscale sshd-hardening firewalld podman ai-clis hermes-cli hermes-dashboard open-design open-design-container zshrc"
+VM_STEPS="base hostname ssh device-keys git gh-app tailscale sshd-hardening firewalld podman ai-clis hermes-cli hermes-dashboard open-design open-design-container zshrc"
 
 # Opcionais dentro do próprio perfil: não rodam por padrão mesmo sem --only.
 OPT_IN_STEPS="toolbx gui-access"
@@ -2779,8 +2815,31 @@ NEW_HOSTNAME=""
 CONFIRM_HOSTNAME=""
 if should_run "hostname"; then
     CURRENT_HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
-    echo "Hostname atual: $CURRENT_HOSTNAME"
-    pergunta "Novo hostname (deixe em branco para manter '$CURRENT_HOSTNAME'): " NEW_HOSTNAME
+    # No perfil `vm` o default deixa de ser "manter o atual" e passa a ser um nome
+    # gerado. A razão de o `host` manter o comportamento antigo é a mesma do
+    # hardening: na VM este script é a história inteira da máquina, e um hostname
+    # que distingue uma VM da outra é o que torna o nome útil; no host o nome é
+    # escolha de quem usa a máquina, e um Enter continua significando "não mexe".
+    NEW_HOSTNAME_SUGGESTED=""
+    # Reconhecer o próprio esquema, e aqui isso é TIRAR A PERGUNTA, e não só
+    # poupar o default. A primeira versão reconhecia o nome e perguntava assim mesmo,
+    # porque o `pergunta` estava fora do if/else — e o efeito foi o pior dos dois:
+    # numa VM já nomeada, a pergunta aparecia com a palavra "manter", a resposta
+    # vazia caía no `pergunta` como se fosse um nome, e o `confirm` subsequente
+    # oferecia aplicar "1234" como hostname. Reconhecer e não perguntar são coisas
+    # diferentes, e só a segunda é a que o passo quer.
+    if [ "$PROFILE" = "vm" ] \
+       && printf '%s' "$CURRENT_HOSTNAME" | grep -qE '^os-vm-[a-z0-9]{4}$'; then
+        echo "Hostname atual: $CURRENT_HOSTNAME  —  já é um nome gerado por este script; mantido."
+    elif [ "$PROFILE" = "vm" ]; then
+        NEW_HOSTNAME_SUGGESTED="$(suggest_vm_hostname)"
+        echo "Hostname atual: $CURRENT_HOSTNAME  —  a VM de agentes recebe um nome próprio por padrão"
+        pergunta "Novo hostname [$NEW_HOSTNAME_SUGGESTED]: " NEW_HOSTNAME
+        NEW_HOSTNAME="${NEW_HOSTNAME:-$NEW_HOSTNAME_SUGGESTED}"
+    else
+        echo "Hostname atual: $CURRENT_HOSTNAME"
+        pergunta "Novo hostname (deixe em branco para manter '$CURRENT_HOSTNAME'): " NEW_HOSTNAME
+    fi
     if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$CURRENT_HOSTNAME" ]; then
         confirm "Alterar o hostname para '$NEW_HOSTNAME'?" && CONFIRM_HOSTNAME=1
     else
@@ -3155,15 +3214,83 @@ fi
 # ==============================================================================
 if should_run "hostname"; then
     echo -e "\n${BLUE}==> Hostname${NC}"
-    if [ -n "$NEW_HOSTNAME" ]; then
-        if [ "$CONFIRM_HOSTNAME" = "1" ]; then
-            sudo hostnamectl set-hostname "$NEW_HOSTNAME"
+    if [ -z "$NEW_HOSTNAME" ]; then
+        echo -e "${YELLOW}Hostname mantido como '$CURRENT_HOSTNAME'.${NC}"
+    elif [ "$CONFIRM_HOSTNAME" != "1" ]; then
+        echo -e "${YELLOW}Alteração de hostname ignorada.${NC}"
+    elif printf '%s' "$NEW_HOSTNAME" | grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' \
+         && [ "${#NEW_HOSTNAME}" -le 63 ]; then
+        # Valida ANTES do `set-hostname`, porque depois já é tarde: o nome entra no
+        # registro do sistema, e um nome ruim deixa a máquina mais difícil de
+        # alcançar — é por ele que a tailnet e o SSH se apresentam. As regras são as
+        # do RFC 1123 que o systemd aplica: até 63 caracteres (64 com o ponto
+        # final), sem ponto, sem espaço. O `hostnamectl` aceita maiúscula, e ver
+        # `suggest_vm_hostname` para por que mesmo assim não geramos maiúscula.
+        if sudo hostnamectl set-hostname "$NEW_HOSTNAME"; then
             echo -e "${GREEN}✓ Hostname definido como: $NEW_HOSTNAME${NC}"
         else
-            echo -e "${YELLOW}Alteração de hostname ignorada.${NC}"
+            echo -e "${YELLOW}O hostnamectl recusou '$NEW_HOSTNAME'.${NC}" >&2
         fi
     else
-        echo -e "${YELLOW}Hostname mantido como '$CURRENT_HOSTNAME'.${NC}"
+        echo -e "${YELLOW}Hostname inválido, não aplicado: '$NEW_HOSTNAME'.${NC}" >&2
+        echo -e "${YELLOW}  Só minúsculas, dígitos e hífen, sem ponto, até 63 caracteres.${NC}" >&2
+    fi
+
+    # ── A tailnet: conferência, e não ação ──────────────────────────────────
+    #
+    # O hostname do SO alimenta o nome do nó na tailnet, mas SÓ enquanto o nó não
+    # está conectado. Medido nesta VM antes da mudança: hostname do SO e `HostName`
+    # do nó eram ambos `fedora-vm-mini` — e uma vez conectado, trocar o hostname do
+    # SO NÃO renomeia o nó. Num nó já provisionado, os dois divergem em silêncio.
+    #
+    # Por que é conferência e não ação: renomear um nó exigiria
+    # `tailscale set --hostname=`, que é privilégio de admin e mexe em como o nó é
+    # alcançado. Isso é decisão de quem administra a tailnet, não efeito colateral
+    # de provisionar uma máquina. O módulo diz o comando e não o executa.
+    #
+    # E a checagem de COLISÃO cobre a ressalva do `machine-id`: uma imagem clonada
+    # tem o mesmo id, logo o mesmo nome. A colisão apareceria nos outros nós, que é
+    # o único lugar onde dá para vê-la antes de virar confusão.
+    if command -v tailscale &> /dev/null && tailscale status &> /dev/null 2>&1; then
+        _self="$(tailscale status --json 2>/dev/null | python3 -c "
+import json, sys
+try: print(json.load(sys.stdin).get('Self', {}).get('HostName', ''))
+except Exception: pass" 2>/dev/null)"
+        if [ -z "$_self" ]; then
+            echo -e "${YELLOW}  Não consegui ler o nome do nó na tailnet; pulei a conferência.${NC}"
+        elif [ -n "$NEW_HOSTNAME" ] && [ "${_self%,}" != "${NEW_HOSTNAME%,}" ]; then
+            echo -e "${YELLOW}  ⚠️ Divergência: o SO agora se chama '${NEW_HOSTNAME}', e o nó na${NC}" >&2
+            echo -e "${YELLOW}     tailnet ainda se chama '${_self%,}'. O Tailscale pegou o nome quando o${NC}" >&2
+            echo -e "${YELLOW}     nó conectou, e trocar o hostname do SO não o renomeia.${NC}" >&2
+            echo -e "${YELLOW}     MEDIDO nesta VM: a divergência, sozinha, não quebra nada — as três${NC}" >&2
+            echo -e "${YELLOW}     portas publicadas continuam respondendo.${NC}" >&2
+            echo -e "${YELLOW}     Se for renomear o nó, saiba o preço antes: renomeado o nó, o${NC}" >&2
+            echo -e "${YELLOW}     'tailscale serve' fica chaveado no nome ANTIGO, o tailscaled pede${NC}" >&2
+            echo -e "${YELLOW}     certificado para um nome que o nó não responde, e o TLS morre no${NC}" >&2
+            echo -e "${YELLOW}     handshake com 'tlsv1 alert internal error (592)' — sem mensagem${NC}" >&2
+            echo -e "${YELLOW}     que aponte a causa. O README traz o procedimento completo.${NC}" >&2
+            echo -e "${YELLOW}     Para renomear o nó: sudo tailscale set --hostname=${NEW_HOSTNAME}${NC}" >&2
+            echo -e "${YELLOW}     E logo depois, republicar as três publicações (ver README).${NC}" >&2
+        fi
+        unset _self
+
+        if [ -n "$NEW_HOSTNAME" ]; then
+            _colisao="$(tailscale status --json 2>/dev/null | ALVO="$NEW_HOSTNAME" python3 -c "
+import json, os, sys
+alvo = os.environ.get('ALVO', '').rstrip('.').lower()
+try: peers = json.load(sys.stdin).get('Peer') or {}
+except Exception: peers = {}
+print(','.join(p.get('HostName', '') for p in peers.values()
+                if p.get('HostName', '').rstrip('.').lower() == alvo))" 2>/dev/null)"
+            if [ -n "$_colisao" ]; then
+                echo -e "${YELLOW}  ⚠️ Outro nó da tailnet já se chama '${_colisao%,}' — este nome colide.${NC}" >&2
+                echo -e "${YELLOW}     A causa provável é uma imagem CLONADA: o machine-id vai junto, e é${NC}" >&2
+                echo -e "${YELLOW}     dele que vem o sufixo. Compare com: cat /etc/machine-id${NC}" >&2
+            fi
+            unset _colisao
+        fi
+    else
+        echo -e "${YELLOW}  Tailscale ainda não conectou; a conferência do nó fica para o próximo run.${NC}"
     fi
     mkdir -p "$HOME/Developer"
 fi
