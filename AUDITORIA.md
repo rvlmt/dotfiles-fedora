@@ -16,7 +16,7 @@ Um **módulo** por função, e o perfil decide o que roda.
 | perfil | para quê | passos |
 |---|---|---|
 | `host` | workstation pessoal, hospeda VMs | `base`, `hostname`, `ssh`, `device-keys`, `git`, `tailscale`, `sshd-hardening`, `firewalld`, `vm-host`, `toolbx`, `gui-access`, `desktop-apps`, `opencodex`, `zshrc` |
-| `vm` | **fronteira**: agentes, sem exposição na LAN | `base`, `ssh`, `device-keys`, `git`, `gh-app`, `tailscale`, `sshd-hardening`, `podman`, `ai-clis`, `hermes-cli`, `hermes-dashboard`, `open-design`, `open-design-container`, `zshrc` |
+| `vm` | **fronteira**: agentes, sem exposição na LAN | `base`, `hostname`, `ssh`, `device-keys`, `git`, `gh-app`, `tailscale`, `sshd-hardening`, `podman`, `ai-clis`, `hermes-cli`, `hermes-dashboard`, `open-design`, `open-design-container`, `zshrc` |
 | ambos | a parte comum, idêntica nos dois | — |
 
 Opt-in dentro do próprio perfil: **`toolbx`, `gui-access`**.
@@ -250,6 +250,7 @@ Uma entrada inválida repregunta; em EOF o `read` falharia para sempre e um
 | **gateway do Hermes manual** | o script não duplica a documentação do produto | três comandos a mais numa VM nova — e a unit gerada prende o caminho do executável |
 | **nenhuma marcação de zona no `tailscale0`** | a interface fica na zona padrão, que já abre `ssh`; e medido: o `firewalld` não filtra as portas do `tailscale serve`, então nada foi perdido | quem quiser a `trusted` precisa rodar o comando à mão — a decisão sai do provisionamento e vira uma escolha de quem está na máquina |
 | **`shields-up` do Tailscale desligado** (o default do produto) | o nó continua alcançável pelos outros nós da tailnet, que é o que o provisionamento espera | **qualquer nó da tailnet alcança as portas que a máquina escuta** — é a mesma exposição da `trusted`, em um controle que o script nunca pergunta. Medido: `ShieldsUp: False`, e o default do binário também é `False`. Fica registrado, não perguntado |
+| **nome da VM gerado do `machine-id`** (`os-vm-<4>`, default só no perfil `vm`) | distingue uma VM da outra sem ninguém digitar nada, e é **determinístico**: rodar duas vezes dá o mesmo nome, sem estado gravado | o `DDMM` da proposta inicial foi descartado — data não acrescenta nada sobre um id único e mudaria todo dia, o que faria um re-run propor outro nome para uma VM já correta. E o nome vem do `machine-id`, que uma imagem **clonada** copia junto: por isso o módulo confere a tailnet e avisa se outro nó já estiver com ele |
 | **`device-keys` com default sim** | o `authorized_keys` sai populado, e é o que permite ao `sshd-hardening` desligar a senha em seguida | a cadeia de entrada passa a depender da conta `rvlmt` no GitHub, e o acesso é revogado **indireto e diferido**: sai-se a chave lá, e ela perde o acesso na próxima execução deste módulo |
 | **hardening com default sim na VM, não no host** | a senha do SSH — a credencial mais exposta da VM — fica desligada sem depender de alguém responder "y" numa lista | a assimetria entre os perfis é uma decisão, e ela precisa continuar visível: quem provisionar um host recebe `[y/N]`, e a diferença está documentada no `README` e nesta tabela, não na chamada do prompt |
 | **nenhuma versão pinada por número** | o `base` não pode falhar porque um número saiu do registro | o **pnpm** salta de major (10.33.2 → 12.x) contra um lockfile `9.0` |

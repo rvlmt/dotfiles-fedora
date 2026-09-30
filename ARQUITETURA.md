@@ -271,8 +271,8 @@ mesma da seção de divisão: **um módulo mora no perfil da camada que o execut
 | `ssh` | sim | sim | Cada máquina tem par de chaves próprio. |
 | `tailscale` | sim | sim | Identidade na tailnet. No guest é **como o Mac chega**. |
 | `sshd-hardening` | sim | sim | Os dois são alcançáveis por SSH. |
-| `hostname` | sim | — | No guest o hostname vem do formulário do Cockpit. |
-| `firewalld` | sim | — | O host guarda o egress. O guest é NAT e não é exposto. |
+| `hostname` | sim | sim | No `host` um Enter mantém o que existe. No `vm` o default é um nome gerado, `os-vm-<4 do machine-id>`: distinguir uma VM da outra é o que torna o nome útil, e o módulo reconhece o próprio esquema para não perguntar de novo. |
+| `firewalld` | sim | sim | O host guarda o egress; o guest é NAT. Nos dois, a pós-condição é a mesma: a zona da `tailscale0` precisa permitir `ssh`. |
 | `vm-host` | sim | — | `libvirt`, `cockpit-machines`, grupo `libvirt`. Sem rede: pendência. |
 | `gh-app` | — | sim | Identidade de máquina para a API do GitHub. A private key nunca entra no repo; fica em `~/.config/gh-app/` a `600`. |
 | `desktop-apps` | sim | — | Workstation pessoal. No guest quem edita é o devcontainer. |
