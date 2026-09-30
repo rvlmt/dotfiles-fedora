@@ -154,9 +154,22 @@ Container rootless, subuid/subgid, `podman.socket` desabilitado, linger habilita
 Tailscale para a tailnet. SSH com chave apenas. GitHub App para as chaves de
 dispositivo.
 
-⚠️ **O `firewalld` marca `tailscale0` como `trusted`**, e isso libera TODO o tráfego
-da interface. O `ARQUITETURA.md` chama a decisão de "o elo errado da cadeia". O
-script e o documento divergem aqui, e **vale saber que divergem**.
+**O `firewalld` instala e sobe, e não marca mais nada.** Até 2026-09-30 ele marcava
+`tailscale0` na zona `trusted` — que libera TODO o tráfego da interface, e que o
+`ARQUITETURA.md` chamava de "o elo errado da cadeia" desde o começo. A marcação saiu:
+virou decisão de quem está na máquina, executada à mão, e o script só diz qual é o
+comando. O que ele faz no lugar é a **pós-condição** — verificar que a zona em que a
+`tailscale0` caiu **permite `ssh`**, que é o que garante que o Mac consegue entrar.
+Um firewall recém-habilitado é o componente que pode fechar o caminho de entrada, e o
+motivo de a verificação existir é a mesma classe do primeiro bloqueio numa VM limpa: o
+`sshd` nunca subir, e o jeito de descobrir é ficar sem entrada.
+
+**Medição que muda o cálculo de risco:** o `firewalld` **não filtra** as portas do
+`tailscale serve`. Com a `tailscale0` amarrada na zona `public` — que não abre porta
+nenhuma além de `ssh` — as três respostas continuaram `200 / 200 / 302`. As regras
+netfilter do próprio Tailscale aceitam o tráfego antes das regras de zona. Por isso a
+remoção da `trusted` **não tirou publicação nenhuma**, e por isso este script não abre
+porta alguma: abrir seria corrigir um problema que a medição diz que não existe.
 
 ---
 
@@ -235,7 +248,10 @@ Uma entrada inválida repregunta; em EOF o `read` falharia para sempre e um
 | **OpenCode sem pin de versão** | a máquina não fica presa numa versão | acompanha a major 2; se a 3 subir, o script **para e avisa** |
 | **sem evidência de sessão filha** (opencode 2.x) | o agente roda, os 7 agentes são detectados, a transcript da raiz salva | **`--pure` é a garantia de que um plugin não executa no caminho de evidência, e ela não existe no 2.x.** A degradação é **silenciosa** |
 | **gateway do Hermes manual** | o script não duplica a documentação do produto | três comandos a mais numa VM nova — e a unit gerada prende o caminho do executável |
-| **zona `trusted` no `tailscale0`** | a superfície da VM é pequena e ela tem o próprio `firewalld` | **qualquer nó da tailnet alcança todas as portas do host**, não só a 22 |
+| **nenhuma marcação de zona no `tailscale0`** | a interface fica na zona padrão, que já abre `ssh`; e medido: o `firewalld` não filtra as portas do `tailscale serve`, então nada foi perdido | quem quiser a `trusted` precisa rodar o comando à mão — a decisão sai do provisionamento e vira uma escolha de quem está na máquina |
+| **`shields-up` do Tailscale desligado** (o default do produto) | o nó continua alcançável pelos outros nós da tailnet, que é o que o provisionamento espera | **qualquer nó da tailnet alcança as portas que a máquina escuta** — é a mesma exposição da `trusted`, em um controle que o script nunca pergunta. Medido: `ShieldsUp: False`, e o default do binário também é `False`. Fica registrado, não perguntado |
+| **`device-keys` com default sim** | o `authorized_keys` sai populado, e é o que permite ao `sshd-hardening` desligar a senha em seguida | a cadeia de entrada passa a depender da conta `rvlmt` no GitHub, e o acesso é revogado **indireto e diferido**: sai-se a chave lá, e ela perde o acesso na próxima execução deste módulo |
+| **hardening com default sim na VM, não no host** | a senha do SSH — a credencial mais exposta da VM — fica desligada sem depender de alguém responder "y" numa lista | a assimetria entre os perfis é uma decisão, e ela precisa continuar visível: quem provisionar um host recebe `[y/N]`, e a diferença está documentada no `README` e nesta tabela, não na chamada do prompt |
 | **nenhuma versão pinada por número** | o `base` não pode falhar porque um número saiu do registro | o **pnpm** salta de major (10.33.2 → 12.x) contra um lockfile `9.0` |
 | **`--yes` para rodar sem terminal** | provisionamento não interativo, com o default ainda sendo **não** | **o `sudo` continua pedindo senha** — a flag tira as perguntas do script, não as do sudo |
 | **raiz do build = o clone** | o caminho é o que a doc do OpenDesign espera; −947 MB | o clone ganha arquivos não rastreados, e `git status` mostra |
