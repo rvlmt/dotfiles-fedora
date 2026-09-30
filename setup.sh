@@ -637,11 +637,31 @@ setup_hermes_cli() {
     # A segunda flag, `--branch`, e o pin. Juntas:
     #     curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG"
     if [ -x "$HOME/.local/bin/hermes" ] && [ -d "$HERMES_CLI_DIR/.git" ]; then
-        local _have_tag
-        _have_tag=$(git -C "$HERMES_CLI_DIR" describe --tags --exact-match 2>/dev/null || echo "")
-        if [ "$_have_tag" = "$HERMES_CLI_TAG" ]; then
-            echo -e "${YELLOW}Hermes já em $_have_tag; pulando o instalador.${NC}"
-        else
+        # ⚠️ A IDEMPOTÊNCIA COMPARA COMMIT, E NÃO NOME DE TAG. Isso é uma correção
+    # medida, e a medição é esta: o upstream publica DOIS nomes de tag no MESMO
+    # commit — `rc.14-v0.21.5` e `abandoned-rc.14-v0.21.5` — e o `git describe`
+    # devolve o segundo.
+    #
+    # Comparando o NOME, como esta função fazia, a checagem nunca passava: o pin é
+    # `rc.14-v0.21.5` e o `describe` devolve `abandoned-rc.14-v0.21.5`, que
+    # difere. O resultado era reinstalar o Hermes — e refazer o build do TUI e da
+    # web UI inteira — em CADA execução do módulo.
+    #
+    # Um commit não tem esse problema: ele não muda de nome, e mover a tag é
+    # exatamente o que o upstream faz ao marcar uma rc como abandonada. Por isso a
+    # comparação resolve a tag para o commit e compara os dois.
+    #
+    # E vale registrar o tamanho do problema: `abandoned-` existe para as rc de 6 a
+    # 29 da série 0.21.5, e as tags limpas vão até a rc.30. Ou seja, o pin
+    # `rc.14` está dentro do que o upstream considera superado — o que é uma
+    # decisão do dono da máquina, e não deste trecho.
+    local _have_tag _want_sha _have_sha
+    _want_sha=$(git -C "$HERMES_CLI_DIR" rev-list -n 1 "$HERMES_CLI_TAG" 2>/dev/null || echo "")
+    _have_sha=$(git -C "$HERMES_CLI_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    _have_tag=$(git -C "$HERMES_CLI_DIR" describe --tags --exact-match 2>/dev/null || echo "(sem tag exata)")
+    if [ -n "$_want_sha" ] && [ "$_want_sha" = "$_have_sha" ]; then
+        echo -e "${YELLOW}Hermes já em $_have_tag; pulando o instalador.${NC}"
+    else
             echo -e "${BLUE}Atualizando o Hermes para $HERMES_CLI_TAG…${NC}"
             curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG" || {
                 echo -e "${YELLOW}O instalador do Hermes falhou; a saída está acima.${NC}" >&2
