@@ -410,8 +410,8 @@ caminho, e é o que falta para o perfil `vm` ser automatizável de ponta a ponta
 ## 10. As correções que a VM limpa obrigou, e o padrão delas
 
 §9 é o que a máquina **mostrou**. Esta é a lista do que foi **corrigido**,
-e ela é a parte que importa para a próxima: nenhuma das oito aparece em
-`bash -n`, e **nenhuma reclama**. Todas devolvem 0 ou saem em silêncio.
+e ela é a parte que importa para a próxima: nenhuma das nove aparece em
+`bash -n`, e **nenhuma reclama** — ou reclama o contrário do que anuncia.
 
 | | o que era | como se manifestava |
 |---|---|---|
@@ -423,7 +423,50 @@ e ela é a parte que importa para a próxima: nenhuma das oito aparece em
 | dashboard | `PYTHONPATH` com caminho morto e archive arbitrário | "não consegui gerar o hash scrypt" |
 | open-design | guard comparava `native` com `nativo` | módulo não fazia nada |
 | open-design | nada publicava o `:8444` | link anunciado não existia |
+| `confirm` | `return "$default"` num default de "sim", e `confirm` devolve **1** para não | a pergunta anunciava `[Y/n]` e o Enter respondia **não** — e o harness passava 75/75 |
 
+### A nona, e a primeira que o harness não pegou
+
+As oito acima têm um traço em comum: **nenhuma reclama**. Devolvem 0, ou saem em
+silêncio, e o `bash -n` passa. A nona é a primeira que **anuncia uma coisa e faz
+outra** — e ela passou pelo harness inteiro porque nenhuma das 75 verificações
+respondia vazio a uma pergunta de default sim.
+
+O que era: `confirm` ganhou um segundo argumento, o default, para que "por padrão"
+e "sempre" fossem coisas diferentes que o script dissesse. E o Enter vazio passou a
+valer o default declarado. Só que `confirm` devolve **0 para sim e 1 para não**, e o
+código novo fazia `return "$default"` — que num default de "sim" devolvia 1. Um
+Enter na pergunta que anunciava `[Y/n]` respondia não.
+
+Achado rodando o script na VM, não lendo o código:
+
+```
+Autorizar nesta máquina as chaves de dispositivos que o GitHub reúne (…)? [Y/n]
+==> Chaves de dispositivos (GitHub)
+  Chaves de dispositivos: não autorizado.
+```
+
+A lição tem duas partes, e a segunda é a que importa mais. A primeira é que
+função que devolve status precisa de teste que olhe o **efeito**, não o texto da
+pergunta: o `device-keys` escreve no `authorized_keys`, então "o arquivo tem chave"
+e "o script autorizou" são a mesma coisa vista de dois lados. A segunda é que um
+harness só cobre o que alguém imaginou perguntar — 75 verificações, nenhuma delas
+sobre a combinação "pergunta nova" + "Enter", que é exatamente a que a mudança
+introduzia.
+
+O teste que faltava foi escrito, e ele prova os **dois** sentidos: que um Enter
+numa pergunta de default sim autoriza, e que um Enter numa de default não continua
+recusando — a garantia de que nenhum dos outros prompts mudou de comportamento por a
+assinatura passar a aceitar um argumento a mais.
+
+⚠️ **E ele não protege ninguém que clonar este repositório.** O harness inteiro —
+as 81 verificações, o `ptyfile2.py`, os arquivos de entrada — vive **fora** do
+repo, em `/tmp`, e some com a máquina. Então a cobertura existe enquanto esta sesión
+durar, e isso é uma frase honesta sobre o estado, não uma propriedade do código. É a
+mesma razão pela qual o `ARQUITETURA.md` diz que as pós-condições do script são "a
+resposta proporcional ao fato de o repo não ter verificação automática". Trazer o
+harness para dentro é uma decisão do dono do repo, e está na lista de perguntas em
+aberto — não é algo que um agente decida por conta própria e empurre junto.
 ### O padrão: um guarda que erra não falha, finge que não é a vez dele
 
 O caso do `native`/`nativo` é o arquétipo. O `case` da pergunta aceita
@@ -439,12 +482,18 @@ E o mesmo no `PYTHONPATH`: apontava para um caminho que não existe mais e para
 `find | head -1` num cache de **106 entradas**, sendo a primeira em ordem
 alfabética um pacote sem relação. Funcionava ou não, depende do acaso.
 
-### Uma máquina montada esconde as oito
+### Uma máquina montada esconde as nove
 
-O que as sete tinham em comum: **o trabalho que elas deveriam fazer foi feito à
-mão**. O `sshd` foi habilitado no console; as units foram escritas à mão; o Hermes
+O que as oito tinham em comum: **o trabalho que elas deveriam fazer foi feito à
+mão.** O `sshd` foi habilitado no console; as units foram escritas à mão; o Hermes
 era a instalação antiga em `~/Hermes-Agent`. Nenhuma dessas mãos aparece no log
 do script, e nenhuma delas é detectável sem provisionar do zero.
+
+A nona é a exceção, e por um motivo que as outras não têm: não é herança de uma
+máquina montada à mão. É uma mudança **deste dia**, e foi ela que introduziu o
+defeito junto com a correção que prometia. É o caso em que a máquina limpa não
+podia ter revelado, porque o defeito nasceu depois dela — e o único que o pegou foi
+rodar o script de verdade.
 
 ### O caso mais instrutivo: eu removendo um passo documentado
 
