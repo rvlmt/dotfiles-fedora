@@ -348,6 +348,50 @@ confirm() {
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
+# O sshd JÁ está endurecido? A pergunta é pela CONFIG EFETIVA, e não pelo arquivo.
+#
+# A versão anterior testava `[ ! -f /etc/ssh/sshd_config.d/99-dotfiles-hardening.conf ]`,
+# e esse teste é **sempre verdadeiro** nesta imagem. Medido na VM:
+#
+#   /etc/ssh/sshd_config.d   drwx------ root:root     ← modo 700
+#   99-dotfiles-hardening.conf  -rw-r--r-- root:root  ← legível por todos
+#
+#   [ -f ... ] como usuário  -> FALSO     (o que o script testava)
+#   sudo test -f ...         -> VERDADEIRO
+#   ls ...  como usuário     -> "Permission denied"
+#
+# O bloqueio está na TRAVESSIA do diretório, não no arquivo: um `-f` como usuário
+# normal não consegue resolver o caminho e diz que não existe. A imagem do Fedora 44
+# traz esse diretório em 700, então a consequence foi dupla e nenhuma das duas
+# reclamava: a pergunta do hardening repetia a cada run mesmo já aplicado, e o
+# `else` que dizia "já aplicado" era código inalcançável — o módulo reescrevia o
+# drop-in e recarregava o sshd em toda execução.
+#
+# `sshd -T` imprime a configuração já resolvida, que é a PROPRIEDADE. E é imune à
+# permissão porque responde com `sudo -n`: sem senha, e sem pausar o script.
+#
+# `-n` é o que torna isto usável onde o `sudo -v` ainda NÃO rodou, que é o bloco de
+# perguntas: sem `-n` isto abriria uma segunda pausa para senha no meio do roteiro.
+#
+# E aqui está a parte que é preciso saber, porque a primeira versão deste comentário
+# dizia o contrário: no bloco de perguntas o timestamp do `sudo` está frio, `sudo -n`
+# falha, e a função devolve falso — então **a pergunta continua aparecendo em toda
+# execução**, mesmo com o hardening já aplicado. Medido: a pergunta aparece, e o
+# módulo em seguida responde "já endurecido, nada a fazer".
+#
+# O que a propriedade conserta é o que importava: antes, o `[ -f ]` mentia, o módulo
+# reescrevia o drop-in e recarregava o `sshd` em CADA run. O resto que fica é o
+# atrito de um prompt a mais, e ele é o preço de uma decisão de dono do repo: fazer a
+# pergunta também depender do estado exigiria subir o `sudo -v` para antes dela, o
+# que muda o lugar em que a senha é pedida. Isso é escolha de quem provisiona, e não
+# uma coisa que um agente mude em silêncio.
+_sshd_hardened() {
+    local _t
+    _t="$(sudo -n sshd -T 2>/dev/null)" || return 1
+    printf '%s\n' "$_t" | grep -qx 'passwordauthentication no' || return 1
+    printf '%s\n' "$_t" | grep -qx 'permitrootlogin no'
+}
+
 # Caminho do mise sem depender do PATH do shell que executou este script.
 mise_bin() {
     if command -v mise &> /dev/null; then
@@ -2762,7 +2806,11 @@ if should_run "device-keys"; then
 fi
 
 CONFIRM_SSHD_HARDENING=""
-if should_run "sshd-hardening" && [ ! -f /etc/ssh/sshd_config.d/99-dotfiles-hardening.conf ]; then
+# A pergunta e a autoridade e' o modulo, que roda depois do `sudo -v` e decide pela
+    # propriedade. Aqui o `sudo -n` ainda nao tem timestamp, entao este teste cai
+    # para "nao endurecido" e a pergunta aparece mesmo ja HAVENDO sido aplicada — o
+    # atrito de um prompt, e nada mais. Ver `_sshd_hardened`.
+    if should_run "sshd-hardening" && ! _sshd_hardened; then
     # Default SIM **na VM**, e NÃO no host. A assimetria é deliberada e é a diferença
     # entre as duas máquinas, não uma inconsistência de escrita:
     #
@@ -3367,7 +3415,12 @@ if should_run "sshd-hardening"; then
     fi
 
     SSHD_CONFIG="/etc/ssh/sshd_config.d/99-dotfiles-hardening.conf"
-    if [ ! -f "$SSHD_CONFIG" ]; then
+    # A condição é a PROPRIEDADE, não a existência do arquivo. Ver `_sshd_hardened`:
+    # o diretório de drop-in do Fedora é 700 root:root, então `[ -f ]` como usuário
+    # normal diz "não existe" mesmo com o arquivo lá dentro, e o `else` deste bloco
+    # era código inalcançável — o módulo reescrevia o drop-in e recarregava o sshd
+    # em toda execução, sem reclamar.
+    if ! _sshd_hardened; then
           # Desabilitar PasswordAuthentication sem ter nenhuma chave em
           # authorized_keys já cadastrada te tranca pra fora via SSH de vez.
           #
@@ -3383,19 +3436,38 @@ if should_run "sshd-hardening"; then
           # arquivo fica como estava e o hardening pula com aviso. A pergunta é a
           # segunda camada, não a que evita o lockout.
         if [ ! -s "$HOME/.ssh/authorized_keys" ]; then
-            echo -e "${YELLOW}~/.ssh/authorized_keys vazio ou inexistente — desabilitar login por senha agora te deixaria sem nenhum jeito de entrar via SSH. Adicione a chave pública da máquina de onde você acessa (ex.: 'cat ~/.ssh/id_ed25519.pub' no Mac, cole aqui em ~/.ssh/authorized_keys) antes de rodar este módulo. Pulando.${NC}"
+            echo -e "${YELLOW}~/.ssh/authorized_keys vazio ou inexistente — desabilitar login por senha deixaria a máquina sem entrada. Pulando.${NC}" >&2
         elif [ "$CONFIRM_SSHD_HARDENING" = "1" ]; then
-            sudo tee "$SSHD_CONFIG" > /dev/null <<EOF
+            # Aspas no here-doc: PasswordAuthentication e PermitRootLogin não têm `$`
+            # nem crase, e um here-doc SEM aspas expande os dois. Foi exatamente o
+            # defeito da crase que a §10 da auditoria registra, e o certo é não
+            # depender de o conteúdo não ter nada especial hoje.
+            sudo tee "$SSHD_CONFIG" > /dev/null <<'EOF'
 PasswordAuthentication no
 PermitRootLogin no
 EOF
-            sudo systemctl reload sshd
-            echo -e "${GREEN}✓ sshd endurecido (login por senha desabilitado).${NC}"
+            if sudo systemctl reload sshd; then
+                # Pós-condição: o reload pode ter sido aceito e a config não ter
+                # entrado em vigor. `systemctl reload` devolve 0 se o serviço
+                # recarregou, e o sshd recusa uma config inválida continuando com a
+                # anterior — sem este teste, o "✓" abaixo seria uma afirmação sem
+                # base, que é a forma mais comum de um script mentir.
+                if _sshd_hardened; then
+                    echo -e "${GREEN}✓ sshd endurecido (login por senha desabilitado).${NC}"
+                else
+                    echo -e "${YELLOW}O reload foi aceito, mas a config efetiva continua com senha habilitada.${NC}" >&2
+                    echo -e "${YELLOW}  Confira com: sudo sshd -T | grep -i passwordauthentication${NC}" >&2
+                    echo -e "${YELLOW}  E com: sudo sshd -t   (aponta o erro de sintaxe, se houver)${NC}" >&2
+                fi
+            else
+                echo -e "${YELLOW}O reload do sshd falhou; a config anterior continua valendo.${NC}" >&2
+                echo -e "${YELLOW}  A sintaxe é checada com: sudo sshd -t${NC}" >&2
+            fi
         else
             echo -e "${YELLOW}Hardening do sshd ignorado.${NC}"
         fi
     else
-        echo -e "${YELLOW}Hardening do sshd já aplicado ($SSHD_CONFIG existe).${NC}"
+        echo -e "${YELLOW}✓ sshd já endurecido (PasswordAuthentication no, PermitRootLogin no) — nada a fazer.${NC}"
     fi
 
     # A senha do root é uma credencial sem propósito numa máquina em que se entra
