@@ -128,15 +128,31 @@ HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 # clonava para ~/Hermes-Agent e montava o symlink a mao — o caminho oposto ao que
 # a documentacao prescreve, e que deixava o `pm` sem pin.
 HERMES_CLI_DIR="$HOME/.hermes/hermes-agent"
-# A `version` do pyproject NAO serve para comparar — na fonte ela e "0.0.0" e o
-# numero real vem do NOME da tag. E o nome da tag carrega o status no prefixo:
-# `abandoned-rc.9-v0.21.5` e a mesma 0.21.5 da `rc.14-v0.21.5`, marcada como
-# abandonada pelo upstream. Instalei a `rc.9` primeiro por ter lido a tag da imagem
-# do container, sem olhar o prefixo — e ela estava abandonada.
-#
-# Antes de fixar uma tag, leia o NOME INTEIRO: `git tag | grep <versao>` mostra o
-# prefixo `abandoned-` na propria linha.
-HERMES_CLI_TAG="rc.14-v0.21.5"
+    # A versão NÃO é fixada aqui, e o motivo não é preferência: é a INTERFACE do
+    # instalador. O caminho de atualização dele busca
+    # `git fetch origin "+refs/heads/$BRANCH:..."` (install.sh, linha 477), com o
+    # prefixo `refs/heads/` escrito no código — então a entrada é uma branch, e
+    # só uma branch. Passando a release `v2026.9.24` medido:
+    # `fatal: couldn't find remote ref refs/heads/v2026.9.24`, e o instalador
+    # falha com "git fetch failed". Ver a medição completa em `setup_hermes_cli`.
+    #
+    # Três coisas que valem registrar, porque elas se confundem com facilidade:
+    #
+    #   * a release `v2026.9.24` é uma tag ANOTADA (objeto `e3dd27ee`) que aponta
+    #     para o commit `f97608f1`, e esse commit carrega SÓ essa tag — nenhuma
+    #     `rc`. Release e release candidate são linhas distintas, não nomes
+    #     diferentes para a mesma coisa.
+    #   * o `main` está 4908 commits NA FRENTE da release. Seguir o `main` entrega
+    #     mais do que a release, e é o default do instalador.
+    #   * o pin que existia, `rc.14-v0.21.5`, entregava o commit `ec243785e`, que
+    #     carrega aquela tag e o gêmeo `abandoned-rc.14-v0.21.5` — que é como o
+    #     upstream aposenta uma rc sem apagar o nome original. Ou seja: não era a
+    #     release, era uma release candidate, 19 rcs atrás, já marcada como
+    #     abandonada.
+    #
+    # A regra de "ler o NOME INTEIRO da tag" segue valendo, e é a razão de isto ter
+    # sido pego antes: a `rc.9` foi instalada primeiro por ter lido a tag da imagem
+    # do container, sem olhar o prefixo `abandoned-`.
 
 # ---------------------------------------------------------------- Hermes dashboard
 # NATIVO tambem. O `hermes dashboard` e um subcomando da CLI, entao a UI nao
@@ -609,72 +625,94 @@ setup_hermes_cli() {
         return 1
     fi
 
-    # ── O CAMINHO DOCUMENTADO ──────────────────────────────────────────────────
-    # O README do upstream, secao "Quick Install", prescreve exatamente uma linha:
+    # ── SEM PIN DE VERSÃO, e a interface do instalador é a razão ─────────────
     #
-    #     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+    # A pergunta natural é "seguir a latest RELEASE em vez do main", e ela foi
+    # medida antes de ser respondida. Não dá, e o motivo é do instalador:
     #
-    # Este modulo usava `git clone` + `setup-hermes.sh --runtime-only` + symlink
-    # manual. A flag `--runtime-only` existe mesmo (medido no setup-hermes.sh do
-    # clone, linhas 20/24/179) — nao era dedução — mas o caminho montado a mao
-    # perdia duas coisas que o instalador oficial garante:
+    #   * no caminho de ATUALIZAÇÃO ele busca
+    #     `git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"`
+    #     (install.sh, linha 477). O prefixo `refs/heads/` está ESCRITO no
+    #     código, então a entrada é uma branch e só uma branch. Medido
+    #     passando a release `v2026.9.24`: `fatal: couldn't find remote ref
+    #     refs/heads/v2026.9.24`, e o instalador falha com "git fetch failed".
+    #   * no caminho de INSTALAÇÃO NOVA ele usa `git clone --branch`, e aí uma
+    #     tag SERIA aceita. O que torna a opção pior, e não melhor: ela funciona
+    #     na primeira vez e quebra na segunda. Um pin que funciona uma vez é uma
+    #     armadilha, não uma escolha.
     #
-    #   * o uv PINADO. O oficial baixa `uv 0.12.3` do `pm/lock.json` e confere o
-    #     sha256 (`UV_PIN_SHA256`, medido). O caminho antigo chamava o instalador
-    #     do astral, que traz a ultima versao sem pin nenhum.
-    #   * o estado em `~/.hermes`, com log em `~/.hermes/logs/install.log`.
+    # Medido também o que a release e o `main` são: `v2026.9.24` é uma tag
+    # ANOTADA (objeto `e3dd27ee`) que aponta para o commit `f97608f1`, e esse
+    # commit carrega SÓ essa tag — nenhuma `rc`. São linhas distintas, e o
+    # `main` está 4908 commits NA FRENTE da release. Seguir o `main` entrega mais
+    # do que a release, e é o default do instalador.
     #
-    # O pin de tag continua: o instalador aceita `--branch`, entao
-    # `HERMES_CLI_TAG` sobrevive em vez de virar "latest".
+    # E o pin que existia antes (`rc.14-v0.21.5`) entregava o quê: um commit
+    # (`ec243785e`) que carrega aquela tag e o gêmeo `abandoned-rc.14-v0.21.5` —
+    # que é como o upstream aposenta uma rc sem apagar o nome — e que não é a
+    # release. Release candidate, 19 rcs atrás, marcada como abandonada. É a
+    # razão de a regra ser "sem pin", e não "outra tag".
     #
-    # `--non-interactive` NAO e opcional, e a razao esta medida no install.sh: os
-    # estagios `setup` e `gateway` leem /dev/tty e so se pulam quando /dev/tty NAO
-    # abre. O setup.sh roda sob pty, entao /dev/tty abre, o instalador espera o
-    # assistente e TRAVA PARA SEMPRE. Sem a flag, este passo nao termina. Medido
-    # no install.sh: `if [ "$NON_INTERACTIVE" = true ]; then return 0; fi` nas linhas
-    # 764, 773 e 818.
+    # Então: o comando documentado, sem `--branch`. Quem decide a versão é o
+    # instalador, que é o que a documentação quer.
     #
-    # A segunda flag, `--branch`, e o pin. Juntas:
-    #     curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG"
-    if [ -x "$HOME/.local/bin/hermes" ] && [ -d "$HERMES_CLI_DIR/.git" ]; then
-        # ⚠️ A IDEMPOTÊNCIA COMPARA COMMIT, E NÃO NOME DE TAG. Isso é uma correção
-    # medida, e a medição é esta: o upstream publica DOIS nomes de tag no MESMO
-    # commit — `rc.14-v0.21.5` e `abandoned-rc.14-v0.21.5` — e o `git describe`
-    # devolve o segundo.
+    # A idempotência também não pode mais ser por tag, porque não há tag: passa a
+    # ser o `git fetch` do instalador, e o script só reporta. A verificação por
+    # ESTADO que valia a pena — o launcher responde — continua no fim.
+    # A idempotência é por COMMIT, contra `origin/main` — e não é um pin, é a
+    # comparação que o próprio instalador faria. Medido: sem esta checagem, uma
+    # segunda execução consecutiva refazia "Installing dependencies" e "Building
+    # the hermes command and apps" — o build inteiro do TUI e da web UI, que é a
+    # parte cara, em uma máquina que já está no lugar.
     #
-    # Comparando o NOME, como esta função fazia, a checagem nunca passava: o pin é
-    # `rc.14-v0.21.5` e o `describe` devolve `abandoned-rc.14-v0.21.5`, que
-    # difere. O resultado era reinstalar o Hermes — e refazer o build do TUI e da
-    # web UI inteira — em CADA execução do módulo.
-    #
-    # Um commit não tem esse problema: ele não muda de nome, e mover a tag é
-    # exatamente o que o upstream faz ao marcar uma rc como abandonada. Por isso a
-    # comparação resolve a tag para o commit e compara os dois.
-    #
-    # E vale registrar o tamanho do problema: `abandoned-` existe para as rc de 6 a
-    # 29 da série 0.21.5, e as tags limpas vão até a rc.30. Ou seja, o pin
-    # `rc.14` está dentro do que o upstream considera superado — o que é uma
-    # decisão do dono da máquina, e não deste trecho.
-    local _have_tag _want_sha _have_sha
-    _want_sha=$(git -C "$HERMES_CLI_DIR" rev-list -n 1 "$HERMES_CLI_TAG" 2>/dev/null || echo "")
-    _have_sha=$(git -C "$HERMES_CLI_DIR" rev-parse HEAD 2>/dev/null || echo "")
-    _have_tag=$(git -C "$HERMES_CLI_DIR" describe --tags --exact-match 2>/dev/null || echo "(sem tag exata)")
-    if [ -n "$_want_sha" ] && [ "$_want_sha" = "$_have_sha" ]; then
-        echo -e "${YELLOW}Hermes já em $_have_tag; pulando o instalador.${NC}"
-    else
-            echo -e "${BLUE}Atualizando o Hermes para $HERMES_CLI_TAG…${NC}"
-            curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG" || {
-                echo -e "${YELLOW}O instalador do Hermes falhou; a saída está acima.${NC}" >&2
-                return 1
-            }
+    # Comparar o commit local com `origin/main` depois de um `fetch` é o que faz o
+    # "já está na latest" sem fixar versão nenhuma. Se o `fetch` falhar — sem rede,
+    # por exemplo — a comparação não acontece e o instalador roda, que é o
+    # desfecho seguro: instalar não é o que quebra, ficar desatualizado é.
+    if [ -d "$HERMES_CLI_DIR/.git" ] && command -v git &> /dev/null; then
+        if git -C "$HERMES_CLI_DIR" fetch -q origin main 2>/dev/null; then
+            local _head _main
+            _head="$(git -C "$HERMES_CLI_DIR" rev-parse HEAD 2>/dev/null)"
+            _main="$(git -C "$HERMES_CLI_DIR" rev-parse origin/main 2>/dev/null)"
+            if [ -n "$_head" ] && [ "$_head" = "$_main" ]; then
+                echo -e "${YELLOW}Hermes já no main; pulando o instalador.${NC}"
+                local v0
+                v0="$("$HOME/.local/bin/hermes" --version 2>&1 | head -1)"
+                case "$v0" in
+                    *Hermes*) echo -e "${GREEN}✓ CLI do Hermes: $v0${NC}" ;;
+                    *) echo -e "${YELLOW}A CLI não respondeu: ${v0:-sem saída}${NC}" >&2; return 1 ;;
+                esac
+                echo -e "${GREEN}  Home da CLI: ~/.hermes · Home do dashboard: ~/Developer/.hermes (não compartilham)${NC}"
+                return 0
+            fi
+            echo -e "${BLUE}Instalando ou atualizando o Hermes (o main mudou)…${NC}"
+        else
+            echo -e "${BLUE}Instalando ou atualizando o Hermes pelo instalador oficial…${NC}"
+            echo -e "${YELLOW}  Não consegui buscar o main; o instalador roda mesmo assim.${NC}" >&2
         fi
     else
         echo -e "${BLUE}Instalando o Hermes pelo instalador oficial…${NC}"
-        curl -fsSL "$HERMES_INSTALL_URL" | bash -s -- --non-interactive --branch "$HERMES_CLI_TAG" || {
-            echo -e "${YELLOW}O instalador do Hermes falhou; a saída está acima.${NC}" >&2
-            return 1
-        }
     fi
+    if [ -x "$HOME/.local/bin/hermes" ] && [ -d "$HERMES_CLI_DIR/.git" ]; then
+        echo -e "${BLUE}  (já há uma instalação; o instalador faz o update para a main)${NC}"
+    fi
+
+    # O comando DOCUMENTADO, sem uma palavra trocada. A única flag é o
+    # `--non-interactive`, e ela é OBRIGATÓRIA:
+    #
+    #   --non-interactive  Os estágios `setup` e `gateway` do instalador leem
+    #     /dev/tty e só se pulam quando /dev/tty NÃO abre. O setup.sh roda sob
+    #     pty, então /dev/tty abre, o instalador espera o assistente e TRAVA PARA
+    #     SEMPRE. Sem a flag este passo não termina. (Medido: o instalador
+    #     documenta `--skip-setup` como o mesmo efeito.)
+    #
+    # E o download do corepack, se houver, é prompt `[Y/n]` — o mesmo que trava
+    # o build do OpenDesign, tratado lá com COREPACK_ENABLE_DOWNLOAD_PROMPT.
+    curl -fsSL "$HERMES_INSTALL_URL" \
+        | COREPACK_ENABLE_DOWNLOAD_PROMPT=0 bash -s -- --non-interactive || {
+        echo -e "${YELLOW}O instalador do Hermes falhou; a saída está acima.${NC}" >&2
+        return 1
+    }
 
     # O instalador publica o launcher em `~/.local/bin` pela propria
     # `source_completion`. O symlink que este script montava apontava para o clone
@@ -684,8 +722,8 @@ setup_hermes_cli() {
     # NAO vai: o proprio `append_shell_path` guarda com
     # `^[[:space:]]*([^#[:space:]].*)?PATH=.*\.local/bin` (medido no install.sh,
     # linha 679) e a linha 11 do zshrc versionado ja casa com ela. O detalhe
-    # importa porque `~/.zshrc` aqui e symlink para o arquivo do repo: sem essa
-    # guarda, o instalador escreveria DENTRO do arquivo versionado.
+    # importa porque `~/.zshrc` aqui e symlink para o arquivo do repositorio: sem
+    # essa guarda, o instalador escreveria DENTRO do arquivo versionado.
     mkdir -p "$HOME/.local/bin"
 
     # Verificar por ESTADO: o link existe e responde. `command -v` nao basta,
@@ -699,9 +737,10 @@ setup_hermes_cli() {
             return 1
             ;;
     esac
+    echo -e "${GREEN}  Home da CLI: ~/.hermes · Home do dashboard: ~/Developer/.hermes (não compartilham)${NC}"
 
-    # Dois homes, e estao agora registrados porque e a pegadinha que vem depois:
-    # o nativo e ~/.hermes, o container e ~/Developer/.hermes (do subuid).
+    # Dois homes, e estao registrados porque e a pegadinha que vem depois: o
+    # nativo e ~/.hermes, o container e ~/Developer/.hermes (do subuid).
     if [ -f "$HOME/.hermes/auth.json" ]; then
         local providers
         providers="$(python3 -c "
@@ -712,7 +751,6 @@ except Exception: print('?')" 2>/dev/null)"
             echo -e "${YELLOW}  A CLI está sem provider: conecta e não gera. Defina com: hermes model${NC}"
         fi
     fi
-    echo -e "${GREEN}  Home da CLI: ~/.hermes · Home do dashboard: ~/Developer/.hermes (não compartilham)${NC}"
     return 0
 }
 
