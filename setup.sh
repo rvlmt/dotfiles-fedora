@@ -393,40 +393,50 @@ _sshd_hardened() {
 }
 
 
-# O nome de uma VM de agentes: `vm-<os>-<4 do machine-id>`.
+# O nome de uma máquina: `<perfil>-<os>-<4 do machine-id>`.
 #
-# As três camadas são o que o nome diz: **é uma VM**, **de que sistema**, e **qual
-# delas** — que é a parte que o `machine-id` resolve. Medido nesta VM: `ID=fedora` e
-# `machine-id=c1049817…`, o que dá `vm-fedora-c104`.
+# As três camadas são o que o nome afirma: **que papel** a máquina cumpre, **de que
+# sistema**, e **qual delas**. Medido: perfil `vm` + `ID=fedora` + `machine-id` que
+# começa com `c104` → `vm-fedora-c104`.
 #
-# O `DDMM` que estava na proposta inicial saiu, e a razão é que não acrescentava nada
-# sobre um id que já é único. Pior: mudava com o dia, o que faria um re-run no dia
-# seguinte propor outro nome para uma VM que já estava correta. O `os` também é
-# resolvido em vez de escrito à mão, para que uma mudança de imagem base apareça no
-# nome em vez de ficar escondida atrás de um literal.
+# A camada do papel vem do PERFIL, e essa foi uma simplificação deliberada. A
+# alternativa seria detectar o chassis — e o systemd faz isso bem, o que é notável:
+# medido, `hostnamectl status` diz `desktop` nesta máquina e `vm` na VM, e o
+# `systemd-detect-virt` diz `none` e `qemu`. Duas razões para não ir por aí:
+#
+#   * a detecção é um **número de especificação** (o DMI `chassis_type` é 13 aqui,
+#     All-in-One) ou uma linha de texto com **rótulo traduzido e emoji** — e o
+#     `hostnamectl status` real é `Chassis: desktop 🖥️`, que precisa de parsing para
+#     virar `desktop`;
+#   * e o motivo que decide: o perfil **é** a declaração de que papel a máquina
+#     cumpre, e ele já é digitado na linha de comando. Detectar o hardware para
+#     redescobrir o que a pessoa acabou de declarar é medir de novo o que já foi
+#     dito, e o nome passa a discordar do perfil quando os dois divergem — que é a
+#     classe de defeito que esta seção do repo existe para evitar.
+#
+# O `DDMM` que estava na proposta inicial saiu por não acrescentar nada sobre um id
+# que já é único, e por mudar com o dia — o que faria um re-run no dia seguinte
+# propor outro nome para uma máquina que já está correta. O `os` é **resolvido** e
+# não escrito à mão, para que uma mudança de imagem base apareça no nome em vez de
+# ficar escondida atrás de um literal.
 #
 # Por que o `machine-id` e não um sorteio: um nome sorteado precisa ser gravado em
 # algum lugar para não mudar a cada run, e esse lugar seria estado que só existe na
-# máquina. O id é determinístico — dois runs dão o mesmo nome, sem nada gravado.
-#
-# `product_uuid` seria o identificador natural, porque é o do hypervisor, e é
-# **ausente** nesta VM: `cat /sys/class/dmi/id/product_uuid` não existe.
+# máquina. O id é determinístico — dois runs dão o mesmo nome, com nada gravado.
+# `product_uuid`, que seria o identificador natural por ser o do hypervisor, é
+# **ausente** nas duas máquinas: `cat /sys/class/dmi/id/product_uuid` não existe.
 #
 # A ressalva é a de qualquer coisa derivada do `machine-id`: uma imagem **clonada**
-# copia o id junto, e duas VMs do mesmo template recebem o mesmo nome. Por isso o
-# módulo confere a tailnet e avisa se outro nó já estiver com ele.
-#
-# MINÚSCULO. Um hostname vira rótulo de DNS, e este repo já tem um incidente medido
-# de nome que não bateu: o `400` do dashboard do Hermes quando o `public_url` ficou
-# sem hostname. Maiúscula passaria no `hostnamectl` — o systemd aceita —, mas
-# levaria a divergência para dentro do nome do nó da tailnet, que é o que o `Host:`
-# do navegador traz.
-suggest_vm_hostname() {
-    local os_id mid
-    # O SO vem de /etc/os-release, e não de um literal: o script recusaria rodar em
-    # outra distribuição (`uname -s` + `dnf`), então o campo é sempre `fedora` hoje —
-    # e é exatamente por isso que vale resolver, para que o dia em que a imagem base
-    # mudar o nome acompanhe em vez de mentir.
+# copia o id junto, e duas máquinas do mesmo template recebem o mesmo nome. Por isso
+# o módulo confere a tailnet e avisa se outro nó já estiver com ele.
+suggest_hostname() {
+    local kind os_id mid
+    case "$PROFILE" in
+        vm)   kind="vm" ;;
+        host) kind="pc" ;;
+        *)    kind="maq" ;;
+    esac
+    # O SO vem de /etc/os-release, e não de um literal.
     os_id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}")"
     os_id="$(printf '%s' "$os_id" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
     [ -n "$os_id" ] || os_id="linux"
@@ -434,7 +444,7 @@ suggest_vm_hostname() {
     # 4 caracteres do INÍCIO do machine-id.
     mid="${mid:0:4}"
     [ -n "$mid" ] || mid="semid"
-    printf 'vm-%s-%s' "$os_id" "$mid"
+    printf '%s-%s-%s' "$kind" "$os_id" "$mid"
 }
 # Caminho do mise sem depender do PATH do shell que executou este script.
 mise_bin() {
@@ -2828,25 +2838,23 @@ if should_run "hostname"; then
     # hardening: na VM este script é a história inteira da máquina, e um hostname
     # que distingue uma VM da outra é o que torna o nome útil; no host o nome é
     # escolha de quem usa a máquina, e um Enter continua significando "não mexe".
+    # A sugestão vale para os DOIS perfis, e o que decide é se o hostname atual JÁ é
+    # um nome gerado por este script. Reconhecer o esquema é o que torna o passo
+    # idempotente, e reconhecer
+    # e **não perguntar** são coisas diferentes — a primeira versão deste bloco
+    # reconhecia e perguntava assim mesmo, porque o `pergunta` estava fora do
+    # if/else, e o resultado foi o pior dos dois: numa máquina já nomeada a
+    # pergunta aparecia com a palavra "manter", a resposta vazia caía no `pergunta`
+    # como se fosse um nome, e o `confirm` seguinte oferecia aplicar "1234" como
+    # hostname.
     NEW_HOSTNAME_SUGGESTED=""
-    # Reconhecer o próprio esquema, e aqui isso é TIRAR A PERGUNTA, e não só
-    # poupar o default. A primeira versão reconhecia o nome e perguntava assim mesmo,
-    # porque o `pergunta` estava fora do if/else — e o efeito foi o pior dos dois:
-    # numa VM já nomeada, a pergunta aparecia com a palavra "manter", a resposta
-    # vazia caía no `pergunta` como se fosse um nome, e o `confirm` subsequente
-    # oferecia aplicar "1234" como hostname. Reconhecer e não perguntar são coisas
-    # diferentes, e só a segunda é a que o passo quer.
-    if [ "$PROFILE" = "vm" ] \
-       && printf '%s' "$CURRENT_HOSTNAME" | grep -qE '^vm-[a-z0-9]+-[a-z0-9]{4}$'; then
+    if printf '%s' "$CURRENT_HOSTNAME" | grep -qE '^(vm|pc)-[a-z0-9]+-[a-z0-9]{4}$'; then
         echo "Hostname atual: $CURRENT_HOSTNAME  —  já é um nome gerado por este script; mantido."
-    elif [ "$PROFILE" = "vm" ]; then
-        NEW_HOSTNAME_SUGGESTED="$(suggest_vm_hostname)"
-        echo "Hostname atual: $CURRENT_HOSTNAME  —  a VM de agentes recebe um nome próprio por padrão"
+    else
+        NEW_HOSTNAME_SUGGESTED="$(suggest_hostname)"
+        echo "Hostname atual: $CURRENT_HOSTNAME  —  o padrão deste repo é um nome próprio"
         pergunta "Novo hostname [$NEW_HOSTNAME_SUGGESTED]: " NEW_HOSTNAME
         NEW_HOSTNAME="${NEW_HOSTNAME:-$NEW_HOSTNAME_SUGGESTED}"
-    else
-        echo "Hostname atual: $CURRENT_HOSTNAME"
-        pergunta "Novo hostname (deixe em branco para manter '$CURRENT_HOSTNAME'): " NEW_HOSTNAME
     fi
     if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$CURRENT_HOSTNAME" ]; then
         confirm "Alterar o hostname para '$NEW_HOSTNAME'?" && CONFIRM_HOSTNAME=1
@@ -3233,7 +3241,7 @@ if should_run "hostname"; then
         # alcançar — é por ele que a tailnet e o SSH se apresentam. As regras são as
         # do RFC 1123 que o systemd aplica: até 63 caracteres (64 com o ponto
         # final), sem ponto, sem espaço. O `hostnamectl` aceita maiúscula, e ver
-        # `suggest_vm_hostname` para por que mesmo assim não geramos maiúscula.
+        # `suggest_hostname` para por que mesmo assim não geramos maiúscula.
         if sudo hostnamectl set-hostname "$NEW_HOSTNAME"; then
             echo -e "${GREEN}✓ Hostname definido como: $NEW_HOSTNAME${NC}"
         else
