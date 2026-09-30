@@ -1069,8 +1069,20 @@ PYEOF
 # A escolha da pergunta e o que decide qual dos dois modulos roda. Um `if/else`
 # dentro de um modulo so seria uma mentira: os dois procedimentos nao tem
 # pre-requisito em comum, e a consequencia de cada um e diferente.
+# ⚠️ O valor do modo é `nativo`, em português, e é isso que a pergunta produz
+# (medido: o `case` da pergunta aceita `nativo | container`, e o `--yes` escreve
+# `nativo` na mão). Aqui comparava com `native`, em inglês — que nunca casa.
+#
+# A falha era SILENCIOSA por construção: `|| return 0` trata "não é o meu modo" como
+# sucesso, e o modo errado também caía nele. O despacho do fluxo principal chamava
+# esta função, ela devolvia 0 sem fazer nada, e o `|| echo` do despacho nunca
+# reclamava. Medido: o módulo imprimia a linha `==> OpenDesign` e saía, sem clone,
+# sem build, sem unit — e sem uma única mensagem.
+#
+# Um guarda de modo que erra a grafia é o pior tipo de bug: ele não falha, ele
+# finge que não é o momento dele.
 setup_open_design() {
-    [ "$OPENDESIGN_MODE" = "native" ] || return 0
+    [ "$OPENDESIGN_MODE" = "nativo" ] || return 0
     _setup_open_design_native
 }
 
@@ -1085,7 +1097,8 @@ setup_open_design_container() {
 # respondendo pelo que tinha ficado primeiro. Recusar aqui deixa o conflito explicito.
 _open_design_exclusive() {
     local outro
-    if [ "$OPENDESIGN_MODE" = "native" ]; then
+    # O mesmo cuidado do dispatcher acima: o valor do modo é `nativo`.
+    if [ "$OPENDESIGN_MODE" = "nativo" ]; then
         outro="container"
         podman container exists open-design 2>/dev/null && {
             echo -e "${YELLOW}Ja existe um container do OpenDesign nesta maquina.${NC}" >&2
@@ -1107,6 +1120,62 @@ _open_design_exclusive() {
 }
 
 # ------------------------------------------------------------------ nativo
+# Publica o OpenDesign nativo na tailnet, em :8444.
+#
+# O alvo é o LOOPBACK, e não o IP da tailnet — e isso não é preferência. A
+# documentação do projeto exige: "connector endpoints (Composio, GitHub OAuth)
+# also require the daemon to receive requests over loopback", e o comentário do
+# próprio daemon diz que "the loopback bypass exists for the localhost desktop UI
+# which has no proxy in the path". Publicar direto no IP da tailnet inverteria
+# os dois efeitos: a ESCRITA passaria a levar 403 (o carve-out é por peer de
+# loopback) e a LEITURA passaria a exigir o token, que está desligado.
+#
+# Idempotente por comparação de texto, revalidando depois de agir, e com guarda
+# POR PORTA — pelos mesmos motivos do `setup_hermes_serve`, e porque os três
+# serviços vivem no mesmo host: uma guarda global faria o segundo se recusar por
+# causa do primeiro.
+setup_open_design_serve() {
+    local dns target
+    dns="$(_tailnet_dnsname)"
+    target="127.0.0.1:$OPENDESIGN_PORT"
+
+    if ! command -v tailscale &> /dev/null; then
+        echo -e "${YELLOW}Tailscale ausente; pulei a publicação do OpenDesign.${NC}" >&2
+        return 1
+    fi
+
+    local current
+    current="$(tailscale serve status 2>/dev/null || true)"
+
+    if printf '%s' "$current" | grep -qF -- "$target"; then
+        echo -e "${GREEN}✓ OpenDesign já publicado na tailnet (:$OPENDESIGN_SERVE_PORT → $target).${NC}"
+        return 0
+    fi
+    if printf '%s' "$current" | grep -qF ":$OPENDESIGN_SERVE_PORT"; then
+        echo -e "${YELLOW}A porta :$OPENDESIGN_SERVE_PORT já está publicada por outro serviço:${NC}"
+        printf '%s\n' "$current" | sed 's/^/    /'
+        echo -e "${YELLOW}  Não sobrescrevi.${NC}" >&2
+        return 1
+    fi
+
+    if ! sudo tailscale serve --bg --https="$OPENDESIGN_SERVE_PORT" "http://$target"; then
+        echo -e "${YELLOW}Não consegui publicar o OpenDesign na tailnet.${NC}" >&2
+        echo -e "${YELLOW}  Manualmente: sudo tailscale serve --bg --https=$OPENDESIGN_SERVE_PORT http://$target${NC}" >&2
+        return 1
+    fi
+
+    local after
+    after="$(tailscale serve status 2>/dev/null || true)"
+    if printf '%s' "$after" | grep -qF -- "$target"; then
+        echo -e "${GREEN}✓ OpenDesign publicado na tailnet (:$OPENDESIGN_SERVE_PORT → $target).${NC}"
+        echo -e "${GREEN}  https://$dns:$OPENDESIGN_SERVE_PORT${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}  O 'serve' aceitou o comando, mas o alvo não aparece no status:${NC}" >&2
+    printf '%s\n' "$after" | sed 's/^/    /' >&2
+    return 1
+}
+
 _setup_open_design_native() {
     _open_design_exclusive || return 1
 
@@ -1134,24 +1203,49 @@ _setup_open_design_native() {
     }
     [ -x "$nb/node" ] || { echo -e "${YELLOW}node do mise ausente; pulei o OpenDesign.${NC}" >&2; return 1; }
     export PATH="$nb:$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    # ⚠️ SEM ESTA VARIÁVEL O PASSO TRAVA. Medido: o `pnpm install` para e escreve
     #
-    # O pnpm acompanha a versão publicada mais recente, e o motivo de isso ser
-    # opcional está medido: o repo do OpenDesign declara
-    # `"packageManager": "pnpm@10.33.2"` no próprio `package.json`, mas o
-    # corepack desta máquina NÃO honra essa declaração — medido, `pnpm --version`
-    # dentro do clone devolve a versão global, não a declarada. Ou seja, a
-    # declaração do projeto é letra morta aqui, e quem manda é o que este passo
-    # ativa.
+    #     ! Corepack is about to download .../pnpm-10.33.2.tgz
+    #     ? Do you want to continue? [Y/n]
     #
-    # ⚠️ O custo é um salto de major, e ele é aceito por decisão: medido na
-    # instalação mais recente, `pnpm@latest` é a 12.x, contra a 10.33.2 com que o
-    # build foi validado, e o lockfile do projeto é `lockfileVersion: '9.0'`. Se
-    # `pnpm install --frozen-lockfile` recusar por causa da major, a falha aparece
-    # aqui, no módulo do OpenDesign, e é a primeira coisa a checar.
+    # e espera. Num `setup.sh` não há ninguém para responder, então o módulo
+    # ficaria pendurado até o próximo passo falhar por tempo. Foi o que aconteceu
+    # na primeira execução na VM limpa: o run "terminou" sem instalar nada, e o
+    # driver de pty do teste matou o processo esperando o Y/n.
     #
-    # O `--activate` é global, então isto mexe no pnpm default da máquina, não só
-    # no build. Rodar o módulo numa máquina com outro projeto em pnpm altera o
-    # pnpm daquele projeto — o preço de não fixar.
+    # O download é a versão que o PRÓPRIO projeto declara, então a resposta é
+    # conhecida antes de a pergunta existir. Ver o comentário abaixo, que corrige
+    # uma afirmação errada sobre o corepack.
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+    #
+    # ESTE COMENTARIO ESTAVA ERRADO, e a correcao importa mais que o texto.
+    #
+    # Ele afirmava que o corepack NAO honrava o
+    # `"packageManager": "pnpm@10.33.2"` do projeto, e que por isso quem mandava
+    # era o `pnpm@latest` ativado aqui. **Medi no lugar errado**: rodei
+    # `pnpm --version` e li 12.8.1 -- fora do repositorio. Dentro dele:
+    #
+    #     fora do repo:   12.8.1    (o default global que este passo ativa)
+    #     dentro do repo: 10.33.2   (o que o projeto declara)
+    #
+    # O corepack honra a declaracao, e e por isso que o `pnpm install` PAROU
+    # pedindo para baixar a 10.33.2, e nao a 12.x. Consequencias:
+    #
+    #   * o `corepack prepare pnpm@latest` abaixo e INUTIL para este projeto: o
+    #     projeto fixa o dele, e a declaracao sempre ganha dentro do repo;
+    #   * o "salto de major" que a decisao sobre acompanhar a ultima versao
+    #     supunha NAO ACONTECE aqui. O build roda em 10.33.2, contra o lockfile
+    #     `9.0`, como sempre;
+    #   * o que de fato trava e o PROMPT de download do corepack, que pergunta
+    #     `[Y/n]` na primeira vez e, num script, fica esperando para sempre.
+    #
+    # Por isso `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` no export acima: o corepack
+    # baixa a versao que o projeto declara sem perguntar. Um instalador nao pode
+    # parar para perguntar algo cuja resposta ele ja sabe.
+    #
+    # O `prepare` fica, e serve ao que for rodado FORA do clone -- o `pnpm` de uso
+    # pessoal da maquina. Ele nao afeta o build do OpenDesign, e o comentario acima
+    # deixa isso explicito para quem for mexer aqui.
     if [ ! -x "$nb/pnpm" ]; then
         corepack enable pnpm >/dev/null 2>&1
         corepack prepare pnpm@latest --activate >/dev/null 2>&1
@@ -1361,10 +1455,17 @@ UNIT_EOF
         return 1
     fi
     echo -e "${GREEN}✓ OpenDesign nativo em loopback:$OPENDESIGN_PORT.${NC}"
-    echo -e "${YELLOW}  A publicacao precisa apontar para o LOOPBACK, nao para o IP da tailnet:${NC}" >&2
-    echo -e "${YELLOW}    sudo tailscale serve --bg --https=$OPENDESIGN_SERVE_PORT http://127.0.0.1:$OPENDESIGN_PORT${NC}" >&2
+    # Publicar NÃO é opcional: sem o `serve`, o modo nativo fica alcançável só
+    # pelo IP cru da tailnet, em HTTP sem TLS, e a rota de escrita perde o
+    # carve-out de loopback. A falha da publicação não derruba o daemon, que já
+    # está no ar e verificado; o motivo sai na saída.
+    setup_open_design_serve \
+        || echo -e "${YELLOW}O OpenDesign está no ar mas não foi publicado na tailnet.${NC}" >&2
+    return 0
     return 0
 }
+
+
 
 # ---------------------------------------------------------------- container
 _setup_open_design_container() {
