@@ -334,8 +334,16 @@ confirm() {
     # Enter vazio vale o default declarado. Sem estas duas linhas o default seria
     # decorativo: o `read` devolveria string vazia, a comparação abaixo cairia em
     # "não", e um `[Y/n]` aceitaria o não — o oposto do que a pergunta anuncia.
+    #
+    # O `return` é o INVERSO do default, e essa inversão é a parte que passou
+    # batido na primeira versão: `confirm` devolve 0 para sim e 1 para não, então
+    # `return "$default"` devolvia 1 num default de "sim" — e a pergunta anunciava
+    # `[Y/n]` enquanto um Enter respondia não. Nenhum teste pegou, porque nenhum
+    # teste respondia vazio a uma pergunta de default sim. Corrigido, e o teste
+    # que faltava foi escrito.
     if [ -z "$reply" ]; then
-        return "$default"
+        [ "$default" = "1" ] && return 0
+        return 1
     fi
     [[ "$reply" =~ ^[Yy]$ ]]
 }
