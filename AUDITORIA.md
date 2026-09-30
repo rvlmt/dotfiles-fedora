@@ -410,7 +410,7 @@ caminho, e é o que falta para o perfil `vm` ser automatizável de ponta a ponta
 ## 10. As correções que a VM limpa obrigou, e o padrão delas
 
 §9 é o que a máquina **mostrou**. Esta é a lista do que foi **corrigido**,
-e ela é a parte que importa para a próxima: nenhuma das nove aparece em
+e ela é a parte que importa para a próxima: nenhuma das dez aparece em
 `bash -n`, e **nenhuma reclama** — ou reclama o contrário do que anuncia.
 
 | | o que era | como se manifestava |
@@ -424,6 +424,7 @@ e ela é a parte que importa para a próxima: nenhuma das nove aparece em
 | open-design | guard comparava `native` com `nativo` | módulo não fazia nada |
 | open-design | nada publicava o `:8444` | link anunciado não existia |
 | `confirm` | `return "$default"` num default de "sim", e `confirm` devolve **1** para não | a pergunta anunciava `[Y/n]` e o Enter respondia **não** — e o harness passava 75/75 |
+| `sshd-hardening` | decidia por `[ -f ]` num arquivo sob diretório **700** | a pergunta repetia a cada run e o `else` "já aplicado" era **código inalcançável** — o drop-in era reescrito e o `sshd` recarregado em toda execução |
 
 ### A nona, e a primeira que o harness não pegou
 
@@ -467,6 +468,115 @@ mesma razão pela qual o `ARQUITETURA.md` diz que as pós-condições do script 
 resposta proporcional ao fato de o repo não ter verificação automática". Trazer o
 harness para dentro é uma decisão do dono do repo, e está na lista de perguntas em
 aberto — não é algo que um agente decida por conta própria e empurre junto.
+### A décima: um check que não está errado no que pergunta, e sim em quem pergunta
+
+Esta é a melhor das dez como caso didático, porque o check **parece** perfeito. Ele
+pedia a coisa certa — "o hardening já foi aplicado?" — e testava o arquivo que
+escreve a resposta. O problema é que o teste era feito **sem privilégio**, e o
+diretório que guarda o arquivo não deixa passar quem não é root:
+
+```
+/etc/ssh/sshd_config.d          drwx------ root:root     ← modo 700
+99-dotfiles-hardening.conf      -rw-r--r-- root:root     ← legível por todo mundo
+
+[ -f ... ]  como usuário   -> FALSO          (o que o script testava)
+sudo test -f ...          -> VERDADEIRO
+ls ...  como usuário      -> "Permission denied"
+```
+
+O arquivo é legível; o **caminho** não é atravessável. E um `[ -f ]` que não
+consegue resolver o caminho responde "não existe" — que é uma resposta plausível,
+silenciosa, e errada.
+
+O mesmo teste, com e sem privilégio, lado a lado na VM:
+
+| | resposta |
+|---|---|
+| `[ -f ]` como usuário | **FALSO** |
+| `[ -r ]` como usuário | **FALSO** |
+| `[ -f ]` com `sudo` | **VERDADEIRO** |
+
+E o efeito era duplo, e nenhum dos dois reclamava:
+
+1. A pergunta *"Desabilitar login por senha via SSH?"* aparecia em **toda**
+   execução, mesmo com o hardening aplicado há semanas.
+2. O `else` que dizia *"já aplicado"* era **código inalcançável** — o módulo
+   reescrevia o drop-in e recarregava o `sshd` em cada run, para produzir um
+   resultado idêntico ao que já estava lá.
+
+O estado final estava **correto** o tempo todo. `sshd -T` respondia
+`passwordauthentication no` e `permitrootlogin no`, o access por chave funcionava, e
+nenhum sintoma aparecia. É a assinatura dos outros nove: nada falha, nada reclama.
+
+**A correção é a propriedade, não o `sudo`.** `_sshd_hardened` pergunta a
+configuração já resolvida, com `sudo -n sshd -T`, e isso é imune à permissão porque
+responde com privilégio. Verificado na VM, depois da correção:
+
+```
+==> Hardening do sshd
+sshd já está rodando.
+✓ sshd já endurecido (PasswordAuthentication no, PermitRootLogin no) — nada a fazer.
+```
+
+**E a parte que a primeira versão do comentário.anticipou errado.** A função foi
+escrita com a afirmação de que a pergunta deixaria de repetir. Ela continua
+repetindo, e a medição diz por quê: no bloco de perguntas o `sudo` ainda não rodou,
+o timestamp está frio, `sudo -n` falha, e a função devolve falso. Fazer a pergunta
+depender do estado exigiria subir o `sudo -v` para antes dela — o que muda o lugar
+em que a senha é pedida. Essa é uma decisão de quem provisiona, e o que fica é o
+**atrito de um prompt**, não mais a reescrita e o reload. O comentário agora diz
+isso, e a tabela de testes estruturais ganhou uma checagem que falha se alguém
+voltar a decidir esse caminho por `[ -f ]`.
+
+**Um detalhe sobre a mesma armadilha, em outro lugar.** O here-doc que escreve o
+drop-in estava **sem aspas** (`<<EOF`), e o conteúdo — `PasswordAuthentication no`,
+`PermitRootLogin no` — não tem `$` nem crase. Funciona hoje. É o mesmo defeito da
+crase que esta seção documenta, na mesma função, e a correção foi uma aspa: não
+depender de o conteúdo não ter nada especial.
+
+
+### O run que alinhou 12 prompts de 13, e o que ele diz sobre medir
+
+O run completo na VM de agentes foi dirigido por um arquivo de entrada **posicional**:
+cada linha responde a uma pergunta, na ordem em que o script faz. A primeira tentativa
+alinhou 12 de 13 e morreu no `sudo`, e a causa é o tipo de erro que vale mais registro
+que o sintoma.
+
+Eu havia medido se o `~/.zshrc` da VM era symlink, e concluí que a pergunta do `zshrc`
+ia aparecer. **Não medi se o arquivo existia** — e a pergunta só dispara com
+`[ -e "$HOME/.zshrc" ] || [ -L "$HOME/.zshrc" ]`. O arquivo não existia, a pergunta não
+apareceu, e a linha a menos desalinhou o resto: o `y` destinado ao `zshrc` foi
+consumido pelo login do `gh`, e a senha do `sudo` ficou sem par:
+
+```
+Autenticar o 'gh' com login de pessoa? (Enter = não; …)
+1234
+Sorry, try again.
+[sudo] password for agent:
+sudo: timed out reading password
+```
+
+A entrada posicional é o que torna isso caro. Ela não tem como reportar "não recebi a
+pergunta que eu esperava" — ela apenas entrega a linha seguinte para quem aparecer. Um
+defeito de leitura do código e um defeito de medição produzem **a mesma** assinatura no
+transcripto, e só a medição separa os dois.
+
+A correção não foi arrumar a linha: foi **derivar a entrada do estado**. O script que
+gera o arquivo de entrada verifica a precondição de cada pergunta antes de contar, e
+cada linha sai com a condição que a produziu:
+
+```
+  4. sshd-hardening: Enter, e na VM o default e SIM
+  --  zshrc: SEM pergunta, nao ha ~/.zshrc — o modulo cria o link sozinho
+  12. private key: Ctrl-D, e o \n colado responde o login do gh
+  13. sudo
+```
+
+E a lição vale para qualquer harness dirigido por entrada posicional: **uma
+precondição medida pela metade é um bug que ainda não aconteceu.** Verificar se a
+maioria das condições continua igual é a forma de garantir que nenhuma mudou.
+
+
 ### O padrão: um guarda que erra não falha, finge que não é a vez dele
 
 O caso do `native`/`nativo` é o arquétipo. O `case` da pergunta aceita
@@ -482,17 +592,18 @@ E o mesmo no `PYTHONPATH`: apontava para um caminho que não existe mais e para
 `find | head -1` num cache de **106 entradas**, sendo a primeira em ordem
 alfabética um pacote sem relação. Funcionava ou não, depende do acaso.
 
-### Uma máquina montada esconde as nove
+### Uma máquina montada esconde as dez
 
-O que as oito tinham em comum: **o trabalho que elas deveriam fazer foi feito à
-mão.** O `sshd` foi habilitado no console; as units foram escritas à mão; o Hermes
-era a instalação antiga em `~/Hermes-Agent`. Nenhuma dessas mãos aparece no log
-do script, e nenhuma delas é detectável sem provisionar do zero.
+O que as sete primeiras tinham em comum: **o trabalho que elas deveriam fazer foi
+feito à mão.** O `sshd` foi habilitado no console; as units foram escritas à mão; o
+Hermes era a instalação antiga em `~/Hermes-Agent`. Nenhuma dessas mãos aparece no
+log do script, e nenhuma delas é detectável sem provisionar do zero.
 
-A nona é a exceção, e por um motivo que as outras não têm: não é herança de uma
-máquina montada à mão. É uma mudança **deste dia**, e foi ela que introduziu o
-defeito junto com a correção que prometia. É o caso em que a máquina limpa não
-podia ter revelado, porque o defeito nasceu depois dela — e o único que o pegou foi
+A oitava e as duas seguintes são a exceção, e por um motivo que as outras não têm:
+não são herança de uma máquina montada à mão. A oitava é um splice meu que deixou
+código antigo; a nona e a décima são mudanças **deste dia**, e cada uma introduziu o
+defeito junto com a correção que prometia. São os casos em que a máquina limpa não
+podia ter revelado, porque o defeito nasceu depois dela — e o único que os pegou foi
 rodar o script de verdade.
 
 ### O caso mais instrutivo: eu removendo um passo documentado
