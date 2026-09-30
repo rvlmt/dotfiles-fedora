@@ -390,3 +390,107 @@ faz nada — medido aqui, "Tailscale já conectado", e o `BackendState` continuo
 Mas provisionar do zero exige abrir a URL. Um `--authkey` lido do ambiente seria o
 caminho, e é o que falta para o perfil `vm` ser automatizável de ponta a ponta.
 
+
+## 10. As correções que a VM limpa obrigou, e o padrão delas
+
+§9 é o que a máquina **mostrou**. Esta é a lista do que foi **corrigido**,
+e ela é a parte que importa para a próxima: nenhuma das oito aparece em
+`bash -n`, e **nenhuma reclama**. Todas devolvem 0 ou saem em silêncio.
+
+| | o que era | como se manifestava |
+|---|---|---|
+| `sshd` | nunca era subido | porta 22 recusada, sem entrada |
+| relatório do `ai-clis` | `command -v` sem fallback para `~/.opencode/bin` | "binário ausente" no módulo que o instalou |
+| `hermes-cli` | idempotência por **nome** de tag | reinstalava tudo a cada run |
+| dashboard | `read -d ''` devolve 1 no EOF | unit faltando, sem mensagem |
+| dashboard | crase em here-doc sem aspas | `command not found` |
+| dashboard | `PYTHONPATH` com caminho morto e archive arbitrário | "não consegui gerar o hash scrypt" |
+| open-design | guard comparava `native` com `nativo` | módulo não fazia nada |
+| open-design | nada publicava o `:8444` | link anunciado não existia |
+
+### O padrão: um guarda que erra não falha, finge que não é a vez dele
+
+O caso do `native`/`nativo` é o arquétipo. O `case` da pergunta aceita
+`nativo | container`; os dois wrappers comparavam com `native`, em inglês. O
+guarda é `|| return 0` — "não é o meu modo", **sucesso** — então o modo errado
+caiu exatamente no mesmo caminho do modo certo, e o `|| echo` do despacho nunca
+reclamou.
+
+O mesmo em `read -d ''`: procura um byte NUL, não acha, devolve 1, e o `set -e` na
+linha 2 mata a execução no meio de uma função. O chamador só vê a unit faltando.
+
+E o mesmo no `PYTHONPATH`: apontava para um caminho que não existe mais e para
+`find | head -1` num cache de **106 entradas**, sendo a primeira em ordem
+alfabética um pacote sem relação. Funcionava ou não, depende do acaso.
+
+### Uma máquina montada esconde as oito
+
+O que as sete tinham em comum: **o trabalho que elas deveriam fazer foi feito à
+mão**. O `sshd` foi habilitado no console; as units foram escritas à mão; o Hermes
+era a instalação antiga em `~/Hermes-Agent`. Nenhuma dessas mãos aparece no log
+do script, e nenhuma delas é detectável sem provisionar do zero.
+
+### O caso mais instrutivo: eu removendo um passo documentado
+
+O `corepack enable` saiu na revisão da lista de pacotes do `base`, com a medição
+correta — o corepack resolve a versão declarada dentro do repo mesmo sem o shim
+global. A conclusão é que estava errada, e o erro foi de método: **um passo
+documentado foi removido sem que nenhuma medição contradição a documentação.**
+
+O `CONTRIBUTING.md` do OpenDesign diz, na linha 33:
+
+    corepack enable           # selects the pinned pnpm from packageManager
+
+e o README repete em dois lugares. O projeto dá nome ao que o passo faz, e a
+medição minha tinha encontrado um caminho lateral que funcionava. **Funcionar por
+um caminho que ninguém documentou não é o mesmo que seguir o manual** — e a regra
+que vale desde o começo desta sessão é que a documentação da aplicação vem antes
+da medição própria.
+
+### Um diagnóstico que mede o objeto errado
+
+O módulo do OpenDesign anunciava `pnpm em uso: 12.8.1` enquanto o build usava
+10.33.2. Um splice meu tinha deixado a atribuição antiga do `pnpm_ver` para trás,
+e ela lia a versão **na raiz do script**, não dentro do clone. Isolado funcionava;
+no script, mentia.
+
+Um diagnóstico que reporta o objeto errado é pior do que nenhum: é confiável,
+está errado, e ninguém o confere de novo — quem lê supõe que o número veio de
+onde o trabalho acontece.
+
+### O que a máquina derrubou do que eu escrevi
+
+| eu afirmava | medido |
+|---|---|
+| `libatomic` e `libX11` não vêm no Fedora | **já vêm** nesta imagem |
+| o corepack não honra o `packageManager` | honra — eu medi **fora do repo** |
+| o pin do Hermes é `rc.14` e é o caminho certo | a latest release é `v2026.9.24`, **outro commit** |
+
+A do corepack é a mais instrutiva porque eu tinha **medido**: rodei
+`pnpm --version` e li 12.8.1, que é o default global, e escrevi no código que o
+projeto ignorava a própria declaração. Dentro do repo, a resposta é 10.33.2. O
+erro não foi não medir — foi medir e não conferir o que eu media.
+
+### A regra que apareceu no fim, e que é aplicável a qualquer lista
+
+**Todo pacote declara quem o consome; se ninguém declara, ele sai.** Medido: a
+única ocorrência de `tree`, `tmux`, `zellij`, `ripgrep`, `fd-find`, `btop` e
+`wget` no script inteiro era a própria lista. Vieram no **primeiro commit do
+repositório**, há 20 dias, no commit que separa o provisionamento do Fedora do
+repo do Mac — e em vinte dias ninguém podou. A segunda metade da regra é a que
+impede a lista de inflar de novo: quando o consumidor é um instalador externo, isso
+é dito na linha. `tar` e `unzip` são esse caso — o mise e o Bun os chamam, dentro
+dos instaladores que o próprio `base` executa.
+
+### Fica registrado e não contornado
+
+O `.env` com o `OD_API_TOKEN` cai **dentro do clone** do OpenDesign, e o
+`.gitignore` do upstream não o cobre — `git status` mostra `?? .env` e
+`git check-ignore` não acha nada. Um `git add -A` nesse clone commitaria a
+credencial. O impacto é baixo, porque o modo nativo vem com
+`OD_DISABLE_API_AUTH=1` e o script diz isso onde escreve o arquivo: ali o token
+não é credencial viva. A correção é do upstream, e é por isso que fica registrado
+em vez de contornado.
+
+---
+
