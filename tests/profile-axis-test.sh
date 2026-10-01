@@ -391,6 +391,7 @@ fi
 
 
 echo
+echo
 echo "== 17. o default do confirm: Enter vale o default, nos dois sentidos =="
 # Este teste nao existia, e a ausencia dele escondeu um bug: `confirm` devolvia 0
 # para sim e 1 para nao, e a primeira versao do default devolvia `return "$default"`
@@ -399,7 +400,7 @@ echo "== 17. o default do confirm: Enter vale o default, nos dois sentidos =="
 # sim, e nenhum teste fazia isso.
 #
 # A prova e pelo efeito observavel, nunca pelo texto da pergunta: o device-keys
-# escreve no authorized_keys, entao "o arquivo tem chave" e "o script rodou" sao a
+# escreve no authorized_keys, entao "o arquivo tem chave" e "o script autorizou" sao a
 # mesma coisa vista de dois lados.
 out="$(run_pty $'\n' --profile=vm --only=device-keys)"
 check "default sim: a pergunta anuncia [Y/n]" "[Y/n]" "$out"
@@ -407,15 +408,14 @@ check_not "default sim: nao anuncia [y/N]" "[y/N]" "$out"
 check "default sim: Enter autorizou de verdade" "authorized_keys" "$out"
 check_not "e nao respondeu nao" "não autorizado" "$out"
 
-# E o outro sentido: uma pergunta de default NAO continua sendo nao com Enter.
-# `confirm "..."` sem o segundo argumento nao pode ter mudado de comportamento por
-# esta assinatura aceitar um argumento a mais.
-out="$(run_pty $'\n' --profile=vm --only=ai-clis)"
-check_not "default nao: nao anuncia [Y/n]" "[Y/n]" "$out"
-check "default nao: Enter recusou as CLIs" "Instalação de CLIs de IA ignorada" "$out"
+# O outro sentido: uma pergunta de default NAO continua sendo nao com Enter. O
+# `ai-clis` servia aqui ate 2026-10-01, quando o dono do repo mudou o default dele
+# para sim — e este teste FALHOU por isso, que e a coisa que ele existe para fazer.
+# O default "nao" que sobrou no perfil vm e o login do `gh`, no modulo `git`.
+out="$(run_pty $'\n\n\n' --profile=vm --only=git)"
+check "default nao: nao anuncia [Y/n]" "[y/N]" "$out"
+check_not "e nao disparou o login do gh" "handshake" "$out"
 
-
-echo
 echo "== 18. o hostname: o tipo vem do PERFIL, e a sugestao vale nos dois =="
 # A decisao e do dono do repo, e ela e uma SIMPLIFICACAO: o systemd poderia detectar
 # o chassis — e detecta bem, medido: `desktop` no host, `vm` na VM —, mas o perfil
@@ -473,6 +473,38 @@ check "o script reconhece um nome que ele mesmo gerou" "1" "$out"
 # da tailnet nascer com o nome certo numa VM nova, em vez de divergir em silencio.
 out="$(grep -m1 '^VM_STEPS=' "$REPO/setup.sh")"
 check "no perfil vm, hostname vem antes de tailscale" "base hostname" "$out"
+
+
+echo
+echo "== 19. --defaults nao dispara o que nao pode ser respondido por script =="
+# A correcao que este teste existe para travar. O `--yes` respondia sim a TUDO, e
+# como nove dos nove prompts tinham default "nao" isso invertia cada opt-in; medido
+# numa VM, o run TRAVAVA PARA SEMPRE no handshake do `gh` — uma pergunta do `gh`,
+# que nenhuma variavel deste repositorio alcanca.
+#
+# A prova e por ausencia E por presenca: o `gh` nao e chamado, e o script diz por
+# que pulou. Um teste que so verificasse "o run terminou" passaria tambem no cenario
+# em que o `gh` e chamado e a resposta chega a tempo — que nao e o problema.
+out="$(run_pty $'\n' --profile=vm --only=git --defaults)"
+check "o modulo rodou" "Git e GitHub CLI" "$out"
+check_not "e o gh NAO foi disparado" "handshake" "$out"
+# A mensagem de "pulado, e por que" NAO e verificada aqui, e o motivo e do
+# ambiente: o modulo comeca por `gh auth status`, e nesta maquina o `gh` esta
+# autenticado, entao ele retorna antes — a sandbox usa o `gh` de verdade, e o
+# resultado depende da conta de quem roda. A presenca da mensagem e da guarda em
+# torno dela sao checadas no structure-test, que nao depende de conta nenhuma.
+
+# E o outro lado: um default de SIM tem de ser aceito, ou a flag entregaria uma
+# maquina sem as seis CLIs de agente.
+out="$(run_pty $'' --profile=vm --only=ai-clis --defaults)"
+check "um default de sim e aceito" "[Y/n]" "$out"
+check "e a instalacao acontece" "Instalar as CLIs" "$out"
+check_not "e o modulo nao e ignorado" "Instalação de CLIs de IA ignorada" "$out"
+
+# E o `--yes` antigo continua aceito como alias, e continua dizendo o que faz.
+out="$(run_pty $'\n' --profile=vm --only=git --yes)"
+check "--yes ainda funciona como alias" "Git e GitHub CLI" "$out"
+check_not "e tambem nao dispara o gh" "handshake" "$out"
 
 echo
 printf 'RESULTADO: %d ok, %d falhas\n' "$pass" "$fail"

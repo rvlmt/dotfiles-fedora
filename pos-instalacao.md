@@ -108,10 +108,10 @@ O `setup.sh` recusa execução sem tty, porque `read` devolve 1 no fim da entrad
 o `set -e` aborta o script no meio, em silêncio.
 
 ```bash
-./setup.sh --profile=vm --yes
+./setup.sh --profile=vm --defaults
 ```
 
-⚠️ **O `--yes` tira as perguntas do script, não as do `sudo`.** Medido: sem
+⚠️ **O `--defaults` tira as perguntas do script, não as do `sudo`.** Medido: sem
 terminal, `sudo -v` falha com *"um terminal é necessário para ler a senha"*. O
 script detecta e diz o que fazer — `sudo -v` num terminal antes (o timestamp é o
 que ele quer manter quente), ou `NOPASSWD` para o `dnf` da distro, ou um
@@ -121,11 +121,19 @@ O que o `--yes` decide sozinho:
 
 | | |
 |---|---|
-| confirmações | **sim** — mas o default continua sendo **não** |
-| senha do dashboard | a padrão, e ela é **dita** na saída |
-| senha do OpenCode | a **aleatória** do instalador, no `service.json` 600 |
+| confirmações | **o default de cada uma**, e nenhum default é entrada para serviço externo nem credencial destruída |
+| senha do dashboard | a padrão `hermes`, e ela é **dita** na saída |
+| senha do OpenCode | a padrão `opencode`, **dita** na saída — a mesma convenção do dashboard |
 | modo do OpenDesign | **nativo**, anunciado |
+| login de pessoa do `gh` | **pulado**, com o motivo e o passo 1 desta lista |
 | GitHub App | **inativa** — a private key é um segredo que existe fora da máquina |
+
+⚠️ **A flag se chama `--defaults`, e `--yes` é alias.** O nome antigo significava
+"responde sim a tudo", e como nove dos nove prompts tinham default "não", isso
+invertia cada opt-in. Medido: o run **travava para sempre** no handshake do `gh`,
+que é uma pergunta dele e não deste script. A semântica agora é a que o nome diz:
+aceitar todos os defaults, e os defaults são escolhidos para que "default" signifique
+"provisionar".
 
 ---
 
