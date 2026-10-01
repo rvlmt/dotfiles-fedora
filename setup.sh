@@ -2928,6 +2928,9 @@ _se_colocar_no_disco_e_reexecutar() {
     echo
 
     cd "$destino_dir" || return 1
+    # `exec` substitui o processo, entao o script so roda uma vez de verdade. O
+    # `SCRIPT_DIR` do processo novo sai do caminho do arquivo que ele leu — e
+    # esse e o diretorio certo, ao contrario do `BASH_SOURCE` do script original.
     exec bash ./setup.sh "${args[@]}"
 }
 
@@ -3024,8 +3027,20 @@ if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
         echo "      sudo dnf install -y curl" >&2
         exit 1
     fi
-    _se_colocar_no_disco_e_reexecutar "$_url_base" "$SETUP_DESTINO" "$@"
-    echo "ERRO: não consegui me montar no disco. A saída acima diz o motivo." >&2
+    if ! _se_colocar_no_disco_e_reexecutar "$_url_base" "$SETUP_DESTINO" "$@"; then
+        # A montagem FALHOU, e sem isto o script continuava: o `ln -s` do modulo
+        # do `zshrc` usava o `SCRIPT_DIR` do script ORIGINAL — que, vindo de um
+        # pipe, e o diretorio de onde a pessoa digitou. O resultado medido na VM
+        # nova foi um `~/.zshrc` apontando para `/home/agent/zshrc`, que nao
+        # existe, e nenhum `setup.sh` em lugar nenhum do disco.
+        #
+        # Um modulo que instala um symlink para um caminho que o proprio script
+        # fabricou e um modulo que cria lixo permanente. Falhar em voz alta e
+        # melhor que seguir assumindo que deu certo.
+        echo "ERRO: não consegui me montar no disco, e sem isso os módulos" >&2
+        echo "      usariam um caminho errado. A saída acima diz o motivo." >&2
+        exit 1
+    fi
     exit 1
 fi
 
@@ -4716,9 +4731,9 @@ _gh_identidade_presente() {
 _od_publicado() {
     local p="$1" o que="$2"
     if tailscale serve status 2>/dev/null | grep -q ":$p"; then
-        _registrar_ok "publicado na tailnet em :$p ($o que)"
+        _registrar_ok "publicado na tailnet em :$p (${o} que)"
     else
-        _registrar_falha "nao publicado na tailnet em :$p ($o que)"
+        _registrar_falha "nao publicado na tailnet em :$p (${o} que)"
     fi
 }
 
