@@ -915,13 +915,28 @@ dos instaladores que o próprio `base` executa.
 
 ### Fica registrado e não contornado
 
-O `.env` com o `OD_API_TOKEN` cai **dentro do clone** do OpenDesign, e o
-`.gitignore` do upstream não o cobre — `git status` mostra `?? .env` e
-`git check-ignore` não acha nada. Um `git add -A` nesse clone commitaria a
-credencial. O impacto é baixo, porque o modo nativo vem com
-`OD_DISABLE_API_AUTH=1` e o script diz isso onde escreve o arquivo: ali o token
-não é credencial viva. A correção é do upstream, e é por isso que fica registrado
-em vez de contornado.
+~~O `.env` com o `OD_API_TOKEN` cai **dentro do clone**~~
+
+**RESOLVIDO, e o raciocínio antigo estava errado no ponto que importava.** Este
+trecho dizia que o impacto era baixo porque o modo nativo vinha com
+`OD_DISABLE_API_AUTH=1`, e portanto o token não era credencial viva. A medição
+mostrou que a pregunta estava no arquivo errado:
+
+| arquivo | `git check-ignore` | tem o token |
+|---|---|---|
+| `deploy/.env` — modo **container** | coberto, por `deploy/.gitignore:2` | sim, e é a credencial da API |
+| `.env` na raiz — modo **nativo** | **nada** — `?? .env` | sim, mas o auth está desligado |
+
+O `.env` exposto era o do modo **nativo**, não o do container. E como o default
+virou `container`, o token do container passou de inerte a ser **a** credencial —
+mas ele mora em `deploy/.env`, que o próprio upstream ignora. Ou seja: a
+preocupação original apontava para o arquivo coberto, e o risco real estava no
+que ninguém ignorava.
+
+O que importa como lição: eu tinha escrito que o impacto era baixo com base no
+raciocínio do momento, e esse raciocínio dependia de um default que mudou. Um
+"impacto baixo" justificado por um default é uma afirmação com data de validade, e
+a §10.14 conta o resto.
 
 ---
 

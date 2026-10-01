@@ -2718,12 +2718,15 @@ should_run() {
 # `--yes` é a exceção, e a exceção é explícita: com a flag, a recusa não acontece
 # porque não há pergunta a fazer. O que muda com a flag, e o que NÃO muda:
 #
-#   --yes responde sim a toda confirmação, usa a senha padrão do dashboard (e a
-#   diz), deixa a senha do OpenCode ser a aleatória do instalador, e instala o
-#   OpenDesign no modo nativo — a única decisão que ele toma sozinho e que não é
-#   um "sim". A GitHub App fica INATIVA, porque a private key é um segredo que
-#   existe fora da máquina e um App ID inventado marcaria o módulo como
-#   configurado sem funcionar.
+#   --defaults responde o DEFAULT DECLARADO de cada pergunta, não "sim" para
+#   tudo — a distinção é o que esta flag existe para corrigir. Ele usa a senha
+#   padrão do dashboard (e a diz), deixa a senha do OpenCode ser a aleatória do
+#   instalador, e instala o OpenDesign no modo CONTAINER, que é o único ponto em
+#   que ele escolhe por conta própria. O login de pessoa do gh fica aceito no
+#   host, mas o handshake NAO acontece: `gh auth login -w` abre o navegador e
+#   espera, e foi onde o --yes antigo travava. A GitHub App fica INATIVA, porque
+#   a private key é um segredo que existe fora da máquina e um App ID inventado
+#   marcaria o módulo como configurado sem funcionar.
 #
 # O default continua sendo NÃO. Sem a flag, um Enter não instala nada.
 if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
