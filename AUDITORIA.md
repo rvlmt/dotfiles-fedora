@@ -832,6 +832,74 @@ falha.
 Verificada nos dois sentidos, que é como se prova uma guarda: `exit 0` no estado
 bom, `exit 1` com o `check_not` fole reintroduzido, `exit 0` restaurada.
 
+### A décima sétima: um `exit 0` com 8 de 15 módulos, e nenhum código de saída no script
+
+O `--defaults` na VM de teste produziu o pior sintoma possível: **`exit 0` e um
+log que termina no meio, sem erro e sem banner final.** Oito módulos de quinze.
+
+A investigação, na ordem em que aconteceu:
+
+1. O log parava em "Tailscale já instalado." — a linha 12 de uma função de 32.
+   Verifiquei a função procurando `exit`: **não tem nenhum**, e termina em `}`.
+   Então o script não tinha parado ali, e a hipótese passou a ser o harness.
+2. O `ptyfile2.py` entrega a entrada em fatias conforme cada prompt aparece, e o
+   **fim do arquivo vira EOF real**. Eu tinha passado o arquivo de senha, que tem
+   **uma** linha. O primeiro `sudo` consumiu; o timestamp do sudo vale uns
+   minutos; o módulo `podman` instala bastante coisa e gasta esse tempo; o `sudo`
+   seguinte expirou, pediu senha, recebeu EOF — e o pty morreu.
+3. Corrigido com `SUDO_ASKPASS`, o run completou os quinze módulos.
+
+E aqui está a parte que o caso expõe, que é independente do harness:
+
+**O script não tinha `exit` explícito.** Nenhum. O `exit 1` que o segundo run
+produziu veio do `set -e` reagindo ao `return 1` de um módulo — ou seja, o código
+de saída dependia da **posição** daquela linha. O mesmo `return 1` encerra o run
+num ponto e só marca falha em outro. Um código de saída que depende de posição é
+acaso com aparência de contrato, e era o que eu vinha medindo como se fosse
+contrato.
+
+O `SUDO_ASKPASS` é a lição menor e a mais transferível: o `ptyfile2` só pode
+responder prompts **consumindo a entrada do pty**, e o fim do arquivo é EOF. O
+`sudo` tem um mecanismo próprio para isso, que não é o terminal. O harness
+precisava dele desde o começo, e eu fui pela entrada do pty porque era o que já
+existia.
+
+### O que a correção passou a fazer
+
+**Pós-condições, por estado.** Sete funções que perguntam ao sistema se a coisa
+existe — o `opencode.service` está `active`, o container existe **e** está
+`running`, o `tailscale serve` publica a porta, o `~/.zshrc` aponta para o
+repositório. Nenhuma delas confere o log: o log é o que o script disse, o estado
+é o que a máquina tem, e só o segundo prova.
+
+E a lista que elas produzem alimenta **as duas** saídas do run: o banner e o
+código. Não podem divergir porque não são duas fontes. Antes, o banner dizia
+"Configuração finalizada" ao lado de um `exit 1`, e as duas frases eram uma
+contradição que não deixava ninguém decidir nada.
+
+**O conflito dos dois modos do OpenDesign passou a ser resolvido, não recusado.** O
+script é o **dono** da unit `open-design.service` — ele a cria e a habilita — e
+mesmo assim o aviso mandava a pessoa parar o serviço à mão. Com o default novo
+sendo `container`, isso tornava o default num beco: numa máquina que já rodou o
+nativo, **todo** run futuro falhava neste ponto, sempre. Agora ele desliga e
+desabilita, preservando a unit no disco para o caminho de volta.
+
+O caso inverso — pedir `nativo` e achar um container — **continua recusando**,
+porque `podman rm -f` apaga dados. A diferença entre os dois é quem é o dono e o
+que a operação custa, e não a simetria.
+
+### Uma checagem minha que acusou o código certo
+
+A checagem estrutural do `exit` procurava `^exit [01]$` e Reportou "o exit não é
+explícito nos dois desfechos: achei 1". O código estava **correto**: `exit 1`
+indentado dentro do `if`, `exit 0` fora — a forma idiomática. A checagem é que não
+aceitava indentação.
+
+Vale nomear porque é a §10.15 ao contrário: ali o teste acusou a documentação dele
+própria; aqui acusou o código certo. A lição é a mesma nos dois sentidos — um
+padrão de teste que não corresponde à forma real do código gera um alarme falso, e
+um alarme falso treina a ignorar a checagem.
+
 ### O padrão: um guarda que erra não falha, finge que não é a vez dele
 
 O caso do `native`/`nativo` é o arquétipo. O `case` da pergunta aceita

@@ -224,6 +224,37 @@ _hermes_dash_pids() {
 OPENDESIGN_MODE=""                 # native | container, decidido na pergunta
 OPENDESIGN_PORT="7456"
 OPENDESIGN_IMAGE="ghcr.io/nexu-io/od@sha256:587a992857d0f8b71011e4bc55c5851e33ef9fc4c169fc17e6447700ac428f22"
+# ==============================================================================
+# O registro do que este run não conseguiu fazer
+# ==============================================================================
+#
+# Isto fica aqui em cima, e não com as pós-condições no fim, porque é usado nos
+# dois lugares: os módulos registram pendências **enquanto rodam** — o do Tailscale
+# é o caso, e é o que acontece numa VM nova — e as pós-condições no fim leem a
+# mesma lista para dizer o que não prestou.
+#
+# A ordem importa e eu já a fiz ao contrário: com a lista definida perto do fim,
+# o `provision_tailscale` a usaria antes dela existir. Em bash isso não dá erro
+# de sintaxe, dá `_FALHAS` vazia — que é o modo de falha mais caro possível,
+# porque o run reporta "pronto" e não há ninguém para dizer que não.
+#
+# Um contador, e nao um `set -e`. O `set -e` decide por POSICAO: o mesmo
+# `return 1` aborta o run num lugar e so marca falha em outro. Um contador nao
+# aborta nada, ele conta — e quem aborta, se quiser, e o fim do script, com o
+# codigo de saida, uma vez, com a lista do que ficou para tras.
+_FALHAS=()
+_FALHAS_TXT=""
+
+_registrar_falha() {
+    _FALHAS+=("$1")
+    [ -z "$_FALHAS_TXT" ] && _FALHAS_TXT="$1" || _FALHAS_TXT="$_FALHAS_TXT; $1"
+}
+
+_registrar_ok() {
+    [ -n "$1" ] && echo -e "  ${GREEN}✓ $1${NC}"
+    return 0
+}
+
 OPENDESIGN_SRC="$HOME/Developer/open-design"
 # O modo nativo compila de fonte, entao precisa do clone. A URL estava no README
 # e NAO no script, que imprimia um placeholder e parava — medido: o passo parava
@@ -1302,10 +1333,35 @@ _open_design_exclusive() {
         outro="nativo"
         if [ -f "$OPENDESIGN_DEPLOY_DIR/dist/cli.js" ] && \
            curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$OPENDESIGN_PORT/api/health" 2>/dev/null; then
-            echo -e "${YELLOW}Ja existe um OpenDesign nativo rodando nesta maquina.${NC}" >&2
-            echo -e "${YELLOW}  Os dois modos disputam a porta $OPENDESIGN_PORT. Pare o nativo:${NC}" >&2
-            echo -e "${YELLOW}    systemctl --user stop open-design${NC}" >&2
-            return 1
+            # Desligar, e nao recusar. O script e o dono da unit — ele a cria e a
+            # habilita — e o modo novo passou a ser o container, entao manter o
+            # nativo no ar e manter uma porta ocupada por um servico que ninguem
+            # pediu. Recusar aqui tornava o default novo num beco: numa maquina que
+            # ja rodou o nativo, todo run futuro falhava neste ponto.
+            #
+            # Desabilitar tambem, e nao so parar: `enabled` sobrevive a um reboot, e
+            # um nativo que volta sozinho no proximo boot e a mesma disputa de
+            # novo, sem ninguem perto para ver.
+            #
+            # A unidade fica no disco. Apagar seria perder o que o script escreveu
+            # e, com ele, o caminho de volta para o modo nativo — que continua
+            # valendo e e a escolha de quem prefere as CLIs do host disponiveis
+            # dentro. Parar e desabilitar remove o conflito e preserva a opcao.
+            echo -e "${YELLOW}Ja existe um OpenDesign nativo rodando. Desligando: os dois modos${NC}" >&2
+            echo -e "${YELLOW}  disputam a porta $OPENDESIGN_PORT, e o modo desta maquina agora e o container.${NC}" >&2
+            if systemctl --user disable --now open-design.service; then
+                echo -e "${YELLOW}  ✓ nativo parado e desabilitado. A unit continua no disco, caso queira${NC}" >&2
+                echo -e "${YELLOW}    o modo nativo: 'systemctl --user enable --now open-design'.${NC}" >&2
+                echo -e "${YELLOW}  O serve em :8444 aponta para a porta do container agora, entao o tailnet${NC}" >&2
+                echo -e "${YELLOW}  deixa de responder ate o container subir. Isso e o esperado neste intervalo.${NC}" >&2
+            else
+                # Aqui nao ha o que recuperar: sem o nativo desligado, a porta
+                # continua ocupada e o container nao sobe. Dizer o que deu errado
+                # e melhor que devolver sucesso com o modulo pulado.
+                echo -e "${RED}  ✗ nao consegui desligar o nativo. O container NAO vai subir nesta maquina.${NC}" >&2
+                echo -e "${RED}    systemctl --user disable --now open-design.service${NC}" >&2
+                return 1
+            fi
         fi
     fi
     return 0
@@ -2921,7 +2977,6 @@ provision_tailscale() {
     sudo systemctl enable --now tailscaled
 
     if ! sudo tailscale status &> /dev/null; then
-        echo -e "${YELLOW}Rodando 'tailscale up' — abra o link exibido para autenticar.${NC}"
         # Sem --ssh de propósito: o Tailscale SSH exige reautenticação
         # interativa via navegador sempre que a política da tailnet tiver
         # "action: check" nos grants de ssh (o default da maioria das
@@ -2931,6 +2986,29 @@ provision_tailscale() {
         # Fedora. O acesso SSH de verdade já é coberto pelo módulo
         # sshd-hardening (só chave, sem senha) + firewalld (sshd só na
         # interface tailscale0) — sem depender de reautenticação alguma.
+        if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+            # A máquina não está conectada, e `tailscale up` abre o navegador e
+            # ESPERA. Deixar isso aqui era o mesmo modo de falha que travou o
+            # `--yes` antigo no handshake do `gh`, agora no módulo que dá acesso
+            # à máquina: numa VM nova este é o caminho que o run sempre pega.
+            #
+            # A saída é a dos outros passos de terceiro: fazer o que dá e
+            # escrever o que falta, com o comando. Um run não interativo não tem
+            # navegador, e não tem conta — e a conexão depende dos dois.
+            #
+            # Não é uma falha do run: é uma pendência, e a pós-condição que
+            # publica na tailnet vai reportá-la por estado. O run acaba dizendo
+            # "1 pendência" em vez de "pronto", que é a verdade.
+            echo -e "${YELLOW}Tailscale instalado; falta entrar na tailnet.${NC}" >&2
+            echo -e "${YELLOW}  Este passo precisa de um navegador e da sua conta, então o${NC}" >&2
+            echo -e "${YELLOW}  --defaults não o faz. Rode, quando quiser:${NC}" >&2
+            echo -e "${YELLOW}    sudo tailscale up${NC}" >&2
+            echo -e "${YELLOW}  Sem isso a VM não entra na tailnet, e as publicações em :8443${NC}" >&2
+            echo -e "${YELLOW}  :8444 e :8445 ficam sem caminho. Todo o resto do run segue.${NC}" >&2
+            _registrar_falha "Tailscale instalado mas nao conectado: rode 'sudo tailscale up'"
+            return 0
+        fi
+        echo -e "${YELLOW}Rodando 'tailscale up' — abra o link exibido para autenticar.${NC}"
         sudo tailscale up
     else
         echo -e "${GREEN}✓ Tailscale já conectado.${NC}"
@@ -4342,17 +4420,195 @@ CLI_LIST
     unset _cli _dir _bin _falta _cand
 fi
 
+
+# ==============================================================================
+# As pós-condições: o que este run NAO conseguiu fazer
+# ==============================================================================
+#
+# O run dizia "Configuração finalizada" e saía com `exit 1`. As duas frases
+# juntas eram uma contradição, e a segunda não tinha relação com a primeira: o
+# `exit 1` vinha do `set -e` reagindo ao `return 1` de um módulo, por acidente de
+# posição, e não de um resumo. Quem lesse o banner não saberia o que tinha
+# falhado, e um `exit 0` também não — que foi como o primeiro run nesta VM
+# morreu no meio, em 8 de 15 módulos, e pareceu sucesso.
+#
+# Cada função abaixo pergunta ao sistema se a coisa EXISTE. Nenhuma delas
+# confere o log: o log é o que o script disse, e o estado é o que a máquina tem.
+# São as duas coisas diferentes, e só a segunda serve para provar.
+#
+# A lista é curta de propósito. Ela cobre o que, se faltar, deixa a máquina
+# imprestável para o uso para que ela existe — um agente de fronteira sem porta,
+# sem identidade no GitHub, ou com o container parado não é uma máquina
+# configurada, é uma que parece configurada.
+
+# --- o servidor do OpenCode: a fronteira depende dele para o agente falar com
+# --- o host. Sem ele, todo agente que abre o servidor nao conecta.
+_od_server_presente() {
+    if systemctl --user is-active --quiet opencode.service 2>/dev/null; then
+        _registrar_ok "servidor do OpenCode no ar (opencode.service active)"
+    else
+        _registrar_falha "o servidor do OpenCode nao esta no ar (opencode.service)"
+    fi
+}
+
+# --- o container do OpenDesign: o modo padrao desta maquina. Um container que
+# --- existe mas nao esta `up` e pior que nenhum, porque o serve aponta para ele.
+_od_container_presente() {
+    if [ "$OPENDESIGN_MODE" != "container" ]; then
+        return 0
+    fi
+    if podman container exists open-design 2>/dev/null; then
+        if [ "$(podman inspect -f '{{.State.Status}}' open-design 2>/dev/null)" = "running" ]; then
+            _registrar_ok "container do OpenDesign rodando"
+        else
+            _registrar_falha "o container do OpenDesign existe mas nao esta rodando"
+        fi
+    else
+        _registrar_falha "o container do OpenDesign nao existe (o modo padrao e container)"
+    fi
+}
+
+# --- a identidade da maquina no GitHub: sem ela, nenhum agente consegue criar
+# --- PR, e a fronteira perde a razao de existir. Mas a App e opt-in por
+# --- decisao do dono, entauso sua ausencia e NOTA e nao FALHA.
+_gh_identidade_presente() {
+    if [ -x "$HOME/.local/bin/gh-app" ] || [ -x "$HOME/.local/bin/gh-app-token" ]; then
+        _registrar_ok "identidade de maquina no GitHub instalada (gh-app)"
+    else
+        echo -e "  ${YELLOW}nota: sem identidade de maquina no GitHub.${NC}"
+        echo -e "  ${YELLOW}  A App e opt-in — a private key e um segredo que existe fora da maquina.${NC}"
+        echo -e "  ${YELLOW}  Para ativar: ./setup.sh --profile=vm --only=gh-app${NC}"
+    fi
+}
+
+# --- a publicacao na tailnet: e o que torna a VM alcancavel sem abrir porta.
+_od_publicado() {
+    local p="$1" o que="$2"
+    if tailscale serve status 2>/dev/null | grep -q ":$p"; then
+        _registrar_ok "publicado na tailnet em :$p ($o que)"
+    else
+        _registrar_falha "nao publicado na tailnet em :$p ($o que)"
+    fi
+}
+
+# --- o secret: um arquivo de senha 777 e uma porta aberta, e o motivo de o
+# --- guard de sandbox existir. O default do script e `hermes`, que e adivinhavel.
+_hermes_secret_presente() {
+    if systemctl --user is-active --quiet hermes-dashboard.service 2>/dev/null; then
+        _registrar_ok "dashboard do Hermes no ar"
+    else
+        _registrar_falha "o dashboard do Hermes nao esta no ar"
+    fi
+}
+
+# --- o zshrc: o dono do PATH interativo. Sem ele, bun, os shims do mise e o
+# --- opencode nao estao no PATH de um shell de login, e a sintoma e um comando
+# --- que existe mas "nao e encontrado".
+_zshrc_presente() {
+    local alvo
+    alvo="$(readlink -f "$HOME/.zshrc" 2>/dev/null || true)"
+    if [ -n "$alvo" ] && [ -f "$alvo" ]; then
+        _registrar_ok "zshrc do repositorio em uso (~/.zshrc -> ${alvo##*/})"
+    else
+        _registrar_falha "~/.zshrc nao aponta para o zshrc deste repositorio"
+    fi
+}
+
+_rodar_pos_condicoes() {
+    # Um `--only` instala uma coisa e NAO as outras, por escolha de quem chamou.
+    # Verificar a maquina inteira reportaria como pendencia tudo o que o run
+    # proposadamente deixou de fora — e o run parcial terminaria com "7 pendencias"
+    # numa maquina que esta exatamente como o `--only` pediu.
+    #
+    # A regra: `--only` verifica so o que ele instalou. Num run do perfil inteiro,
+    # todas verificam. E o que separa "a maquina nao esta pronta" de "este run nao
+    # era para deixa-la pronta".
+    if [ -n "$ONLY" ]; then
+        echo
+        echo -e "${BLUE}=== Verificacao do que este run instalou (--only) ===${NC}"
+        echo -e "Um --only e um run parcial: a maquina vai continuar sem o que ele nao"
+        echo -e "instalou, por escolha. As pos-condicoes do perfil inteiro nao valem aqui."
+        _zshrc_presente
+        echo
+        return 0
+    fi
+    echo
+    echo -e "${BLUE}=== O que esta maquina tem, verificado agora ===${NC}"
+    _od_server_presente
+    _od_container_presente
+    _od_publicado "$OPENDESIGN_SERVE_PORT" "OpenDesign"
+    _od_publicado 8445 "Hermes"
+    _gh_identidade_presente
+    _hermes_secret_presente
+    _zshrc_presente
+    echo
+}
+
+_rodar_pos_condicoes
 # A mensagem final é por perfil porque o próximo passo mudou de destino: o devpod
 # passou a mirar a VM, não o host. Dizer "configure o devpod com este servidor"
 # aqui mandaria o Mac ao lugar errado.
-if [ "$PROFILE" = "vm" ]; then
-    echo -e "\n${GREEN}=== Configuração da VM de agentes finalizada! ===${NC}"
-    echo -e "Próximo passo: tire um snapshot desta VM como baseline, e no Mac aponte o"
-    echo -e "devpod para ela por provider SSH. Ver ARQUITETURA.md."
+# O banner diz o que o ESTADO diz, e nao o que o run queria. Um "finalizada"
+# incondicional ao lado de um `exit 1` era uma contradicao que nao deixava ninguem
+# decidir nada; e o `exit` dependia do `set -e` acertar a posicao do `return 1`,
+# o que e acaso, nao projeto.
+#
+# As duas informacoes vem do MESMO lugar: a lista de falhas. Se a lista esta
+# vazia, o banner e verde e o codigo e 0. Se tem algo, o banner diz o que ficou
+# para tras e o codigo e 1. Nao ha como divergirem, porque sao a mesma leitura.
+if [ "${#_FALHAS[@]}" -eq 0 ]; then
+    _banner="Configuração da VM de agentes finalizada!"
+    _cor="${GREEN}"
 else
-    echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
+    _banner="Configuração da VM de agentes: ${#_FALHAS[@]} pendência(s)."
+    _cor="${YELLOW}"
+fi
+
+if [ "$PROFILE" = "vm" ]; then
+    echo -e "\n${_cor}=== ${_banner} ===${NC}"
+    if [ "${#_FALHAS[@]}" -ne 0 ]; then
+        # Cada pendencia com o comando que resolve. Um numero ("2 pendencias")
+        # obriga quem leu a voltar ao log e casar o numero com a linha; a lista
+        # nao.
+        echo -e "${YELLOW}Não ficou pronto. Estas são as pendências, por estado:${NC}"
+        for _f in "${_FALHAS[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $_f"
+        done
+        echo
+        echo -e "O código de saída é 1 por causa delas. A máquina está no que deu para"
+        echo -e "instalar, e nos pontos acima ela não está no que precisa estar."
+    else
+        echo -e "Próximo passo: tire um snapshot desta VM como baseline, e no Mac aponte o"
+        echo -e "devpod para ela por provider SSH. Ver ARQUITETURA.md."
+    fi
+else
+    if [ "${#_FALHAS[@]}" -eq 0 ]; then
+        echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
+    else
+        echo -e "\n${YELLOW}=== Configuração do Fedora Workstation: ${#_FALHAS[@]} pendência(s). ===${NC}"
+        for _f in "${_FALHAS[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $_f"
+        done
+    fi
     echo -e "Próximo passo: crie a VM de agentes no Cockpit e rode './setup.sh --profile=vm' dentro dela."
     echo -e "A rede usada é a default do libvirt; o repo ainda não declara rede, porque a lista de"
     echo -e "serviços que o host vai expor não está escrita. Ver ARQUITETURA.md."
 fi
+
+# O código de saída, deciddo aqui e em mais nenhum lugar.
+#
+# Não havia nenhum. O `exit 1` que apareceu nesta VM foi o `set -e` reagindo ao
+# `return 1` de um módulo — o que significa que o mesmo `return 1` encerra o run
+# num ponto e só marca falha em outro, conforme a posição. Um código de saída que
+# depende de posição é acaso com aparência de contrato.
+#
+# Agora ele sai da lista de pendências, que veio das pós-condições, que
+# interrogaram o estado da máquina. Quem provisiona olha o código e sabe se a
+# máquina está no que precisa estar, e o banner diz a mesma coisa pela mesma
+# leitura — não podem divergir porque não são duas fontes.
+if [ "${#_FALHAS[@]}" -ne 0 ]; then
+    echo -e "\n${YELLOW}Código de saída 1: ${#_FALHAS[@]} pendência(s) acima.${NC}"
+    exit 1
+fi
+exit 0
 

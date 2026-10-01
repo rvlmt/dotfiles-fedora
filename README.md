@@ -83,6 +83,87 @@ compartilhar funções entre `setup.sh` e `setup-fedora.sh` no repo antigo) foi
 embutido direto no `setup.sh` de cada repo — não há mais um segundo script no
 mesmo repo pra justificar mantê-las separadas.
 
+## Passo 0. Provisionar uma VM de agentes nova
+
+> O `setup.sh` **não provisiona a VM** — ele roda *dentro* de uma máquina que já
+> existe. Este passo é o que faz a máquina existir com o repositório dentro, e ele
+> vem antes do `setup.sh` por uma razão concreta: o repositório é lido por HTTPS,
+> o que funciona numa máquina sem chave SSH nenhuma.
+
+### O comando
+
+Uma linha, na VM nova, no console do Cockpit:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/bootstrap.sh | bash
+```
+
+O `bootstrap.sh` traz o `setup.sh` e os **dois** arquivos de que ele depende —
+`zshrc` e `bin/gh-app-token.sh` — e roda o provisionamento em seguida. Ele não
+pede nada: todas as decisões que dependem de conta de terceiro ficam para o
+depois, e o run diz quais são, com o comando de cada uma.
+
+Depois, o **único** passo que precisa de você é entrar na tailnet, porque
+`tailscale up` abre o navegador e a autenticação é da sua conta:
+
+```bash
+ssh <ip-da-vm-na-tailnet> 'sudo tailscale up'
+```
+
+### Por que só o Tailscale precisa de você
+
+Das três coisas que este caminho atravessa, duas são automáticas e uma não é:
+
+| passo | quem precisa | por quê |
+|---|---|---|
+| buscar o repositório por HTTPS | **ninguém** | o repositório é público; não há chave, token nem senha |
+| `sudo tailscale up` | **você**, no navegador | autenticar uma conta na tailnet. É o mesmo motivo pelo qual `gh auth login` não roda sozinho: nenhum run não interativo tem navegador nem conta |
+| o `setup.sh --defaults` | **ninguém** | não há decisão ali — o `--defaults` responde o default declarado de cada pergunta |
+
+O passo do Tailscale é o único que **para e espera por você**, e ele diz isso na
+tela. Todo o resto passa direto.
+
+### O que esperar do `--defaults`
+
+Ele responde o *default declarado* de cada pergunta, e os defaults são escolhidos
+para que "aceitar tudo" signifique "provisionar". As duas coisas que ficam de fora
+são as que dependeriam de um segredo ou de um navegador:
+
+- a **GitHub App** fica inativa — a private key é um segredo que existe fora da
+  máquina, e um App ID inventado marcaria o módulo como configurado sem funcionar;
+- o **login de pessoa do `gh`** fica como pendência — `gh auth login` abre o
+  navegador.
+
+O run **diz as pendências no fim**, com o comando de cada uma, e sai com código
+`1`. Isso não é alarme: é a lista do que falta, verificada por estado — o run
+pergunta ao sistema se o serviço está no ar e se o container existe, e não se
+confere o log do que ele acabou de dizer que fez.
+
+```bash
+# Se o run reclamou da App:
+./setup.sh --profile=vm --only=gh-app
+# Se reclamou do login de pessoa:
+gh auth login -p https -w -s admin:public_key,read:user,user:email
+```
+
+### Por que o repositório é público
+
+Para que a URL do `bootstrap.sh` seja estável e para que uma VM nova não precise
+de nenhuma credencial para começar. O repositório é conferido antes de cada
+publicação:
+
+```bash
+./tests/lib/auditoria-publica.py
+```
+
+A auditoria procura **material** e não nomes — um bloco PEM só conta se tiver
+corpo, e token só conta se tiver formato. Ela mede o que está versionado e diz
+quantos arquivos olhou, porque um diagnóstico que reporta "nenhum" sem ter medido
+nada é o pior resultado possível: é verde, e está errado.
+
+O que é público não é segredo: é convenção de nomenclatura, portas internas e o
+domínio da sua tailnet, que só é alcançável por quem está nela.
+
 ## Como rodar num Fedora novo ou recém-formatado
 
 1. Clone este repositório e rode:

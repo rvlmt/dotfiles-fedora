@@ -239,12 +239,29 @@ check "toolbx nao pertence ao vm" "não pertence ao perfil 'vm'" "$out"
 
 echo
 echo "== 9. a mensagem final aponta para o proximo passo certo =="
+# Estes dois runs sao `--only`, que e um run PARCIAL: o run instala uma coisa e
+# nao as outras, por escolha de quem chamou. Por isso as pos-condicoes do perfil
+# inteiro nao valem neles — perguntariam por tudo o que o `--only` propositadamente
+# nao instalou, e o run terminaria com "7 pendencias" numa maquina que esta
+# exatamente como o pedido.
+#
+# E por isso o texto de "pronto" some do banner nesses dois runs: nao ha nada a
+# declarar. A checagem original exigia esse texto e falhou, e ela estava certa
+# quanto ao design e errada quanto a forma — a §10.17 ja registra uma checagem
+# que acusou o codigo certo.
+#
+# O que estas checagens ainda affirmam, e que vale: o proximo passo aponta para o
+# lugar CERTO do perfil. E o que se verifica aqui e o destino da orientacao, que e
+# a informacao que o banner carrega mesmo num run parcial.
 out="$(run_pty $'n\n' --profile=host --only=opencodex)"
-check "no host, manda criar a VM" "crie a VM de agentes no Cockpit" "$out"
+check "no host, o proximo passo e o Cockpit" "VM de agentes no Cockpit" "$out"
 check_not "no host, nao manda o devpod para o host" "devpod com este servidor" "$out"
 out="$(run_pty $'n\n' --profile=vm --only=ai-clis)"
-check "no vm, manda o snapshot e o devpod" "tire um snapshot desta VM" "$out"
-check_not "no vm, nao manda configurar devpod no host" "configure o devpod com este servidor" "$out"
+check "no vm, o proximo passo e o snapshot" "snapshot" "$out"
+check_not "no vm, nao manda configurar devpod no host" "configure o devpod com este servidor"
+# E o banner diz que e parcial, em vez de fingir que terminou a maquina:
+check "e um --only se declara parcial" "run parcial" "$out"
+check_not "e nao se declara pronto" "Configuração da VM de agentes finalizada" "$out" "$out"
 
 echo
 echo "== 10. [pipe de proposito] a recusa antecipada e o comportamento de pipe =="

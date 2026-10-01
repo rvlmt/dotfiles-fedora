@@ -353,6 +353,274 @@ else
   falha "ha check_not que nao pode falhar: contam como cobertura sem medir"
 fi
 
+echo "== o exit sai das pos-condicoes, e nao do set -e =="
+# Nao havia exit explicito nenhum. O exit 1 que apareceu na VM foi o `set -e`
+# reagindo ao `return 1` de um modulo, o que significa que o mesmo return 1
+# encerra o run num ponto e so marca falha em outro, conforme a posicao. Um codigo
+# de saida que depende de posicao e acaso com aparencia de contrato.
+if grep -q '_rodar_pos_condicoes' <<<"$codigo"; then
+  ok "existe uma etapa de pos-condicoes"
+else
+  falha "o run nao tem pos-condicoes: o exit passa a ser acidente do set -e"
+fi
+# O exit tem que estar nos DOIS desfechos, e no fim do script. A forma idiomatica
+# e `if ...; then exit 1; fi; exit 0` — o `exit 1` fica indentado e o `exit 0`
+# nao, entao o padrao tem de aceitar indentacao. A primeira versao desta checagem
+# procurava `^exit` e falhou com o codigo CORRETO: era a checagem que estava errada,
+# e nao o codigo, que e a mesma distincao da §10.15 vale nas duas direcoes.
+n_exit=$(grep -cE '^[[:space:]]*exit [01]$' <<<"$codigo")
+if [ "$n_exit" -ge 2 ]; then
+  ok "e o exit e explicito nos dois desfechos ($n_exit)"
+else
+  falha "o exit nao e explicito nos dois desfechos: achei $n_exit"
+fi
+if tail -5 "$REPO/setup.sh" | grep -qE '^exit [01]$'; then
+  ok "e ele esta no fim do script"
+else
+  falha "o exit nao esta no fim: algo depois dele decide o codigo de saida"
+fi
+
+echo "== as pos-condicoes VERIFICAM estado, e nao o log que o script imprimiu =="
+# Cada pendencia e uma funcao que pergunta ao sistema se a coisa existe. A
+# diferenca entre as duas coisas e a razao delas existirem: o log e o que o
+# script disse, o estado e o que a maquina tem.
+n_estado=0
+for alvo in 'is-active --quiet opencode.service' \
+            'podman container exists open-design' \
+            'podman inspect -f' \
+            'tailscale serve status' \
+            'readlink -f "$HOME/.zshrc"'; do
+  if grep -qF -- "$alvo" <<<"$codigo"; then
+    n_estado=$((n_estado + 1))
+  fi
+done
+if [ "$n_estado" -ge 4 ]; then
+  ok "as pos-condicoes consultam o estado, nao o log ($n_estado de 5)"
+else
+  falha "as pos-condicoes consultam o log em vez do estado ($n_estado de 5)"
+fi
+if grep -q '_registrar_falha\|_registrar_ok' <<<"$codigo"; then
+  ok "e cada uma registra o desfecho, para o banner e o exit lerem a mesma lista"
+else
+  falha "as pos-condicoes nao registram o desfecho: banner e exit nao vem da mesma fonte"
+fi
+
+echo "== o banner nao e mais incondicional =="
+# Um 'finalizada' ao lado de um exit 1 era uma contradicao. Agora o texto sai da
+# lista de pendencias, entao o banner e o exit nao podem divergir.
+if grep -q '_banner="Configuração da VM de agentes' <<<"$codigo"; then
+  ok "o banner e montado a partir da lista de pendencias"
+else
+  falha "o banner e incondicional: ele diz 'finalizada' mesmo com pendencia"
+fi
+if grep -q 'pendência(s)' <<<"$codigo"; then
+  ok "e ele tem um desfecho para quando ha pendencia, com a lista"
+else
+  falha "o banner nao tem desfecho para o caso com pendencia"
+fi
+if grep -q 'for _f in "\${_FALHAS\[@\]}"' <<<"$codigo"; then
+  ok "e a pendencia vem nomeada, e nao so como numero"
+else
+  falha "a pendencia e so um numero: obriga a voltar ao log e casar com a linha"
+fi
+
+echo "== o conflito dos dois modos do OpenDesign: o script resolve, nao recusa =="
+# O script e o DONO da unit open-design.service: ele a cria e a habilita. Deixar
+# o desmonte para a mao era incoerente com isso, e tornava o default novo num
+# beco: numa maquina que ja rodou o nativo, TODO run futuro falhava aqui.
+if grep -q 'systemctl --user disable --now open-design.service' <<<"$codigo"; then
+  ok "o script desliga e desabilita o nativo, que e dele"
+else
+  falha "o script recusa o conflito em vez de resolver, e o nativo e dele"
+fi
+if grep -q 'A unit continua no disco' <<<"$codigo"; then
+  ok "e a unit fica preservada, para o caminho de volta ao nativo"
+else
+  falha "o script apaga a unit, e perde o caminho de volta ao modo nativo"
+fi
+# O caso inverso e DESTRUTIVO (remover container apaga dados), entao esse recusa.
+if grep -q 'podman rm -f open-design' <<<"$codigo"; then
+  ok "e o caso inverso ainda recusa, porque remover container apaga dados"
+else
+  falha "o caso inverso passou a apagar container: isso e destrutivo"
+fi
+
+echo "== as pos-condicoes nao sao alarme falso num run parcial =="
+# Um --only instala uma coisa e NAO as outras, por escolha. Se as pos-condicoes
+# perguntarem pela maquina inteira, elas reportam como pendencia tudo o que o run
+# proposadamente nao instalou — e o run parcial termina com "7 pendencias" numa
+# maquina que esta exatamente como o --only pediu. Alarme falso treina quem le a
+# ignorar a saida, que e o que as pos-condicoes vieram evitar.
+if grep -q 'if \[ -n "\$ONLY" \]; then' <<<"$codigo"; then
+  ok "um run --only verifica so o que instalou"
+else
+  falha "um run --only verifica a maquina inteira: toda pendencia e alarme falso"
+fi
+# E a variavel tem que ser a de verdade. Eu escrevi ONLY_STEPS, que nao existe
+# no script — a condicao nunca era verdadeira e todo --only caia no caminho do
+# perfil inteiro, que e exatamente o que a checagem devia pegar.
+if grep -qE '^ONLY=""' <<<"$codigo"; then
+  ok "e a condicao usa a variavel que o script realmente define (ONLY)"
+else
+  falha "a variavel ONLY nao existe no script: a condicao nunca e verdadeira"
+fi
+if grep -q 'ONLY_STEPS' <<<"$codigo"; then
+  falha "a condicao usa ONLY_STEPS, que o script nao define"
+else
+  ok "e nao usa nenhum nome inventado"
+fi
+
+echo "== o 'tailscale up' e pendencia, e nao travamento =="
+# Numa VM recem-criada a maquina NAO esta conectada, entao este e o caminho que o
+# run sempre pega. E `tailscale up` abre o navegador e ESPERA — o mesmo modo de
+# falha que travou o --yes antigo no handshake do gh, agora no modulo que da
+# acesso a maquina.
+if grep -q 'sudo tailscale up' <<<"$codigo"; then
+  if grep -B12 'sudo tailscale up' <<<"$codigo" | grep -q 'ASSUME_DEFAULTS'; then
+    ok "o 'tailscale up' e pulado sob --defaults"
+  else
+    falha "o 'tailscale up' roda sem guarda: trava o --defaults numa VM nova"
+  fi
+else
+  falha "nao ha 'tailscale up' no script: a VM nunca entra na tailnet"
+fi
+if grep -q "sudo tailscale up'" <<<"$codigo" || grep -q 'rode .sudo tailscale up' <<<"$codigo"; then
+  ok "e a pendencia diz o comando, em vez de so dizer que falhou"
+else
+  falha "a pendencia do tailscale nao diz o comando que resolve"
+fi
+
+echo "== o registro das pendencias vem ANTES de qualquer modulo =="
+# Isto eu fiz ao contrario na primeira vez: a lista estava definida perto do fim,
+# e o `provision_tailscale` a usava antes dela existir. Em bash isso nao da erro
+# de sintaxe — da lista vazia, e o run reporta "pronto". E o modo de falha mais
+# caro, porque ninguem tem como dizer que nao foi.
+d=$(grep -n '^_FALHAS=()' <<<"$codigo" | head -1 | cut -d: -f1)
+u=$(grep -n '    provision_tailscale$' <<<"$codigo" | head -1 | cut -d: -f1)
+if [ -n "$d" ] && [ -n "$u" ] && [ "$d" -lt "$u" ]; then
+  ok "a lista ($d) vem antes do uso ($u)"
+else
+  falha "a lista de pendencias ($d) nao vem antes do uso ($u): o run reportaria 'pronto'"
+fi
+
+echo "== o README tem o passo 0, e o comando dele tem sintaxe =="
+# O `setup.sh` nao provisiona a VM: ele roda DENTRO de uma maquina que ja existe.
+# Sem o passo 0 escrito, quem provisionar uma VM nova descobre a ordem errada
+# depois de perder a VM — e a ordem nao e livre: o `git clone` usa SSH, e o SSH
+# so existe depois do `tailscale up`.
+r=$(cat "$REPO/README.md")
+if grep -q '## Passo 0' <<<"$r"; then
+  ok "o README documenta o passo 0 (provisionar a VM)"
+else
+  falha "o README nao tem o passo 0: a ordem de provisionamento fica por conta de quem le"
+fi
+# A ordem e o que importa: tailscale ANTES do clone, e o clone pela chave da VM.
+t_up=$(grep -n 'sudo tailscale up' <<<"$r" | head -1 | cut -d: -f1)
+t_clone=$(grep -n 'git clone git@github.com' <<<"$r" | head -1 | cut -d: -f1)
+if [ -n "$t_up" ] && [ -n "$t_clone" ] && [ "$t_up" -lt "$t_clone" ]; then
+  ok "e a ordem esta certa: tailscale up antes do clone (linhas $t_up e $t_clone)"
+else
+  falha "a ordem esta errada ou falta: o clone por SSH so funciona DEPOIS do tailscale up"
+fi
+if grep -q 'gh repo deploy-key add' <<<"$r"; then
+  ok "e ele diz como autorizar a chave da VM no repo privado"
+else
+  falha "o passo 0 nao resolve como o repo privado e lido"
+fi
+# Nenhum segredo atravessa. A chave publica e inutil para quem roubar; o que
+# NAO pode aparecer no README e um segredo de verdade.
+if grep -qE 'ghp_[A-Za-z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY' <<<"$r"; then
+  falha "o README tem o que parece ser um segredo"
+else
+  ok "e nenhum segredo aparece no README: so chave publica, que nao abre nada"
+fi
+# O comando precisa ter SINTAXE valida, e isso se extrai do README e se checa de
+# verdade. A primeira versao desta checagem aceitava o proprio fracasso como "ok"
+# — um teste que nao pode falhar e pior que nenhum, e este era exatamente o caso
+# que a §10.16 registrou.
+#
+# A extracao pega o corpo do `bash -c '...'` e roda `bash -n` nele: o shell le,
+# nao executa. Um `read -r -p` no meio nao trava nada porque `-n` nao executa.
+# A extracao pega o INTERIOR do `bash -c '...'`: as linhas de abertura e de
+# fechamento sao o embrulho do markdown, nao o comando. A primeira versao pegava
+# a abertura e descartava o fecho, e o `bash -n` falhava com "EOF inesperado
+# procurando por ''" — o que e a falha CORRETA, sobre a extracao errada.
+_tmp_m=$(mktemp)
+sed -n "/^VM=</,/^'\$/p" "$REPO/README.md" | sed "1d; \$d" > "$_tmp_m"
+if [ -s "$_tmp_m" ] && bash -n "$_tmp_m" 2>/dev/null; then
+  ok "e o comando do passo 0 tem sintaxe valida ($(wc -l < "$_tmp_m") linhas extraidas)"
+else
+  falha "o comando do passo 0 do README nao tem sintaxe valida"
+  bash -n "$_tmp_m" 2>&1 | head -3 | sed "s/^/        /"
+fi
+rm -f "$_tmp_m"
+
+echo "== a auditoria do que um repo publico revelaria =="
+# Publicar o repo e uma decisao legitima, e a razao de esta checagem existir e
+# tornar essa decisao informada — e nao um `git remote set-url` seguido de um
+# pedido de desculpas.
+#
+# O que ela mede e MATERIAL, e nao nomes: um bloco PEM so conta se tem CORPO, e
+# token so conta se tem FORMATO. A primeira versao era um `grep` por "PRIVATE KEY"
+# e acusou dois arquivos — as duas ocorrencias eram padroes de casamento, uma
+# delas a propria checagem que procura segredo. Diagnostico no objeto errado.
+if python3 "$LIB/auditoria-publica.py" > /tmp/fd-aud-publica.txt 2>&1; then
+  n_med=$(sed -n 's/^Medindo \([0-9]*\) arquivo.*/\1/p' /tmp/fd-aud-publica.txt | head -1)
+  if [ -n "$n_med" ] && [ "$n_med" -ge 1 ]; then
+    ok "nenhum segredo em $n_med arquivo(s) versionado(s)"
+  else
+    falha "a auditoria nao mediu nenhum arquivo: 'nenhum segredo' seria mentira"
+  fi
+else
+  falha "a auditoria do repo publico achou algo que nao pode sair"
+  sed -n '2,8p' /tmp/fd-aud-publica.txt | sed 's/^/        /'
+fi
+rm -f /tmp/fd-aud-publica.txt
+
+echo "== o bootstrap cobre TUDO que o setup.sh le do repo =="
+# O `curl` do bootstrap e o caminho do provisionamento sem chave nenhuma, entao
+# ele tem de trazer os arquivos de que o `setup.sh` depende — e a lista e
+# EXTRAIDA do proprio setup.sh, nao escrita a mao. Uma lista escrita a mao e uma
+# lista que desatualiza em silencio quando o setup.sh ganha uma dependencia nova.
+if [ -f "$REPO/bootstrap.sh" ]; then
+  deps=$(grep -oE '\$SCRIPT_DIR/[a-zA-Z0-9/._-]+' "$REPO/setup.sh" | sort -u)
+  n_dep=$(printf '%s\n' "$deps" | grep -c . || true)
+  n_ok=0
+  for d in $deps; do
+    rel="${d#\$SCRIPT_DIR/}"
+    if grep -qF "buscar \"$rel\"" "$REPO/bootstrap.sh"; then
+      n_ok=$((n_ok + 1))
+    else
+      falha "o setup.sh le $rel e o bootstrap nao traz"
+    fi
+  done
+  if [ "$n_ok" -eq "$n_dep" ]; then
+    ok "o bootstrap traz as $n_dep dependencia(s) que o setup.sh le do repo"
+  fi
+  if grep -qF 'buscar "setup.sh"' "$REPO/bootstrap.sh"; then
+    ok "e traz o proprio setup.sh"
+  else
+    falha "o bootstrap nao traz o setup.sh"
+  fi
+  # Um `curl` que devolve uma PAGINA de erro com 200 nao falha: o script receberia
+  # receberia HTML e nao distinguiria de um script. A checagem existe, e precisa.
+  if grep -qE 'DOCTYPE html|<html' "$REPO/bootstrap.sh"; then
+    ok "e rejeita uma pagina HTML, que o curl -f nao pega"
+  else
+    falha "o bootstrap nao rejeita pagina de erro: o setup.sh rodaria um HTML"
+  fi
+  # Um `curl` que falha tem que PARAR, nao seguir para o setup.sh — que
+  # falharia por um arquivo que nao chegou, com uma mensagem que aponta para o
+  # sintoma e nao para a causa.
+  if grep -A4 '^buscar() {' "$REPO/bootstrap.sh" | grep -q 'exit 1'; then
+    ok "e um download que falha para o bootstrap, em vez de seguir"
+  else
+    falha "um download que falha nao para o bootstrap"
+  fi
+else
+  falha "nao existe bootstrap.sh, e o README aponta para ele"
+fi
+
 echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi
 
