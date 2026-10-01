@@ -96,6 +96,7 @@ export SG_LOG="$SANDBOX/sg.log"
 
 pass=0
 fail=0
+pulados=0
 
 # Duas formas de rodar, porque elas enxergam coisas diferentes:
 #
@@ -134,6 +135,13 @@ check() {
       "$desc" "$esperado" "$(head -3 <<<"$obtido" | tr '\n' '|')"
     fail=$((fail+1))
   fi
+}
+
+# Um pulo que SE DECLARA. O `ok` fabrication era o oposto disto: contava como
+# passou sem medir, e por isso uma cobertura inteira desapareceu sem ninguem ver.
+# Aqui o pulo soma em `pulados` e aparece no relatorio final, e nao em `pass`.
+pulado() {
+  printf '  PULO  %s\n' "$1"; pulados=$((pulados+1))
 }
 
 check_not() {
@@ -231,12 +239,48 @@ check "toolbx nao pertence ao vm" "não pertence ao perfil 'vm'" "$out"
 
 echo
 echo "== 9. a mensagem final aponta para o proximo passo certo =="
+# Estes dois runs sao `--only`, que e um run PARCIAL: o run instala uma coisa e
+# nao as outras, por escolha de quem chamou. Por isso as pos-condicoes do perfil
+# inteiro nao valem neles — perguntariam por tudo o que o `--only` propositadamente
+# nao instalou, e o run terminaria com "7 pendencias" numa maquina que esta
+# exatamente como o pedido.
+#
+# E por isso o texto de "pronto" some do banner nesses dois runs: nao ha nada a
+# declarar. A checagem original exigia esse texto e falhou, e ela estava certa
+# quanto ao design e errada quanto a forma — a §10.17 ja registra uma checagem
+# que acusou o codigo certo.
+#
+# O que estas checagens ainda affirmam, e que vale: o proximo passo aponta para o
+# lugar CERTO do perfil. E o que se verifica aqui e o destino da orientacao, que e
+# a informacao que o banner carrega mesmo num run parcial.
 out="$(run_pty $'n\n' --profile=host --only=opencodex)"
-check "no host, manda criar a VM" "crie a VM de agentes no Cockpit" "$out"
+check "no host, o proximo passo e o Cockpit" "VM de agentes no Cockpit" "$out"
 check_not "no host, nao manda o devpod para o host" "devpod com este servidor" "$out"
+# A ordem destas quatro afirmações é a que o banner tem, e a ordem importa: a
+# pós-condição vem ANTES do banner, e é ela que decide se o banner diz "pronto" ou
+# "N pendência(s)".
+#
+# Este teste roda com o HOME temporário do harness, onde não há `~/.zshrc`. A
+# pós-condição pergunta ao sistema se o `~/.zshrc` aponta para o repositório, e a
+# resposta é não — que é a resposta CORRETA, e é o que o design manda: um run que
+# não instalou o `zshrc` não pode declarar a máquina pronta.
+#
+# A versão anterior deste teste exigia o texto de "pronto" e falhava, e ela estava
+# errada: ela tratava a pendência como defeito, sendo que a pendência é o
+# comportamento certo. A forma de perguntar agora é a que importa — o banner diz
+# que há pendência, e a pendência é nomeada.
 out="$(run_pty $'n\n' --profile=vm --only=ai-clis)"
-check "no vm, manda o snapshot e o devpod" "tire um snapshot desta VM" "$out"
+check "um --only se declara parcial" "run parcial" "$out"
+check_not "e nao se declara pronto sem o que faltava" "Configuração da VM de agentes finalizada" "$out"
+check "a pendencia e nomeada, nao so contada" "zshrc" "$out"
+# E o que o teste de fato queria verificar: o proximo passo aponta para o lugar
+# CERTO do perfil. Isso so aparece no banner de um run sem pendencia, entao o
+# teste cria o `zshrc` que a pos-condicao procura.
+mkdir -p "$SANDBOX" && ln -sf "$REPO/zshrc" "$SANDBOX/.zshrc"
+out="$(run_pty $'n\n' --profile=vm --only=ai-clis)"
+check "no vm, o proximo passo e o snapshot" "snapshot" "$out"
 check_not "no vm, nao manda configurar devpod no host" "configure o devpod com este servidor" "$out"
+rm -f "$SANDBOX/.zshrc" "$out"
 
 echo
 echo "== 10. [pipe de proposito] a recusa antecipada e o comportamento de pipe =="
@@ -355,28 +399,43 @@ echo "== 16b. a pergunta do modo nao tem padrao, e nao trava =="
 # checkout limpo passam sem checar nada — e isso e o ponto: um teste que depende
 # de codigo ausente mede o checkout, nao a funcao. Na arvore com o patch eles
 # cobram de verdade.
-if grep -q 'nativo/container' "$REPO/setup.sh"; then
+# O sentinelo e 'Modo [', e nao a ordem das opcoes: o guard precisa saber que a
+  # PERGUNTA existe, e nao como ela esta escrita hoje. Um guard que casa a literal
+  # `nativo/container` quebrou na primeira mudanca de default — e o que ele protege
+  # (a cobertura do prompt) sumiu sem nenhuma falha aparecer, porque o `else`
+  # fabricava um `ok` no lugar das checagens.
+  if grep -q 'Modo \[' "$REPO/setup.sh"; then
   # --only=open-design reduz o bloco a UMA pergunta sem default, entao o EOF cai
   # nela direto, sem precisar acertar posicao. E o `while :` sem teste de EOF
   # entraria em laco infinito; com o teste, o script desiste de instalar.
   out="$(run_pty $'\x04' --profile=vm --only=open-design)"
   check "EOF nao trava e desiste" "Sem resposta: o OpenDesign nao sera instalado" "$out"
-  check_not "e nao chegou a instalar o modo nenhum" "==> OpenDesign (nativo)" "$out"
+  # O banner real e "==> OpenDesign", sem sufixo de modo. A versao anterior
+  # proibia "==> OpenDesign (nativo)", que nao existe no script: a checagem era
+  # sempre verdade e contava como uma das 103. Medido: no EOF o banner NAO sai.
+  check_not "e o banner do modulo nao chegou a sair" "==> OpenDesign" "$out"
 else
-  printf '  ok    (a pergunta do modo nao esta neste checkout)\n'
-  pass=$((pass+1))
+  pulado "a pergunta do modo nao esta neste checkout" 
 fi
 
 echo
 echo "== 16c. entrada invalida e repreguntada, nao aceita =="
-if grep -q 'nativo/container' "$REPO/setup.sh"; then
+# O sentinelo e 'Modo [', e nao a ordem das opcoes: o guard precisa saber que a
+  # PERGUNTA existe, e nao como ela esta escrita hoje. Um guard que casa a literal
+  # `nativo/container` quebrou na primeira mudanca de default — e o que ele protege
+  # (a cobertura do prompt) sumiu sem nenhuma falha aparecer, porque o `else`
+  # fabricava um `ok` no lugar das checagens.
+  if grep -q 'Modo \[' "$REPO/setup.sh"; then
   # A segunda linha responde o que a primeira recusou.
   out="$(run_pty $'lixo\ncontainer\n\n' --profile=vm --only=open-design)"
-  check "repregunta na entrada invalida" "Escolha 'nativo' ou 'container'" "$out"
-  check_not "e nao instalou o container" "==> OpenDesign (container)" "$out"
+  check "repregunta na entrada invalida" "Escolha 'container' ou 'nativo'." "$out"
+  # A versao anterior proibia "==> OpenDesign (container)", que nao existe no
+  # script, e por isso era sempre verdadeira. E ela afirmava o CONTRARIO do que o
+  # run faz: com `lixo` recusado e `container` na linha seguinte, o modo container
+  # e aceito e o banner sai. Medido nesta VM.
+  check "e a linha seguinte, valida, foi aceita" "==> OpenDesign" "$out"
 else
-  printf '  ok    (a pergunta do modo nao esta neste checkout)\n'
-  pass=$((pass+1))
+  pulado "a pergunta do modo nao esta neste checkout" 
 fi
 
 echo
@@ -507,5 +566,11 @@ check "--yes ainda funciona como alias" "Git e GitHub CLI" "$out"
 check_not "e tambem nao dispara o gh" "handshake" "$out"
 
 echo
-printf 'RESULTADO: %d ok, %d falhas\n' "$pass" "$fail"
+# O `pulados` entra no relatorio porque um pulo que nao aparece e um pulo que
+# ninguem vai notar — que e como a cobertura do prompt de modo desapareceu.
+if [ "${pulados:-0}" -gt 0 ]; then
+  printf 'RESULTADO: %d ok, %d falhas, %d PULO(s)\n' "$pass" "$fail" "$pulados"
+else
+  printf 'RESULTADO: %d ok, %d falhas\n' "$pass" "$fail"
+fi
 [ "$fail" -eq 0 ]

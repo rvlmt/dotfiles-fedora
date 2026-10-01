@@ -89,6 +89,30 @@ definir aborta com "unbound variable" — e o modo silencioso do script é o que
 dói: o `.env` sai **vazio**, o daemon sobe com o auth ligado, e o sintoma
 aparece muito depois.
 
+### Onde cada `.env` fica, e o que o git faz com ele
+
+Isto é medido no clone, e a diferença entre os dois modos é real:
+
+| arquivo | `git check-ignore` | tem segredo? |
+|---|---|---|
+| `deploy/.env` — modo **container** | coberto, por `deploy/.gitignore:2` | sim, o token |
+| `.env` na raiz — modo **nativo** | **não coberto** — aparecia como `?? .env` | sim, o token |
+
+O modo container segue o caminho que o **upstream documenta** (`deploy/.env`, a
+partir de `deploy/.env.example`) e o próprio upstream o ignora. O modo nativo
+escreve na raiz, onde nada o ignorava, e é por isso que o script acrescenta
+`/.env` ao `.git/info/exclude`: esse arquivo é estado local do clone, nunca é
+commitado, e não suja um `.gitignore` que pertence ao upstream.
+
+O script **verifica por estado**, não pelo log que acabou de imprimir:
+
+```bash
+git -C ~/Developer/open-design check-ignore -v .env   # tem que dizer info/exclude
+```
+
+Se a linha não aparecer, o `.env` tem o token dentro e está visível para
+`git add -A`. Não commite assim.
+
 ```bash
 grep -c OD_DISABLE_API_AUTH ~/Developer/open-design/.env   # tem que ser 1
 systemctl --user show open-design -p Environment | tr ' ' '\n' | grep OD_
@@ -117,15 +141,15 @@ script detecta e diz o que fazer — `sudo -v` num terminal antes (o timestamp �
 que ele quer manter quente), ou `NOPASSWD` para o `dnf` da distro, ou um
 askpass.
 
-O que o `--yes` decide sozinho:
+O que o `--defaults` decide sozinho (`--yes` é alias):
 
 | | |
 |---|---|
 | confirmações | **o default de cada uma**, e nenhum default é entrada para serviço externo nem credencial destruída |
 | senha do dashboard | a padrão `hermes`, e ela é **dita** na saída |
 | senha do OpenCode | a padrão `opencode`, **dita** na saída — a mesma convenção do dashboard |
-| modo do OpenDesign | **nativo**, anunciado |
-| login de pessoa do `gh` | **pulado**, com o motivo e o passo 1 desta lista |
+| modo do OpenDesign | **container**, anunciado. Só é seguro porque o passo `podman` instala o `podman-compose` — medido: sem ele, `podman compose` falha com "looking up compose provider failed" |
+| login de pessoa do `gh` | **conteúdo no host, pulado na vm** — são alternativas, não um par. E o default do host **não abre o handshake**: a flag escreve o comando para você rodar, porque `gh auth login -w` abre o navegador e espera |
 | GitHub App | **inativa** — a private key é um segredo que existe fora da máquina |
 
 ⚠️ **A flag se chama `--defaults`, e `--yes` é alias.** O nome antigo significava
@@ -145,3 +169,31 @@ instala, e o custo de disco. Este documento é só o que falta **depois**.
 Nenhum item aqui é bloqueio do `setup.sh`. São configuração e verificação — e o
 motivo de estarem documentados em vez de automatizados é que cada um exige um
 segredo ou uma credencial que não existe dentro da máquina.
+
+---
+
+## 5. Na VM, `gh` é a App — e isso é de propósito
+
+O perfil `vm` instala um **shim** em `~/.local/bin/gh`, que é o `gh` de verdade
+com o token de instalação da GitHub App. Sem ele, um agente que roda `gh pr
+create` pega o `gh` sem token e falha, sem nenhuma pista de que existe uma App
+na máquina.
+
+Não é gambiarra: a documentação do GitHub CLI diz que `gh auth login` **não tem
+login como App** (só o fluxo web e `--with-token`), e que a integração com um
+token que não vem do login é a variável `GH_TOKEN`, **com precedência sobre as
+credenciais guardadas**. Injetar `GH_TOKEN` é o mecanismo documentado.
+
+O shim é **só no perfil `vm`**, e a razão está na mesma frase da documentação: como
+`GH_TOKEN` tem precedência, um shim no host **sobrescreveria o seu login de
+pessoa**. A máquina de uma pessoa e a máquina de uma fronteira têm identidades
+diferentes, e o perfil é a única coisa que sabe qual é esta.
+
+```bash
+# na vm: o token é o da App
+gh api user --jq .login          # a conta da App, não a sua
+# no host: o shim não existe
+type -a gh                      # /usr/bin/gh, e só
+```
+
+Se o shim aparecer no host, corra `rm ~/.local/bin/gh`: ele não deveria estar lá.

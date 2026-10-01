@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Onde este script está em disco. Quando ele roda por pipe, `BASH_SOURCE[0]` é
+# "bash" e este diretório é o de quem executou — que não é de onde o script veio.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A URL de origem, e o nome do repositório. Só é usada quando o script precisa se
+# obter, e por isso fica vazia no caminho normal: um repositório clonado não deve
+# depender de rede para rodar.
+# Para onde o script se coloca quando chega por pipe. Um lugar só, e fora do
+# `~/Developer`: o que se guarda ali é o material de instalação, e `~/Developer`
+# é para código que a pessoa maintaina. Se o script só baixou o `setup.sh` e os
+# dois anexos, não há repositório ali — e fingir que há, criando uma pasta com
+# nome de projeto, é a forma de deixar lixo com cara de coisa importante.
+SETUP_DESTINO="${SETUP_DESTINO:-$HOME/tmp/dotfiles}"
+
+# A URL de origem. Vazio no caminho normal: um repositório clonado não deve
+# depender de rede para rodar, e a única coisa que precisa de rede é o caminho por
+# pipe, que é o que descobre a si mesmo.
+SETUP_ORIGIN=""
+REPO_SLUG="rvlmt/dotfiles-fedora"
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -224,6 +242,37 @@ _hermes_dash_pids() {
 OPENDESIGN_MODE=""                 # native | container, decidido na pergunta
 OPENDESIGN_PORT="7456"
 OPENDESIGN_IMAGE="ghcr.io/nexu-io/od@sha256:587a992857d0f8b71011e4bc55c5851e33ef9fc4c169fc17e6447700ac428f22"
+# ==============================================================================
+# O registro do que este run não conseguiu fazer
+# ==============================================================================
+#
+# Isto fica aqui em cima, e não com as pós-condições no fim, porque é usado nos
+# dois lugares: os módulos registram pendências **enquanto rodam** — o do Tailscale
+# é o caso, e é o que acontece numa VM nova — e as pós-condições no fim leem a
+# mesma lista para dizer o que não prestou.
+#
+# A ordem importa e eu já a fiz ao contrário: com a lista definida perto do fim,
+# o `provision_tailscale` a usaria antes dela existir. Em bash isso não dá erro
+# de sintaxe, dá `_FALHAS` vazia — que é o modo de falha mais caro possível,
+# porque o run reporta "pronto" e não há ninguém para dizer que não.
+#
+# Um contador, e nao um `set -e`. O `set -e` decide por POSICAO: o mesmo
+# `return 1` aborta o run num lugar e so marca falha em outro. Um contador nao
+# aborta nada, ele conta — e quem aborta, se quiser, e o fim do script, com o
+# codigo de saida, uma vez, com a lista do que ficou para tras.
+_FALHAS=()
+_FALHAS_TXT=""
+
+_registrar_falha() {
+    _FALHAS+=("$1")
+    [ -z "$_FALHAS_TXT" ] && _FALHAS_TXT="$1" || _FALHAS_TXT="$_FALHAS_TXT; $1"
+}
+
+_registrar_ok() {
+    [ -n "$1" ] && echo -e "  ${GREEN}✓ $1${NC}"
+    return 0
+}
+
 OPENDESIGN_SRC="$HOME/Developer/open-design"
 # O modo nativo compila de fonte, entao precisa do clone. A URL estava no README
 # e NAO no script, que imprimia um placeholder e parava — medido: o passo parava
@@ -1302,10 +1351,35 @@ _open_design_exclusive() {
         outro="nativo"
         if [ -f "$OPENDESIGN_DEPLOY_DIR/dist/cli.js" ] && \
            curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$OPENDESIGN_PORT/api/health" 2>/dev/null; then
-            echo -e "${YELLOW}Ja existe um OpenDesign nativo rodando nesta maquina.${NC}" >&2
-            echo -e "${YELLOW}  Os dois modos disputam a porta $OPENDESIGN_PORT. Pare o nativo:${NC}" >&2
-            echo -e "${YELLOW}    systemctl --user stop open-design${NC}" >&2
-            return 1
+            # Desligar, e nao recusar. O script e o dono da unit — ele a cria e a
+            # habilita — e o modo novo passou a ser o container, entao manter o
+            # nativo no ar e manter uma porta ocupada por um servico que ninguem
+            # pediu. Recusar aqui tornava o default novo num beco: numa maquina que
+            # ja rodou o nativo, todo run futuro falhava neste ponto.
+            #
+            # Desabilitar tambem, e nao so parar: `enabled` sobrevive a um reboot, e
+            # um nativo que volta sozinho no proximo boot e a mesma disputa de
+            # novo, sem ninguem perto para ver.
+            #
+            # A unidade fica no disco. Apagar seria perder o que o script escreveu
+            # e, com ele, o caminho de volta para o modo nativo — que continua
+            # valendo e e a escolha de quem prefere as CLIs do host disponiveis
+            # dentro. Parar e desabilitar remove o conflito e preserva a opcao.
+            echo -e "${YELLOW}Ja existe um OpenDesign nativo rodando. Desligando: os dois modos${NC}" >&2
+            echo -e "${YELLOW}  disputam a porta $OPENDESIGN_PORT, e o modo desta maquina agora e o container.${NC}" >&2
+            if systemctl --user disable --now open-design.service; then
+                echo -e "${YELLOW}  ✓ nativo parado e desabilitado. A unit continua no disco, caso queira${NC}" >&2
+                echo -e "${YELLOW}    o modo nativo: 'systemctl --user enable --now open-design'.${NC}" >&2
+                echo -e "${YELLOW}  O serve em :8444 aponta para a porta do container agora, entao o tailnet${NC}" >&2
+                echo -e "${YELLOW}  deixa de responder ate o container subir. Isso e o esperado neste intervalo.${NC}" >&2
+            else
+                # Aqui nao ha o que recuperar: sem o nativo desligado, a porta
+                # continua ocupada e o container nao sobe. Dizer o que deu errado
+                # e melhor que devolver sucesso com o modulo pulado.
+                echo -e "${RED}  ✗ nao consegui desligar o nativo. O container NAO vai subir nesta maquina.${NC}" >&2
+                echo -e "${RED}    systemctl --user disable --now open-design.service${NC}" >&2
+                return 1
+            fi
         fi
     fi
     return 0
@@ -1601,6 +1675,23 @@ _setup_open_design_native() {
     # único onde os dois funcionam, porque o gateway do podman conta como
     # loopback DENTRO dele.
     local envf="$OPENDESIGN_ROOT/.env"
+
+    # Este `.env` é o SEGREDO exposto, e a medição é que decide onde a correção
+    # vai. No clone do upstream:
+    #
+    #   deploy/.env   ->  coberto por `deploy/.gitignore:2:.env`   (o modo container)
+    #   .env (raiz)   ->  NÃO coberto: `git check-ignore` não devolve nada, e o
+    #                     `git status` mostra `?? .env`             (o modo nativo)
+    #
+    # A correção vai para `.git/info/exclude`, e não para o `.gitignore`: aquele é
+    # estado local do clone, nunca é commitado, e não suja um arquivo que pertence
+    # ao upstream e que o próximo `git pull` pode conflitar. É o jeito padrão de
+    # ignorar um arquivo local num clone que não é seu.
+    if git -C "$OPENDESIGN_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        grep -qxF '/.env' "$OPENDESIGN_ROOT/.git/info/exclude" 2>/dev/null \
+            || printf '/.env\n' >> "$OPENDESIGN_ROOT/.git/info/exclude"
+    fi
+
     ( umask 077
       cat > "$envf" <<ODENV
 OD_API_TOKEN=$OPENDESIGN_TOKEN
@@ -1610,6 +1701,19 @@ OD_CODEX_SANDBOX=
 ODENV
     )
     chmod 600 "$envf"
+
+    # Pós-condição, verificada por ESTADO: o arquivo tem o token dentro, então ele
+    # não pode aparecer como `?? .env` para o próximo `git add -A`. Confere com o
+    # `check-ignore`, que pergunta ao git, e não com a linha que o script acabou de
+    # imprimir — um log sem o efeito ao lado não prova que algo rodou.
+    if git -C "$OPENDESIGN_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        if git -C "$OPENDESIGN_ROOT" check-ignore -q .env; then
+            echo -e "${GREEN}  ✓ o .env da raiz tem o token dentro e está coberto: não aparece no status.${NC}"
+        else
+            echo -e "${YELLOW}  AVISO: o .env da raiz tem o token dentro e NÃO está coberto.${NC}" >&2
+            echo -e "${YELLOW}  Não dê commit com 'git add -A' neste clone antes de resolver.${NC}" >&2
+        fi
+    fi
 
     # A unit de usuario, e nao nohup: sem ela o processo nao volta depois de um
     # reboot, que e o mesmo buraco que a unit do opencode teve.
@@ -1736,9 +1840,38 @@ _setup_open_design_container() {
     # navegador acusa cross-origin sem explicar nada.
     local origin="https://$(_tailnet_dnsname):$OPENDESIGN_SERVE_PORT"
     local envf="$D/.env"
+
+    # O upstream documenta `cp .env.example .env` e depois colar o token. O script
+    # escrevia o arquivo DO ZERO, e isso descartava cinco das oito chaves do
+    # template (OPEN_DESIGN_PORT, OPEN_DESIGN_MEM_LIMIT, NODE_OPTIONS,
+    # OPEN_DESIGN_DISABLE_API_AUTH, OD_CODEX_SANDBOX) — o mesmo efeito de trocar o
+    # arquivo por um de três linhas. Medido no clone: o template tem 8 chaves, e o
+    # que o script escrevia tinha 3.
+    #
+    # Regerar do template a cada execução, em vez de só quando o arquivo não
+    # existe, é deliberado: `git pull` que trouxer uma chave nova no template
+    # precisa chegar no `.env`. O arquivo é gerado, e a fonte é o template; quem
+    # editar à mão edita um arquivo que a próxima execução reescreve.
+    #
+    # A excessão é o token: um token já escrito que ainda vale é preservado quando
+    # esta execução não tem um novo. Sem isso, rodar o script pulando o passo do
+    # token apagaria um token em uso — o modo idempotente destruindo a credencial
+    # em vez de preservá-la.
+    _od_token_anterior=""
+    if [ -f "$envf" ]; then
+        _od_token_anterior="$(sed -n 's/^OD_API_TOKEN=//p' "$envf" | head -1)"
+    fi
+    _od_token_novo="$OPENDESIGN_TOKEN"
+    [ -n "$_od_token_novo" ] || _od_token_novo="$_od_token_anterior"
+
+    if [ -f "$D/.env.example" ]; then
+        cp "$D/.env.example" "$envf"
+    else
+        echo -e "${YELLOW}  Falta $D/.env.example; escrevo só o que o script sabe.${NC}" >&2
+    fi
     ( umask 077
       cat > "$envf" <<ODENV
-OD_API_TOKEN=$OPENDESIGN_TOKEN
+OD_API_TOKEN=$_od_token_novo
 OPEN_DESIGN_ALLOWED_ORIGINS=$origin
 OPEN_DESIGN_IMAGE=$OPENDESIGN_IMAGE
 ODENV
@@ -2415,6 +2548,20 @@ configure_git_and_gh() {
         return
     fi
 
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+        # O default é SIM no host, e mesmo assim o handshake NÃO acontece aqui.
+        # `gh auth login -w` abre o navegador e espera: é a única pausa
+        # condicional que sobrou no script, e foi exatamente onde o `--yes` antigo
+        # travou para sempre. Um default que trava não é um default, é um beco —
+        # então o que o operador precisa fazer depois é escrito, e ele decide
+        # quando. Provisionar não significa abrir um navegador sozinho.
+        echo -e "${YELLOW}Login de pessoa: aceito como default, mas o handshake precisa de você.${NC}"
+        echo -e "${YELLOW}  Rode, quando quiser e com a sua conta:${NC}" >&2
+        echo -e "${YELLOW}    gh auth login -p https -w -s admin:public_key,read:user,user:email${NC}" >&2
+        echo -e "${YELLOW}  (o device code também funciona sem navegador: acrescente -c)${NC}" >&2
+        return
+    fi
+
     echo -e "${YELLOW}Iniciando handshake com o GitHub via navegador...${NC}"
     gh auth login -p https -w -s admin:public_key,read:user,user:email
 
@@ -2505,7 +2652,7 @@ Módulos:
                             deste script.
                             Usa a senha padrão do dashboard (e a diz), deixa a
                             senha do OpenCode ser a aleatória do instalador, e
-                            instala o OpenDesign no modo NATIVO.
+                            instala o OpenDesign no modo CONTAINER.
                             A GitHub App fica inativa: a private key é um
                             segredo que existe fora da máquina.
                             Sem esta flag, um Enter não instala nada.
@@ -2632,6 +2779,158 @@ should_run() {
     return 0
 }
 
+# ==============================================================================
+# Quando este script chega por pipe, ele se escreve em disco e segue
+# ==============================================================================
+#
+# A forma de instalar um repositório de dotfiles com um comando só é esta: a
+# pessoa digita o `curl | bash`, o script é lido pela entrada padrão em vez de
+# vir de um arquivo, e a única coisa que ele pode fazer é se colocar no disco.
+#
+# Recusar seria a resposta comfortable, e estaria errada. O motivo original da
+# recusa — o script pergunta coisas e o `read` morre no fim da entrada — continua
+# valendo, e é por isso que ela SÓ vale sem `--defaults`. Com a flag, não há
+# pergunta a fazer, e o caminho por pipe é legítimo.
+#
+# Sem a flag e por pipe, o script se obtém, avisa que a partir daqui ele é
+# interativo, e recusa a continuar se não houver terminal. Essa é a parte que não
+# se negocia: um script que pergunta e não tem onde receber a resposta morre no
+# meio, e morrer no meio sem mensagem é o pior desfecho possível.
+#
+# Os anexos vêm junto porque este script os lê, e a lista é EXTRAÍDA do próprio
+# script em vez de escrita à mão: uma lista escrita à mão desatualiza em silêncio
+# quando o script ganha uma dependência nova, e ninguém percebe até uma VM nova
+# falhar num módulo.
+
+# Os arquivos que este script lê de `$SCRIPT_DIR`, além dele mesmo. Deriva do
+# código de propósito — é a mesma lista que a checagem estrutural confere, e as
+# duas leem a mesma fonte.
+# A lista vem do CÓDIGO, e não de uma lista escrita à mão. A diferença importa:
+# uma lista à mão desatualiza em silêncio quando o script ganha uma dependência
+# nova, e ninguém percebe até uma VM nova falhar num módulo.
+#
+# E o filtro é `\$SCRIPT_DIR/`, que é o caminho de um ARQUIVO. O mesmo script usa
+# `$SCRIPT_DIR` para diretório também, e um diretório não é algo para baixar.
+# O filtro e por EXTENSAO, e eu comecei com um que pegava so `*.algo` — o que
+# perdeu o `zshrc`, que nao tem extensao. Um filtro por FORMATO DE NOME e um
+# palpite sobre o que o script usa, e a lista resultante e silenciosamente
+# incompleta: o `setup.sh` baixa dois anexos, baixa um, e o modulo do `zshrc`
+# falha depois.
+#
+# O filtro certo e por CONTEUDO: pegamos toda referencia a `$SCRIPT_DIR` e
+# descartamos as que, no proprio repositorio, sao DIRETORIO. A lista continua
+# vindo do codigo, e agora vem inteira.
+# O segundo argumento e o `setup.sh` BAIXADO. Ler `${BASH_SOURCE[0]}` funciona no
+# caminho por pipe, porque o script E o arquivo lido — mas isso e uma coincidencia
+# do caso, e nao uma propriedade: num teste que copia esta funcao para outro
+# arquivo, a lista volta vazia e parece um bug da funcao. Passar o caminho
+# explicitamente deixa a dependencia visivel e o comportamento igual nos dois casos.
+# O segundo argumento e o `setup.sh` BAIXADO; o terceiro e a URL base.
+#
+# O filtro de existencia olha para a URL, e nao para o destino — e essa troca e
+# a correcao de um bug que era CIRCULAR: a funcao aceitava um anexo so se ele ja
+# estivesse no destino, que e justamente o arquivo que ainda nao existe. A lista
+# saia vazia, o script se montava sozinho, e o modulo do `zshrc` falhava depois
+# com "arquivo ausente" — um sintoma que aponta para o modulo, e nao para a
+# montagem, que e a forma mais cara de um erro aparecer no lugar errado.
+#
+# Ler `${BASH_SOURCE[0]}` em vez do caminho passado tambem funciona no script
+# real, porque ele E o arquivo lido. Mas isso e coincidencia do caso, nao
+# propriedade: um teste que copia a funcao para outro arquivo tem a lista vazia e
+# parece um bug da funcao. Passar o caminho explicitamente torna a dependencia
+# visivel e o comportamento igual nos dois casos.
+_anexos_necessarios() {
+    local quem="$1" url_base="$2" rel
+    grep -oE '\$SCRIPT_DIR/[a-zA-Z0-9/._-]+' "$quem" 2>/dev/null \
+        | sort -u | sed 's|^\$SCRIPT_DIR/||' | while read -r rel; do
+            [ -n "$rel" ] || continue
+            # Um HEAD evita baixar um anexo que nao existe e descobrir so no 404.
+            # `curl -fI` devolve codigo diferente de zero para um 404, que e o que
+            # importa aqui.
+            if curl -fsI "$url_base/$rel" >/dev/null 2>&1; then
+                printf '%s\n' "$rel"
+            fi
+        done
+}
+
+# Uma URL de raw que devolveu HTML em vez do arquivo não pode passar: o script
+# receberia uma página e a executaria. O `curl -f` não pega isso, porque a
+# resposta é 200.
+_baixar_anexo() {
+    local rel="$1" destino="$2" url="$3"
+    # O `Content-Type` e a pergunta certa, e a checagem do conteudo do arquivo e a
+    # errada de um jeito que so aparece aqui: o proprio filtro procurava
+    # `<!DOCTYPE html|<html` no arquivo baixado, e a LINHA DO FILTRO ESTAVA NELE.
+    # O script se rejeitava — a montagem nunca passava, e o sintoma era
+    # "não consegui baixar o setup.sh" com um `GET 200` no log do servidor.
+    #
+    # Um `raw` de repositorio privado devolve uma pagina HTML, e o curl -f nao
+    # pega: a resposta e 200. O que distingue a pagina do arquivo e o tipo
+    # declarado, e e isso que se pergunta.
+    local ctype
+    ctype="$(curl -fsSLI "$url" 2>/dev/null | tr -d '\r' \
+        | sed -n 's/^[Cc]ontent-[Tt]ype:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)"
+    case "${ctype:-}" in
+        text/html | application/xhtml+xml*)
+            return 1 ;;
+    esac
+
+    if ! curl -fsSL "$url" -o "$destino" 2>/dev/null; then
+        return 1
+    fi
+    # Estado, nao confianca: o arquivo chegou, e agora e preciso ver se tem o que
+    # um arquivo tem. O `-s` pega o caso do corpo vazio, que o `-f` nao pega.
+    [ -s "$destino" ] || { rm -f "$destino"; return 1; }
+    return 0
+}
+
+# Coloca o script e seus anexos no disco, e re-executa dali. O `exec` substitui o
+# processo, então o script só roda uma vez de verdade: sem ele, o script original
+# continuaria depois do download, com o `SCRIPT_DIR` apontando para o lugar
+# errado.
+_se_colocar_no_disco_e_reexecutar() {
+    local url_base="$1" destino_dir="$2"
+    shift 2
+    local args=("$@")
+
+    mkdir -p "$destino_dir" || return 1
+
+    # O script primeiro: sem ele, os anexos não têm quem os use.
+    if ! _baixar_anexo "setup.sh" "$destino_dir/setup.sh" "$url_base/setup.sh"; then
+        echo "ERRO: não consegui baixar o setup.sh de $url_base/setup.sh" >&2
+        echo "      O repositório precisa estar PÚBLICO para o caminho por pipe funcionar:" >&2
+        echo "      um repositório privado devolve uma página de erro, não o arquivo." >&2
+        return 1
+    fi
+    chmod 0755 "$destino_dir/setup.sh" 2>/dev/null || true
+
+    # Agora os anexos. A lista vem do script que acabou de chegar, e não de uma
+    # lista escrita aqui — que é o que a mantém verdadeira sem manutenção.
+    local n=0 rel destino
+    for rel in $(_anexos_necessarios "$destino_dir/setup.sh" "$url_base"); do
+        destino="$destino_dir/$rel"
+        mkdir -p "$(dirname "$destino")" || return 1
+        if _baixar_anexo "$rel" "$destino" "$url_base/$rel"; then
+            chmod 0755 "$destino" 2>/dev/null || true
+            n=$((n + 1))
+        else
+            # Um anexo que falta é um módulo que vai falhar depois, com uma
+            # mensagem que aponta para o sintoma. Melhor dizer agora e nomear o
+            # arquivo.
+            echo "ERRO: não consegui baixar o anexo '$rel'." >&2
+            echo "      Ele é lido por este script, e sem ele um módulo falha depois." >&2
+            return 1
+        fi
+    done
+
+    echo "Repositório montado em $destino_dir ($n anexo(s) além do setup.sh)." >&2
+    echo "A partir daqui o script é interativo." >&2
+    echo
+
+    cd "$destino_dir" || return 1
+    exec bash ./setup.sh "${args[@]}"
+}
+
 # Recusa antecipada quando o stdin não é um terminal.
 #
 # As perguntas usam `read -rp`, que o bash só imprime quando o stdin é terminal.
@@ -2645,24 +2944,88 @@ should_run() {
 # `--yes` é a exceção, e a exceção é explícita: com a flag, a recusa não acontece
 # porque não há pergunta a fazer. O que muda com a flag, e o que NÃO muda:
 #
-#   --yes responde sim a toda confirmação, usa a senha padrão do dashboard (e a
-#   diz), deixa a senha do OpenCode ser a aleatória do instalador, e instala o
-#   OpenDesign no modo nativo — a única decisão que ele toma sozinho e que não é
-#   um "sim". A GitHub App fica INATIVA, porque a private key é um segredo que
-#   existe fora da máquina e um App ID inventado marcaria o módulo como
-#   configurado sem funcionar.
+#   --defaults responde o DEFAULT DECLARADO de cada pergunta, não "sim" para
+#   tudo — a distinção é o que esta flag existe para corrigir. Ele usa a senha
+#   padrão do dashboard (e a diz), deixa a senha do OpenCode ser a aleatória do
+#   instalador, e instala o OpenDesign no modo CONTAINER, que é o único ponto em
+#   que ele escolhe por conta própria. O login de pessoa do gh fica aceito no
+#   host, mas o handshake NAO acontece: `gh auth login -w` abre o navegador e
+#   espera, e foi onde o --yes antigo travava. A GitHub App fica INATIVA, porque
+#   a private key é um segredo que existe fora da máquina e um App ID inventado
+#   marcaria o módulo como configurado sem funcionar.
 #
 # O default continua sendo NÃO. Sem a flag, um Enter não instala nada.
+# Sem `--defaults` e sem terminal, há dois casos que precisam de respostas
+# diferentes, e confundi-los custou um dia de trabalho.
+#
+# O caso BOM é o pipe de propósito: `curl ... | bash`. O script chegou pela
+# entrada padrão, não tem onde se ler, e a única coisa que pode fazer é se colocar
+# no disco. Recusar aqui seria recusar o caminho de instalação mais direto que
+# existe, e sem motivo: o script tem a URL, tem o `curl`, e tem o que fazer.
+#
+# O caso MAU é o pipe sem propósito: `./setup.sh < /dev/null` em CI, um
+# redirecionamento qualquer. Aqui o script está no disco e a recusa vale — ele
+# perguntaria coisas e o `read` morreria no fim da entrada, sem mensagem, no meio.
+#
+# A diferença entre os dois é uma, e é verificável: de onde o script veio.
 if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
-    echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
-    echo "" >&2
-    echo "stdin não é um terminal (pipe, redirecionamento ou CI). Nessas condições o" >&2
-    echo "comportamento seria morrer no meio, sem aviso, em vez de recusar — por isso" >&2
-    echo "a recusa é aqui." >&2
-    echo "" >&2
-    echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
-    echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
-    echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
+    # Veio de um arquivo que existe? Então o pipe é acidental e a recusa vale.
+    if [ -f "${BASH_SOURCE[0]}" ] && [ -s "${BASH_SOURCE[0]}" ]; then
+        echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
+        echo "" >&2
+        echo "stdin não é um terminal (pipe, redirecionamento ou CI), e este script está" >&2
+        echo "no disco — então o pipe é acidental. O comportamento seria morrer no meio," >&2
+        echo "sem aviso, em vez de recusar — por isso a recusa é aqui." >&2
+        echo "" >&2
+        echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
+        echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
+        echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
+        exit 1
+    fi
+
+    # Veio pela entrada padrão: este é o caminho de instalação. Se a URL de
+    # origem é conhecida, ele se obtém; se não é, diz como chamá-lo.
+    #
+    # E antes: veio por pipe SEM nenhum argumento? Essa é a combinação perigosa,
+    # e ela é mais provável do que parece. `curl -fsSL URL | bash` é a forma que
+    # todo mundo escreve e ela FUNCIONA — o script inteiro roda, com o perfil
+    # `host`. Numa VM de agentes, isso provisiona a camada da máquina de trabalho
+    # e não a da fronteira, sem aviso e com exit 0.
+    #
+    # A causa é do bash: sem o `-s`, o primeiro argumento depois do pipe vira nome
+    # de arquivo. Então `| bash --profile=vm` morre com "No such file or
+    # directory" — erro visível —, e `| bash` sem nada roda errado — erro
+    # invisível. O segundo é o que precisa de defesa.
+    if [ "$#" -eq 0 ] && [ -z "${SETUP_ORIGIN:-}" ]; then
+        echo "Este script veio por pipe sem nenhum argumento, e isso instala o perfil" >&2
+        echo "'host' — a camada da máquina de trabalho, não a da VM de agentes." >&2
+        echo "" >&2
+        echo "Para uma VM de agentes, o comando completo é:" >&2
+        echo "" >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh \\"
+        echo "    | bash -s -- --profile=vm --defaults" >&2
+        echo "" >&2
+        echo "O '-s --' não é decoração: sem ele, '--profile=vm' vira nome de arquivo" >&2
+        echo "e o bash morre. E sem '--' os argumentos somem, e o perfil vira 'host'." >&2
+        echo "" >&2
+        echo "Se a intenção era provisionar esta máquina de trabalho, siga com:" >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh \\"
+        echo "    | bash -s -- --profile=host" >&2
+        exit 1
+    fi
+
+    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
+    if [ -n "$SETUP_ORIGIN" ]; then
+        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
+        echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
+        echo "      sudo dnf install -y curl" >&2
+        exit 1
+    fi
+    _se_colocar_no_disco_e_reexecutar "$_url_base" "$SETUP_DESTINO" "$@"
+    echo "ERRO: não consegui me montar no disco. A saída acima diz o motivo." >&2
     exit 1
 fi
 
@@ -2845,7 +3208,6 @@ provision_tailscale() {
     sudo systemctl enable --now tailscaled
 
     if ! sudo tailscale status &> /dev/null; then
-        echo -e "${YELLOW}Rodando 'tailscale up' — abra o link exibido para autenticar.${NC}"
         # Sem --ssh de propósito: o Tailscale SSH exige reautenticação
         # interativa via navegador sempre que a política da tailnet tiver
         # "action: check" nos grants de ssh (o default da maioria das
@@ -2855,6 +3217,29 @@ provision_tailscale() {
         # Fedora. O acesso SSH de verdade já é coberto pelo módulo
         # sshd-hardening (só chave, sem senha) + firewalld (sshd só na
         # interface tailscale0) — sem depender de reautenticação alguma.
+        if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+            # A máquina não está conectada, e `tailscale up` abre o navegador e
+            # ESPERA. Deixar isso aqui era o mesmo modo de falha que travou o
+            # `--yes` antigo no handshake do `gh`, agora no módulo que dá acesso
+            # à máquina: numa VM nova este é o caminho que o run sempre pega.
+            #
+            # A saída é a dos outros passos de terceiro: fazer o que dá e
+            # escrever o que falta, com o comando. Um run não interativo não tem
+            # navegador, e não tem conta — e a conexão depende dos dois.
+            #
+            # Não é uma falha do run: é uma pendência, e a pós-condição que
+            # publica na tailnet vai reportá-la por estado. O run acaba dizendo
+            # "1 pendência" em vez de "pronto", que é a verdade.
+            echo -e "${YELLOW}Tailscale instalado; falta entrar na tailnet.${NC}" >&2
+            echo -e "${YELLOW}  Este passo precisa de um navegador e da sua conta, então o${NC}" >&2
+            echo -e "${YELLOW}  --defaults não o faz. Rode, quando quiser:${NC}" >&2
+            echo -e "${YELLOW}    sudo tailscale up${NC}" >&2
+            echo -e "${YELLOW}  Sem isso a VM não entra na tailnet, e as publicações em :8443${NC}" >&2
+            echo -e "${YELLOW}  :8444 e :8445 ficam sem caminho. Todo o resto do run segue.${NC}" >&2
+            _registrar_falha "Tailscale instalado mas nao conectado: rode 'sudo tailscale up'"
+            return 0
+        fi
+        echo -e "${YELLOW}Rodando 'tailscale up' — abra o link exibido para autenticar.${NC}"
         sudo tailscale up
     else
         echo -e "${GREEN}✓ Tailscale já conectado.${NC}"
@@ -2908,15 +3293,19 @@ if should_run "hostname"; then
         pergunta "Novo hostname [$NEW_HOSTNAME_SUGGESTED]: " NEW_HOSTNAME
         NEW_HOSTNAME="${NEW_HOSTNAME:-$NEW_HOSTNAME_SUGGESTED}"
     fi
+    # A pergunta acima JÁ É a decisão, e ela tem o mesmo formato das de identidade
+    # (1-2): o default entre colchetes, e o Enter o aplica. Havia uma segunda
+    # pergunta — "Alterar o hostname para X?" — que não decidia nada: quem
+    # respondia a primeira com o nome padrão já tinha dito sim, e quem digitasse um
+    # nome próprio também. Ela existia só para ter um lugar onde o default pudesse
+    # ser "não", e o efeito era o oposto do pretendido: sob `--defaults` ela aceitava
+    # o "não" e a VM nova ficava com o nome que o hypervisor deu, que é justamente
+    # o que este passo existe para trocar.
     if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$CURRENT_HOSTNAME" ]; then
-        # Default SIM, e a razao e a mesma do `device-keys`: o que esta na lista de
-        # passos do perfil tem default sim, para que "aceitar todos os defaults"
-        # signifique "provisionar". Sem este 1, `--defaults` aceitaria o "nao" e a
-        # VM nova ficaria com o nome que o hypervisor deu — que e o que este passo
-        # existe para trocar.
-        confirm "Alterar o hostname para '$NEW_HOSTNAME'?" 1 && CONFIRM_HOSTNAME=1
+        CONFIRM_HOSTNAME=1
     else
         NEW_HOSTNAME=""
+        CONFIRM_HOSTNAME=0
     fi
 fi
 
@@ -3065,17 +3454,20 @@ if should_run "open-design" || should_run "open-design-container"; then
     echo -e "    ${YELLOW}container${NC} so existe atras do serve, com TLS, e nenhuma CLI do host roda dentro"
     echo
     if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
-        # `--yes` não tem como perguntar, e os dois modos têm consequências
-        # opostas — então ele escolhe o que é o modo canônico: `nativo`. Escolher
-        # `container` aqui seria instalar o modo alternativo, e ele exige um
-        # pacote que o perfil `vm` não instala. A escolha fica dita em voz alta
-        # porque é a única coisa que `--yes` decide sozinho e que não é um
-        # "sim".
-        OPENDESIGN_MODE="nativo"
-        echo -e "  ${GREEN}--defaults: instalando o modo NATIVO.${NC}"
+        # `--defaults` não tem como perguntar, e escolhe o modo CONTAINER. A
+        # escolha é defendível porque o container é o modo com TLS e sem porta
+        # interna exposta, que é o default certo para uma máquina de fronteira.
+        #
+        # Ela só é segura porque o passo `podman` agora instala o
+        # `podman-compose`: sem esse provider, `podman compose` falha e este
+        # default entregaria uma VM que não sobe. Foi medido nesta VM antes da
+        # correção, e a ordem é o ponto — o pré-requisito vem antes do default.
+        OPENDESIGN_MODE="container"
+        echo -e "  ${GREEN}--defaults: instalando o modo CONTAINER (TLS, sem porta interna exposta).${NC}"
+        echo -e "  ${GREEN}  Para o modo nativo, com as CLIs do host disponíveis dentro: responda 'n'.${NC}"
     else
     while :; do
-        if ! read -r -p "  Modo [nativo/container]: " OPENDESIGN_MODE; then
+        if ! read -r -p "  Modo [container/nativo]: " OPENDESIGN_MODE; then
             # EOF, e nao resposta invalida. A distincao importa: com entrada
             # invalida o loop repregunta, mas em EOF o `read` falha para sempre e
             # um `while :` sem este teste trava o script indefinidamente. Sem
@@ -3085,10 +3477,15 @@ if should_run "open-design" || should_run "open-design-container"; then
             OPENDESIGN_MODE=""
             break
         fi
+        # Enter devolve vazio, e vazio é o default declarado: `container`. Sem
+        # esta linha, apertar Enter cairia no `*)` e repreguntaria, o que faria do
+        # default uma ilusão: o texto entre colchetes diria container e o
+        # comportamento não faria.
+        [ -n "$OPENDESIGN_MODE" ] || OPENDESIGN_MODE="container"
         OPENDESIGN_MODE="$(printf '%s' "$OPENDESIGN_MODE" | tr '[:upper:]' '[:lower:]')"
         case "$OPENDESIGN_MODE" in
-            nativo | container) break ;;
-            *) echo -e "${YELLOW}  Escolha 'nativo' ou 'container'.${NC}" ;;
+            container | nativo) break ;;
+            *) echo -e "${YELLOW}  Escolha 'container' ou 'nativo'.${NC}" ;;
         esac
     done
     read -r -s -p "  OD_API_TOKEN (vazio = gerar um): " OPENDESIGN_TOKEN
@@ -3099,7 +3496,13 @@ if should_run "open-design" || should_run "open-design-container"; then
     # nada a perguntar. O token só importa se o auth estiver ligado, e no modo
     # nativo ele não está — o portão é o `tailscale serve`.
     [ -z "$OPENDESIGN_TOKEN" ] && OPENDESIGN_TOKEN="$(openssl rand -hex 32)"
-    echo -e "  token do daemon: gerado (não é usado no modo nativo; o portão é o serve)"
+    # A mensagem é por modo, e ela dizia só do nativo. No modo container o token
+    # É a credencial da API — é o que o `deploy/.env` carrega para o daemon.
+    if [ "$OPENDESIGN_MODE" = "container" ]; then
+        echo -e "  token do daemon: gerado (no container ele É a credencial da API, e vai para o deploy/.env)"
+    else
+        echo -e "  token do daemon: gerado (não é usado no modo nativo; o portão é o serve)"
+    fi
 fi
 
 HERMES_DASH_PASSWORD=""
@@ -3146,7 +3549,17 @@ fi
 # não deve ver um pedido de token de conta antes de decidir isso.
 if should_run "git"; then
     CONFIRM_GH_LOGIN=0
-    confirm "Autenticar o 'gh' com login de pessoa? (Enter = não; a GitHub App já cobre a API dos agentes)" && CONFIRM_GH_LOGIN=1
+    # SIM no host, NÃO na vm, e a assimetria é o ponto: são ALTERNATIVAS, não um
+    # par. A fronteira tem identidade de máquina (a App) e não precisa de um token
+    # de conta dentro dela; o host é a máquina de uma pessoa, e é dela que sai o
+    # token. Deixar as duas como default não fazia duas opções — fazia a máquina
+    # ter duas identidades ao mesmo tempo, e o `gh` sem saber qual das duas
+    # responder.
+    if [ "$PROFILE" = "host" ]; then
+        confirm "Autenticar o 'gh' com login de pessoa? (Enter = sim; esta máquina é a de uma pessoa)" 1 && CONFIRM_GH_LOGIN=1
+    else
+        confirm "Autenticar o 'gh' com login de pessoa? (Enter = não; a GitHub App cobre a API desta máquina)" 0 && CONFIRM_GH_LOGIN=1
+    fi
 fi
 
 # O opencodex tem a própria pergunta, separada da do ai-clis, e a separação é o
@@ -3454,6 +3867,18 @@ if should_run "podman"; then
     # provider escolher errado — e a regra de não ter volume/credencial
     # compartilhada pressupõe que o engine é o que o padrão dice que é.
     sudo dnf install -y --skip-unavailable podman slirp4netns fuse-overlayfs
+
+    # O `podman-compose` e o PROVIDER de `podman compose`, e sem ele o comando
+    # falha: medido nesta VM antes desta linha, `podman compose version` devolvia
+    # "looking up compose provider failed", e o script so resolvia isso mandando o
+    # operador instalar o pacote a mao. Isso e o que torna o modo container default
+    # seguro: o pre-requisito passa a ser do script, e nao um passo manual que
+    # alguém esquece numa VM nova e só descobre quando o `compose up` falha.
+    if ! command -v podman-compose &> /dev/null; then
+        sudo dnf install -y podman-compose || {
+            echo -e "${YELLOW}  podman-compose não instalado; o modo container do OpenDesign vai falhar.${NC}" >&2
+        }
+    fi
     if rpm -q podman-docker >/dev/null 2>&1; then
         echo -e "${YELLOW}  podman-docker está instalado e cria um atalho 'docker'.${NC}"
         echo -e "${YELLOW}  Não é removido aqui (não é decisão deste módulo); o padrão é não tê-lo.${NC}"
@@ -3533,6 +3958,31 @@ if should_run "gh-app"; then
         install -m 0755 "$SCRIPT_DIR/bin/gh-app-token.sh" "$HOME/.local/bin/gh-app-token"
         echo -e "${GREEN}✓ Helper em ~/.local/bin/gh-app-token.${NC}"
 
+        # O caminho ABSOLUTO do `gh` de verdade, resolvido ANTES de escrever
+        # qualquer wrapper. A razão é a recorrência: o shim que este módulo
+        # instala chama o `gh` real, e o wrapper `gh-app` também — e se os dois
+        # usarem `command gh`, cada um vai encontrar o OUTRO e chamar de volta em
+        # recursão. Assar o caminho absoluto nos dois é o que fecha isso, e
+        # resolve de quebra uma fragilidade que já existia: o wrapper dependia de o
+        # `~/.local/bin` estar no PATH, e o comentário dele registra que isso já
+        # deu "command not found" numa máquina real.
+        _real_gh=""
+        if command -v gh &> /dev/null; then
+            _real_gh="$(command -v gh)"
+        elif [ -x /usr/bin/gh ]; then
+            _real_gh="/usr/bin/gh"
+        fi
+        if [ -z "$_real_gh" ] || [ "$_real_gh" = "$HOME/.local/bin/gh" ]; then
+            # O segundo caso é o shim que uma execução anterior desta mesma máquina
+            # já deixou no PATH. Sem esta checagem, `command -v gh` devolveria o
+            # shim e o wrapper passaria a invocar ele mesmo para sempre.
+            _real_gh="/usr/bin/gh"
+        fi
+        if [ ! -x "$_real_gh" ]; then
+            echo -e "${YELLOW}  Não achei o binário do gh em lugar nenhum; a App fica instalada${NC}" >&2
+            echo -e "${YELLOW}  mas sem o wrapper. Instale o 'gh' e rode o módulo de novo.${NC}" >&2
+        fi
+
         # O wrapper obtém um token por comando e o descarta. Não vai para o shell rc
         # de propósito: mintar a cada shell aberto seria uma chamada de API por
         # terminal e manteria a credencial viva na sessão. O `--meta` deixa o
@@ -3566,15 +4016,79 @@ if [ "$obtem" = "1" ]; then
     fi
 fi
 
-GH_TOKEN="$(cat "$TOKEN")" command gh "$@"
+GH_TOKEN="$(cat "$TOKEN")" exec "__REAL_GH__" "$@"
 WRAPPER
+        # O placeholder só é trocado aqui, na hora de gravar: um `sed` sobre o
+        # arquivo inteiro poderia atingir uma linha de comentário que fala do
+        # caminho, e o resultado seria silenciosamente errado.
+        sed -i "s|__REAL_GH__|$_real_gh|g" "$HOME/.local/bin/gh-app"
         chmod 0755 "$HOME/.local/bin/gh-app"
 
         echo -e "${BLUE}Validando a App contra a API (não é checagem de arquivo)${NC}"
         if GH_APP_KEY="$GH_APP_KEY_FILE" GH_APP_ID="$(cat "$GH_APP_ID_FILE")" \
            "$HOME/.local/bin/gh-app-token" --check; then
             echo -e "${GREEN}✓ App validada contra a API.${NC}"
-            echo -e "${YELLOW}  Use como 'gh-app pr list'. O 'gh' sem o wrapper vai pedir login.${NC}"
+            echo -e "${YELLOW}  Neste perfil (vm) o 'gh' puro passa a usar a App, sem wrapper.${NC}"
+        # ── O shim de `gh`, e SO no perfil `vm` ────────────────────────────
+        #
+        # O sintoma que ele resolve é medido e é comum: um agente roda `gh pr
+        # create`, pega o `gh` de verdade, que não tem token, e falha — sem nenhuma
+        # pista de que existe uma App instalada na máquina. A identidade estava num
+        # comando de nome diferente (`gh-app`), e caminho que precisa ser lembrado
+        # não é caminho.
+        #
+        # A Documentação do GitHub CLI responde se existe jeito melhor, e a
+        # resposta é que `gh auth login` NÃO tem login como App: os métodos são o
+        # fluxo web (OAuth de pessoa) e `--with-token` (PAT). O jeito documentado
+        # para um token que não vem do login é a variável `GH_TOKEN`, e a
+        # documentação é explícita que ela tem **precedência sobre as credenciais
+        # guardadas**. Ou seja: injetar `GH_TOKEN` não é contorno, é o mecanismo.
+        #
+        # POR QUE SÓ NO `vm`, e por que isso é uma decisão e não uma restrição:
+        #
+        #   * `vm` — a identidade é da MÁQUINA. Um token por comando, com o
+        #     App como fonte, é o que a fronteira quer, e o token expira sozinho.
+        #   * `host` — a identidade é da PESSOA, e o login de pessoa já funciona.
+        #     Um shim aqui sobrescreveria esse login, porque `GH_TOKEN` tem
+        #     precedência. Trocaria o que a pessoa espera pelo que a máquina
+        #     presume.
+        #
+        # E é por isso que o shim cai no `case` do perfil, e não num `if [ -f ]`
+        # de "já instalei": rodar `--profile=vm` num host deixaria o shim para
+        # sempre, e o perfil é a única coisa que sabe qual máquina é esta.
+        if [ "$PROFILE" = "vm" ] && [ -n "$_real_gh" ]; then
+            cat > "$HOME/.local/bin/gh" <<SHIM
+#!/usr/bin/env bash
+# \`gh\` com a identidade da GitHub App desta VM.
+#
+# Este shim existe porque a identidade da máquina vivia num comando de nome
+# diferente, e um \`gh pr create\` sem token falhava sem explicar por quê. A
+# Documentação do GitHub CLI diz que o caminho é \`GH_TOKEN\`, com precedência
+# sobre credenciais guardadas — então o \`gh\` puro passa a funcionar sem que
+# ninguém precise saber que a App existe.
+#
+# Sem App configurada, ou com o token expirado, ele delega ao \`gh\` de verdade
+# sem token nenhum: é o comportamento de uma máquina sem identidade de máquina.
+set -uo pipefail
+
+WRAPPER="$HOME/.local/bin/gh-app"
+REAL_GH="__REAL_GH__"
+
+if [ -x "$WRAPPER" ]; then
+  exec "$WRAPPER" "\$@"
+fi
+
+exec "$REAL_GH" "\$@"
+SHIM
+            sed -i "s|__REAL_GH__|$_real_gh|g" "$HOME/.local/bin/gh"
+            chmod 0755 "$HOME/.local/bin/gh"
+            echo -e "${GREEN}✓ Shim de 'gh' em ~/.local/bin/gh — só neste perfil (vm).${NC}"
+            echo -e "${GREEN}  'gh pr create' passa a usar a App, sem wrapper e sem token na mão.${NC}"
+        elif [ "$PROFILE" = "host" ]; then
+            echo -e "${GREEN}✓ Sem shim de 'gh' neste perfil: o login de pessoa é a identidade${NC}"
+            echo -e "${GREEN}  do host, e um shim sobrescreveria ele (GH_TOKEN tem precedência).${NC}"
+        fi
+
         else
             echo -e "${YELLOW}A App não respondeu como esperado. Verifique se o par App ID + chave${NC}" >&2
             echo -e "${YELLOW}está certo e se a App está instalada em ao menos um repositório.${NC}" >&2
@@ -4137,17 +4651,195 @@ CLI_LIST
     unset _cli _dir _bin _falta _cand
 fi
 
+
+# ==============================================================================
+# As pós-condições: o que este run NAO conseguiu fazer
+# ==============================================================================
+#
+# O run dizia "Configuração finalizada" e saía com `exit 1`. As duas frases
+# juntas eram uma contradição, e a segunda não tinha relação com a primeira: o
+# `exit 1` vinha do `set -e` reagindo ao `return 1` de um módulo, por acidente de
+# posição, e não de um resumo. Quem lesse o banner não saberia o que tinha
+# falhado, e um `exit 0` também não — que foi como o primeiro run nesta VM
+# morreu no meio, em 8 de 15 módulos, e pareceu sucesso.
+#
+# Cada função abaixo pergunta ao sistema se a coisa EXISTE. Nenhuma delas
+# confere o log: o log é o que o script disse, e o estado é o que a máquina tem.
+# São as duas coisas diferentes, e só a segunda serve para provar.
+#
+# A lista é curta de propósito. Ela cobre o que, se faltar, deixa a máquina
+# imprestável para o uso para que ela existe — um agente de fronteira sem porta,
+# sem identidade no GitHub, ou com o container parado não é uma máquina
+# configurada, é uma que parece configurada.
+
+# --- o servidor do OpenCode: a fronteira depende dele para o agente falar com
+# --- o host. Sem ele, todo agente que abre o servidor nao conecta.
+_od_server_presente() {
+    if systemctl --user is-active --quiet opencode.service 2>/dev/null; then
+        _registrar_ok "servidor do OpenCode no ar (opencode.service active)"
+    else
+        _registrar_falha "o servidor do OpenCode nao esta no ar (opencode.service)"
+    fi
+}
+
+# --- o container do OpenDesign: o modo padrao desta maquina. Um container que
+# --- existe mas nao esta `up` e pior que nenhum, porque o serve aponta para ele.
+_od_container_presente() {
+    if [ "$OPENDESIGN_MODE" != "container" ]; then
+        return 0
+    fi
+    if podman container exists open-design 2>/dev/null; then
+        if [ "$(podman inspect -f '{{.State.Status}}' open-design 2>/dev/null)" = "running" ]; then
+            _registrar_ok "container do OpenDesign rodando"
+        else
+            _registrar_falha "o container do OpenDesign existe mas nao esta rodando"
+        fi
+    else
+        _registrar_falha "o container do OpenDesign nao existe (o modo padrao e container)"
+    fi
+}
+
+# --- a identidade da maquina no GitHub: sem ela, nenhum agente consegue criar
+# --- PR, e a fronteira perde a razao de existir. Mas a App e opt-in por
+# --- decisao do dono, entauso sua ausencia e NOTA e nao FALHA.
+_gh_identidade_presente() {
+    if [ -x "$HOME/.local/bin/gh-app" ] || [ -x "$HOME/.local/bin/gh-app-token" ]; then
+        _registrar_ok "identidade de maquina no GitHub instalada (gh-app)"
+    else
+        echo -e "  ${YELLOW}nota: sem identidade de maquina no GitHub.${NC}"
+        echo -e "  ${YELLOW}  A App e opt-in — a private key e um segredo que existe fora da maquina.${NC}"
+        echo -e "  ${YELLOW}  Para ativar: ./setup.sh --profile=vm --only=gh-app${NC}"
+    fi
+}
+
+# --- a publicacao na tailnet: e o que torna a VM alcancavel sem abrir porta.
+_od_publicado() {
+    local p="$1" o que="$2"
+    if tailscale serve status 2>/dev/null | grep -q ":$p"; then
+        _registrar_ok "publicado na tailnet em :$p ($o que)"
+    else
+        _registrar_falha "nao publicado na tailnet em :$p ($o que)"
+    fi
+}
+
+# --- o secret: um arquivo de senha 777 e uma porta aberta, e o motivo de o
+# --- guard de sandbox existir. O default do script e `hermes`, que e adivinhavel.
+_hermes_secret_presente() {
+    if systemctl --user is-active --quiet hermes-dashboard.service 2>/dev/null; then
+        _registrar_ok "dashboard do Hermes no ar"
+    else
+        _registrar_falha "o dashboard do Hermes nao esta no ar"
+    fi
+}
+
+# --- o zshrc: o dono do PATH interativo. Sem ele, bun, os shims do mise e o
+# --- opencode nao estao no PATH de um shell de login, e a sintoma e um comando
+# --- que existe mas "nao e encontrado".
+_zshrc_presente() {
+    local alvo
+    alvo="$(readlink -f "$HOME/.zshrc" 2>/dev/null || true)"
+    if [ -n "$alvo" ] && [ -f "$alvo" ]; then
+        _registrar_ok "zshrc do repositorio em uso (~/.zshrc -> ${alvo##*/})"
+    else
+        _registrar_falha "~/.zshrc nao aponta para o zshrc deste repositorio"
+    fi
+}
+
+_rodar_pos_condicoes() {
+    # Um `--only` instala uma coisa e NAO as outras, por escolha de quem chamou.
+    # Verificar a maquina inteira reportaria como pendencia tudo o que o run
+    # proposadamente deixou de fora — e o run parcial terminaria com "7 pendencias"
+    # numa maquina que esta exatamente como o `--only` pediu.
+    #
+    # A regra: `--only` verifica so o que ele instalou. Num run do perfil inteiro,
+    # todas verificam. E o que separa "a maquina nao esta pronta" de "este run nao
+    # era para deixa-la pronta".
+    if [ -n "$ONLY" ]; then
+        echo
+        echo -e "${BLUE}=== Verificacao do que este run instalou (--only) ===${NC}"
+        echo -e "Um --only e um run parcial: a maquina vai continuar sem o que ele nao"
+        echo -e "instalou, por escolha. As pos-condicoes do perfil inteiro nao valem aqui."
+        _zshrc_presente
+        echo
+        return 0
+    fi
+    echo
+    echo -e "${BLUE}=== O que esta maquina tem, verificado agora ===${NC}"
+    _od_server_presente
+    _od_container_presente
+    _od_publicado "$OPENDESIGN_SERVE_PORT" "OpenDesign"
+    _od_publicado 8445 "Hermes"
+    _gh_identidade_presente
+    _hermes_secret_presente
+    _zshrc_presente
+    echo
+}
+
+_rodar_pos_condicoes
 # A mensagem final é por perfil porque o próximo passo mudou de destino: o devpod
 # passou a mirar a VM, não o host. Dizer "configure o devpod com este servidor"
 # aqui mandaria o Mac ao lugar errado.
-if [ "$PROFILE" = "vm" ]; then
-    echo -e "\n${GREEN}=== Configuração da VM de agentes finalizada! ===${NC}"
-    echo -e "Próximo passo: tire um snapshot desta VM como baseline, e no Mac aponte o"
-    echo -e "devpod para ela por provider SSH. Ver ARQUITETURA.md."
+# O banner diz o que o ESTADO diz, e nao o que o run queria. Um "finalizada"
+# incondicional ao lado de um `exit 1` era uma contradicao que nao deixava ninguem
+# decidir nada; e o `exit` dependia do `set -e` acertar a posicao do `return 1`,
+# o que e acaso, nao projeto.
+#
+# As duas informacoes vem do MESMO lugar: a lista de falhas. Se a lista esta
+# vazia, o banner e verde e o codigo e 0. Se tem algo, o banner diz o que ficou
+# para tras e o codigo e 1. Nao ha como divergirem, porque sao a mesma leitura.
+if [ "${#_FALHAS[@]}" -eq 0 ]; then
+    _banner="Configuração da VM de agentes finalizada!"
+    _cor="${GREEN}"
 else
-    echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
+    _banner="Configuração da VM de agentes: ${#_FALHAS[@]} pendência(s)."
+    _cor="${YELLOW}"
+fi
+
+if [ "$PROFILE" = "vm" ]; then
+    echo -e "\n${_cor}=== ${_banner} ===${NC}"
+    if [ "${#_FALHAS[@]}" -ne 0 ]; then
+        # Cada pendencia com o comando que resolve. Um numero ("2 pendencias")
+        # obriga quem leu a voltar ao log e casar o numero com a linha; a lista
+        # nao.
+        echo -e "${YELLOW}Não ficou pronto. Estas são as pendências, por estado:${NC}"
+        for _f in "${_FALHAS[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $_f"
+        done
+        echo
+        echo -e "O código de saída é 1 por causa delas. A máquina está no que deu para"
+        echo -e "instalar, e nos pontos acima ela não está no que precisa estar."
+    else
+        echo -e "Próximo passo: tire um snapshot desta VM como baseline, e no Mac aponte o"
+        echo -e "devpod para ela por provider SSH. Ver ARQUITETURA.md."
+    fi
+else
+    if [ "${#_FALHAS[@]}" -eq 0 ]; then
+        echo -e "\n${GREEN}=== Configuração do Fedora Workstation finalizada! ===${NC}"
+    else
+        echo -e "\n${YELLOW}=== Configuração do Fedora Workstation: ${#_FALHAS[@]} pendência(s). ===${NC}"
+        for _f in "${_FALHAS[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $_f"
+        done
+    fi
     echo -e "Próximo passo: crie a VM de agentes no Cockpit e rode './setup.sh --profile=vm' dentro dela."
     echo -e "A rede usada é a default do libvirt; o repo ainda não declara rede, porque a lista de"
     echo -e "serviços que o host vai expor não está escrita. Ver ARQUITETURA.md."
 fi
+
+# O código de saída, deciddo aqui e em mais nenhum lugar.
+#
+# Não havia nenhum. O `exit 1` que apareceu nesta VM foi o `set -e` reagindo ao
+# `return 1` de um módulo — o que significa que o mesmo `return 1` encerra o run
+# num ponto e só marca falha em outro, conforme a posição. Um código de saída que
+# depende de posição é acaso com aparência de contrato.
+#
+# Agora ele sai da lista de pendências, que veio das pós-condições, que
+# interrogaram o estado da máquina. Quem provisiona olha o código e sabe se a
+# máquina está no que precisa estar, e o banner diz a mesma coisa pela mesma
+# leitura — não podem divergir porque não são duas fontes.
+if [ "${#_FALHAS[@]}" -ne 0 ]; then
+    echo -e "\n${YELLOW}Código de saída 1: ${#_FALHAS[@]} pendência(s) acima.${NC}"
+    exit 1
+fi
+exit 0
 

@@ -83,6 +83,113 @@ compartilhar funções entre `setup.sh` e `setup-fedora.sh` no repo antigo) foi
 embutido direto no `setup.sh` de cada repo — não há mais um segundo script no
 mesmo repo pra justificar mantê-las separadas.
 
+## Passo 0. Provisionar uma VM de agentes nova
+
+> O `setup.sh` **não provisiona a VM** — ele roda *dentro* de uma máquina que já
+> existe. Este passo é o que traz o script para a máquina nova, e ele vem antes
+> por uma razão concreta: o repositório é lido por HTTPS, o que funciona numa
+> máquina sem chave SSH nenhuma.
+
+### O comando
+
+Uma linha, na VM nova, no console do Cockpit:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/setup.sh \
+  | bash -s -- --profile=vm --defaults
+```
+
+O `bash -s --` não é decoração, e omitir qualquer uma das duas partes produz um
+erro diferente:
+
+| o que você escreve | o que acontece |
+|---|---|
+| `\| bash` | **funciona, e provisiona a máquina errada.** Sem argumentos, o perfil é `host` — a camada da máquina de trabalho, não a da VM de agentes. Sem aviso, com código 0. |
+| `\| bash --profile=vm` | morre com `bash: --profile=vm: No such file or directory` — erro **visível**. Sem o `-s`, o bash trata o primeiro argumento como nome de arquivo. |
+| `\| bash -s --profile=vm` | os argumentos somem: `--` é o que separa as opções do `bash` dos argumentos do script. |
+| `\| bash -s -- --profile=vm --defaults` | **é esta linha.** |
+
+O script detecta o primeiro caso e recusa, dizendo o comando certo — porque a
+forma curta é a que todo mundo escreve, e ela não dá nenhum sinal de que
+provisionou a máquina errada.
+
+O que acontece depois do download: o script se escreve em `~/tmp/dotfiles`,
+traz **apenas os dois arquivos de que ele depende** (`zshrc` e
+`bin/gh-app-token.sh`) e re-executa dali. O resto do repositório — testes,
+auditoria, documentação — **não vem**, e o destino tem três arquivos de um
+repositório com mais de dez.
+
+### O Tailscale: você em qualquer modo, mas a forma depende do modo
+
+A autenticação na tailnet **sempre** precisa de você, em qualquer modo — é o
+mesmo motivo pelo qual o `gh auth login` não roda sozinho: nenhum run não
+interativo tem navegador nem conta. O que muda é **quem executa o comando**:
+
+| modo | o que o script faz com o `tailscale up` |
+|---|---|
+| **manual** (terminal, sem flag) | **roda e pausa.** Ele instala o pacote, mostra o link de autenticação e espera. Você não digita nada — e a mensagem na tela diz *"Rodando 'tailscale up' — abra o link exibido para autenticar."* |
+| **`--defaults`** | **pula e registra pendência**, com o comando. Não há navegador, então não há o que tentar. |
+
+Então, no `--defaults` — que é o comando do passo 0 — o Tailscale fica de fora
+por definição:
+
+```bash
+sudo tailscale up
+```
+
+No modo manual, ele já acontece dentro do script, e essa linha é desnecessária.
+
+Das três coisas que o caminho do `--defaults` atravessa, duas são automáticas e
+uma não é:
+
+| passo | quem precisa | por quê |
+|---|---|---|
+| buscar o script e os anexos por HTTPS | **ninguém** | o repositório é público; não há chave, token nem senha |
+| `sudo tailscale up` | **você**, no navegador | autenticar uma conta na tailnet |
+| o `setup.sh --defaults` | **ninguém** | não há decisão ali — o `--defaults` responde o default declarado de cada pergunta |
+
+O passo do Tailscale é o único que **para e espera por você**, e ele diz isso na
+tela. Todo o resto passa direto.
+
+### O que esperar do `--defaults`
+
+As duas coisas que ficam de fora são as que dependeriam de um segredo ou de um
+navegador:
+
+- a **GitHub App** fica inativa — a private key é um segredo que existe fora da
+  máquina, e um App ID inventado marcaria o módulo como configurado sem funcionar;
+- o **login de pessoa do `gh`** fica como pendência — `gh auth login` abre o
+  navegador.
+
+O run **diz as pendências no fim**, com o comando de cada uma, e sai com código
+`1`. Isso não é alarme: é a lista do que falta, verificada por **estado** — o run
+pergunta ao sistema se o serviço está no ar e se o container existe, e não se
+confere o log do que ele acabou de dizer que fez.
+
+```bash
+# Se o run reclamou da App:
+./setup.sh --profile=vm --only=gh-app
+# Se reclamou do login de pessoa:
+gh auth login -p https -w -s admin:public_key,read:user,user:email
+```
+
+### Sobre o repositório ser público
+
+Para que a URL seja estável e para que uma VM nova não precise de credencial
+nenhuma para começar. O repositório é conferido antes de cada publicação:
+
+```bash
+./tests/lib/auditoria-publica.py
+```
+
+A auditoria procura **material** e não nomes — um bloco PEM só conta se tiver
+corpo, e token só conta se tiver formato. E ela diz **quantos arquivos mediu**,
+porque um diagnóstico que reporta "nenhum segredo encontrado" sem ter medido
+nada é o pior resultado possível: é verde, e está errado.
+
+O que é público não é segredo: é convenção de nomenclatura, portas internas e o
+domínio da sua tailnet, que só é alcançável por quem está nela.
+
 ## Como rodar num Fedora novo ou recém-formatado
 
 1. Clone este repositório e rode:
