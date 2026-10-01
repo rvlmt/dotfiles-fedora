@@ -1601,6 +1601,23 @@ _setup_open_design_native() {
     # único onde os dois funcionam, porque o gateway do podman conta como
     # loopback DENTRO dele.
     local envf="$OPENDESIGN_ROOT/.env"
+
+    # Este `.env` é o SEGREDO exposto, e a medição é que decide onde a correção
+    # vai. No clone do upstream:
+    #
+    #   deploy/.env   ->  coberto por `deploy/.gitignore:2:.env`   (o modo container)
+    #   .env (raiz)   ->  NÃO coberto: `git check-ignore` não devolve nada, e o
+    #                     `git status` mostra `?? .env`             (o modo nativo)
+    #
+    # A correção vai para `.git/info/exclude`, e não para o `.gitignore`: aquele é
+    # estado local do clone, nunca é commitado, e não suja um arquivo que pertence
+    # ao upstream e que o próximo `git pull` pode conflitar. É o jeito padrão de
+    # ignorar um arquivo local num clone que não é seu.
+    if git -C "$OPENDESIGN_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        grep -qxF '/.env' "$OPENDESIGN_ROOT/.git/info/exclude" 2>/dev/null \
+            || printf '/.env\n' >> "$OPENDESIGN_ROOT/.git/info/exclude"
+    fi
+
     ( umask 077
       cat > "$envf" <<ODENV
 OD_API_TOKEN=$OPENDESIGN_TOKEN
@@ -1610,6 +1627,19 @@ OD_CODEX_SANDBOX=
 ODENV
     )
     chmod 600 "$envf"
+
+    # Pós-condição, verificada por ESTADO: o arquivo tem o token dentro, então ele
+    # não pode aparecer como `?? .env` para o próximo `git add -A`. Confere com o
+    # `check-ignore`, que pergunta ao git, e não com a linha que o script acabou de
+    # imprimir — um log sem o efeito ao lado não prova que algo rodou.
+    if git -C "$OPENDESIGN_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        if git -C "$OPENDESIGN_ROOT" check-ignore -q .env; then
+            echo -e "${GREEN}  ✓ o .env da raiz tem o token dentro e está coberto: não aparece no status.${NC}"
+        else
+            echo -e "${YELLOW}  AVISO: o .env da raiz tem o token dentro e NÃO está coberto.${NC}" >&2
+            echo -e "${YELLOW}  Não dê commit com 'git add -A' neste clone antes de resolver.${NC}" >&2
+        fi
+    fi
 
     # A unit de usuario, e nao nohup: sem ela o processo nao volta depois de um
     # reboot, que e o mesmo buraco que a unit do opencode teve.
@@ -1736,9 +1766,38 @@ _setup_open_design_container() {
     # navegador acusa cross-origin sem explicar nada.
     local origin="https://$(_tailnet_dnsname):$OPENDESIGN_SERVE_PORT"
     local envf="$D/.env"
+
+    # O upstream documenta `cp .env.example .env` e depois colar o token. O script
+    # escrevia o arquivo DO ZERO, e isso descartava cinco das oito chaves do
+    # template (OPEN_DESIGN_PORT, OPEN_DESIGN_MEM_LIMIT, NODE_OPTIONS,
+    # OPEN_DESIGN_DISABLE_API_AUTH, OD_CODEX_SANDBOX) — o mesmo efeito de trocar o
+    # arquivo por um de três linhas. Medido no clone: o template tem 8 chaves, e o
+    # que o script escrevia tinha 3.
+    #
+    # Regerar do template a cada execução, em vez de só quando o arquivo não
+    # existe, é deliberado: `git pull` que trouxer uma chave nova no template
+    # precisa chegar no `.env`. O arquivo é gerado, e a fonte é o template; quem
+    # editar à mão edita um arquivo que a próxima execução reescreve.
+    #
+    # A excessão é o token: um token já escrito que ainda vale é preservado quando
+    # esta execução não tem um novo. Sem isso, rodar o script pulando o passo do
+    # token apagaria um token em uso — o modo idempotente destruindo a credencial
+    # em vez de preservá-la.
+    _od_token_anterior=""
+    if [ -f "$envf" ]; then
+        _od_token_anterior="$(sed -n 's/^OD_API_TOKEN=//p' "$envf" | head -1)"
+    fi
+    _od_token_novo="$OPENDESIGN_TOKEN"
+    [ -n "$_od_token_novo" ] || _od_token_novo="$_od_token_anterior"
+
+    if [ -f "$D/.env.example" ]; then
+        cp "$D/.env.example" "$envf"
+    else
+        echo -e "${YELLOW}  Falta $D/.env.example; escrevo só o que o script sabe.${NC}" >&2
+    fi
     ( umask 077
       cat > "$envf" <<ODENV
-OD_API_TOKEN=$OPENDESIGN_TOKEN
+OD_API_TOKEN=$_od_token_novo
 OPEN_DESIGN_ALLOWED_ORIGINS=$origin
 OPEN_DESIGN_IMAGE=$OPENDESIGN_IMAGE
 ODENV
@@ -2415,6 +2474,20 @@ configure_git_and_gh() {
         return
     fi
 
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+        # O default é SIM no host, e mesmo assim o handshake NÃO acontece aqui.
+        # `gh auth login -w` abre o navegador e espera: é a única pausa
+        # condicional que sobrou no script, e foi exatamente onde o `--yes` antigo
+        # travou para sempre. Um default que trava não é um default, é um beco —
+        # então o que o operador precisa fazer depois é escrito, e ele decide
+        # quando. Provisionar não significa abrir um navegador sozinho.
+        echo -e "${YELLOW}Login de pessoa: aceito como default, mas o handshake precisa de você.${NC}"
+        echo -e "${YELLOW}  Rode, quando quiser e com a sua conta:${NC}" >&2
+        echo -e "${YELLOW}    gh auth login -p https -w -s admin:public_key,read:user,user:email${NC}" >&2
+        echo -e "${YELLOW}  (o device code também funciona sem navegador: acrescente -c)${NC}" >&2
+        return
+    fi
+
     echo -e "${YELLOW}Iniciando handshake com o GitHub via navegador...${NC}"
     gh auth login -p https -w -s admin:public_key,read:user,user:email
 
@@ -2505,7 +2578,7 @@ Módulos:
                             deste script.
                             Usa a senha padrão do dashboard (e a diz), deixa a
                             senha do OpenCode ser a aleatória do instalador, e
-                            instala o OpenDesign no modo NATIVO.
+                            instala o OpenDesign no modo CONTAINER.
                             A GitHub App fica inativa: a private key é um
                             segredo que existe fora da máquina.
                             Sem esta flag, um Enter não instala nada.
@@ -2908,15 +2981,19 @@ if should_run "hostname"; then
         pergunta "Novo hostname [$NEW_HOSTNAME_SUGGESTED]: " NEW_HOSTNAME
         NEW_HOSTNAME="${NEW_HOSTNAME:-$NEW_HOSTNAME_SUGGESTED}"
     fi
+    # A pergunta acima JÁ É a decisão, e ela tem o mesmo formato das de identidade
+    # (1-2): o default entre colchetes, e o Enter o aplica. Havia uma segunda
+    # pergunta — "Alterar o hostname para X?" — que não decidia nada: quem
+    # respondia a primeira com o nome padrão já tinha dito sim, e quem digitasse um
+    # nome próprio também. Ela existia só para ter um lugar onde o default pudesse
+    # ser "não", e o efeito era o oposto do pretendido: sob `--defaults` ela aceitava
+    # o "não" e a VM nova ficava com o nome que o hypervisor deu, que é justamente
+    # o que este passo existe para trocar.
     if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$CURRENT_HOSTNAME" ]; then
-        # Default SIM, e a razao e a mesma do `device-keys`: o que esta na lista de
-        # passos do perfil tem default sim, para que "aceitar todos os defaults"
-        # signifique "provisionar". Sem este 1, `--defaults` aceitaria o "nao" e a
-        # VM nova ficaria com o nome que o hypervisor deu — que e o que este passo
-        # existe para trocar.
-        confirm "Alterar o hostname para '$NEW_HOSTNAME'?" 1 && CONFIRM_HOSTNAME=1
+        CONFIRM_HOSTNAME=1
     else
         NEW_HOSTNAME=""
+        CONFIRM_HOSTNAME=0
     fi
 fi
 
@@ -3065,17 +3142,20 @@ if should_run "open-design" || should_run "open-design-container"; then
     echo -e "    ${YELLOW}container${NC} so existe atras do serve, com TLS, e nenhuma CLI do host roda dentro"
     echo
     if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
-        # `--yes` não tem como perguntar, e os dois modos têm consequências
-        # opostas — então ele escolhe o que é o modo canônico: `nativo`. Escolher
-        # `container` aqui seria instalar o modo alternativo, e ele exige um
-        # pacote que o perfil `vm` não instala. A escolha fica dita em voz alta
-        # porque é a única coisa que `--yes` decide sozinho e que não é um
-        # "sim".
-        OPENDESIGN_MODE="nativo"
-        echo -e "  ${GREEN}--defaults: instalando o modo NATIVO.${NC}"
+        # `--defaults` não tem como perguntar, e escolhe o modo CONTAINER. A
+        # escolha é defendível porque o container é o modo com TLS e sem porta
+        # interna exposta, que é o default certo para uma máquina de fronteira.
+        #
+        # Ela só é segura porque o passo `podman` agora instala o
+        # `podman-compose`: sem esse provider, `podman compose` falha e este
+        # default entregaria uma VM que não sobe. Foi medido nesta VM antes da
+        # correção, e a ordem é o ponto — o pré-requisito vem antes do default.
+        OPENDESIGN_MODE="container"
+        echo -e "  ${GREEN}--defaults: instalando o modo CONTAINER (TLS, sem porta interna exposta).${NC}"
+        echo -e "  ${GREEN}  Para o modo nativo, com as CLIs do host disponíveis dentro: responda 'n'.${NC}"
     else
     while :; do
-        if ! read -r -p "  Modo [nativo/container]: " OPENDESIGN_MODE; then
+        if ! read -r -p "  Modo [container/nativo]: " OPENDESIGN_MODE; then
             # EOF, e nao resposta invalida. A distincao importa: com entrada
             # invalida o loop repregunta, mas em EOF o `read` falha para sempre e
             # um `while :` sem este teste trava o script indefinidamente. Sem
@@ -3085,10 +3165,15 @@ if should_run "open-design" || should_run "open-design-container"; then
             OPENDESIGN_MODE=""
             break
         fi
+        # Enter devolve vazio, e vazio é o default declarado: `container`. Sem
+        # esta linha, apertar Enter cairia no `*)` e repreguntaria, o que faria do
+        # default uma ilusão: o texto entre colchetes diria container e o
+        # comportamento não faria.
+        [ -n "$OPENDESIGN_MODE" ] || OPENDESIGN_MODE="container"
         OPENDESIGN_MODE="$(printf '%s' "$OPENDESIGN_MODE" | tr '[:upper:]' '[:lower:]')"
         case "$OPENDESIGN_MODE" in
-            nativo | container) break ;;
-            *) echo -e "${YELLOW}  Escolha 'nativo' ou 'container'.${NC}" ;;
+            container | nativo) break ;;
+            *) echo -e "${YELLOW}  Escolha 'container' ou 'nativo'.${NC}" ;;
         esac
     done
     read -r -s -p "  OD_API_TOKEN (vazio = gerar um): " OPENDESIGN_TOKEN
@@ -3099,7 +3184,13 @@ if should_run "open-design" || should_run "open-design-container"; then
     # nada a perguntar. O token só importa se o auth estiver ligado, e no modo
     # nativo ele não está — o portão é o `tailscale serve`.
     [ -z "$OPENDESIGN_TOKEN" ] && OPENDESIGN_TOKEN="$(openssl rand -hex 32)"
-    echo -e "  token do daemon: gerado (não é usado no modo nativo; o portão é o serve)"
+    # A mensagem é por modo, e ela dizia só do nativo. No modo container o token
+    # É a credencial da API — é o que o `deploy/.env` carrega para o daemon.
+    if [ "$OPENDESIGN_MODE" = "container" ]; then
+        echo -e "  token do daemon: gerado (no container ele É a credencial da API, e vai para o deploy/.env)"
+    else
+        echo -e "  token do daemon: gerado (não é usado no modo nativo; o portão é o serve)"
+    fi
 fi
 
 HERMES_DASH_PASSWORD=""
@@ -3146,7 +3237,17 @@ fi
 # não deve ver um pedido de token de conta antes de decidir isso.
 if should_run "git"; then
     CONFIRM_GH_LOGIN=0
-    confirm "Autenticar o 'gh' com login de pessoa? (Enter = não; a GitHub App já cobre a API dos agentes)" && CONFIRM_GH_LOGIN=1
+    # SIM no host, NÃO na vm, e a assimetria é o ponto: são ALTERNATIVAS, não um
+    # par. A fronteira tem identidade de máquina (a App) e não precisa de um token
+    # de conta dentro dela; o host é a máquina de uma pessoa, e é dela que sai o
+    # token. Deixar as duas como default não fazia duas opções — fazia a máquina
+    # ter duas identidades ao mesmo tempo, e o `gh` sem saber qual das duas
+    # responder.
+    if [ "$PROFILE" = "host" ]; then
+        confirm "Autenticar o 'gh' com login de pessoa? (Enter = sim; esta máquina é a de uma pessoa)" 1 && CONFIRM_GH_LOGIN=1
+    else
+        confirm "Autenticar o 'gh' com login de pessoa? (Enter = não; a GitHub App cobre a API desta máquina)" 0 && CONFIRM_GH_LOGIN=1
+    fi
 fi
 
 # O opencodex tem a própria pergunta, separada da do ai-clis, e a separação é o
@@ -3454,6 +3555,18 @@ if should_run "podman"; then
     # provider escolher errado — e a regra de não ter volume/credencial
     # compartilhada pressupõe que o engine é o que o padrão dice que é.
     sudo dnf install -y --skip-unavailable podman slirp4netns fuse-overlayfs
+
+    # O `podman-compose` e o PROVIDER de `podman compose`, e sem ele o comando
+    # falha: medido nesta VM antes desta linha, `podman compose version` devolvia
+    # "looking up compose provider failed", e o script so resolvia isso mandando o
+    # operador instalar o pacote a mao. Isso e o que torna o modo container default
+    # seguro: o pre-requisito passa a ser do script, e nao um passo manual que
+    # alguém esquece numa VM nova e só descobre quando o `compose up` falha.
+    if ! command -v podman-compose &> /dev/null; then
+        sudo dnf install -y podman-compose || {
+            echo -e "${YELLOW}  podman-compose não instalado; o modo container do OpenDesign vai falhar.${NC}" >&2
+        }
+    fi
     if rpm -q podman-docker >/dev/null 2>&1; then
         echo -e "${YELLOW}  podman-docker está instalado e cria um atalho 'docker'.${NC}"
         echo -e "${YELLOW}  Não é removido aqui (não é decisão deste módulo); o padrão é não tê-lo.${NC}"
@@ -3533,6 +3646,31 @@ if should_run "gh-app"; then
         install -m 0755 "$SCRIPT_DIR/bin/gh-app-token.sh" "$HOME/.local/bin/gh-app-token"
         echo -e "${GREEN}✓ Helper em ~/.local/bin/gh-app-token.${NC}"
 
+        # O caminho ABSOLUTO do `gh` de verdade, resolvido ANTES de escrever
+        # qualquer wrapper. A razão é a recorrência: o shim que este módulo
+        # instala chama o `gh` real, e o wrapper `gh-app` também — e se os dois
+        # usarem `command gh`, cada um vai encontrar o OUTRO e chamar de volta em
+        # recursão. Assar o caminho absoluto nos dois é o que fecha isso, e
+        # resolve de quebra uma fragilidade que já existia: o wrapper dependia de o
+        # `~/.local/bin` estar no PATH, e o comentário dele registra que isso já
+        # deu "command not found" numa máquina real.
+        _real_gh=""
+        if command -v gh &> /dev/null; then
+            _real_gh="$(command -v gh)"
+        elif [ -x /usr/bin/gh ]; then
+            _real_gh="/usr/bin/gh"
+        fi
+        if [ -z "$_real_gh" ] || [ "$_real_gh" = "$HOME/.local/bin/gh" ]; then
+            # O segundo caso é o shim que uma execução anterior desta mesma máquina
+            # já deixou no PATH. Sem esta checagem, `command -v gh` devolveria o
+            # shim e o wrapper passaria a invocar ele mesmo para sempre.
+            _real_gh="/usr/bin/gh"
+        fi
+        if [ ! -x "$_real_gh" ]; then
+            echo -e "${YELLOW}  Não achei o binário do gh em lugar nenhum; a App fica instalada${NC}" >&2
+            echo -e "${YELLOW}  mas sem o wrapper. Instale o 'gh' e rode o módulo de novo.${NC}" >&2
+        fi
+
         # O wrapper obtém um token por comando e o descarta. Não vai para o shell rc
         # de propósito: mintar a cada shell aberto seria uma chamada de API por
         # terminal e manteria a credencial viva na sessão. O `--meta` deixa o
@@ -3566,15 +3704,79 @@ if [ "$obtem" = "1" ]; then
     fi
 fi
 
-GH_TOKEN="$(cat "$TOKEN")" command gh "$@"
+GH_TOKEN="$(cat "$TOKEN")" exec "__REAL_GH__" "$@"
 WRAPPER
+        # O placeholder só é trocado aqui, na hora de gravar: um `sed` sobre o
+        # arquivo inteiro poderia atingir uma linha de comentário que fala do
+        # caminho, e o resultado seria silenciosamente errado.
+        sed -i "s|__REAL_GH__|$_real_gh|g" "$HOME/.local/bin/gh-app"
         chmod 0755 "$HOME/.local/bin/gh-app"
 
         echo -e "${BLUE}Validando a App contra a API (não é checagem de arquivo)${NC}"
         if GH_APP_KEY="$GH_APP_KEY_FILE" GH_APP_ID="$(cat "$GH_APP_ID_FILE")" \
            "$HOME/.local/bin/gh-app-token" --check; then
             echo -e "${GREEN}✓ App validada contra a API.${NC}"
-            echo -e "${YELLOW}  Use como 'gh-app pr list'. O 'gh' sem o wrapper vai pedir login.${NC}"
+            echo -e "${YELLOW}  Neste perfil (vm) o 'gh' puro passa a usar a App, sem wrapper.${NC}"
+        # ── O shim de `gh`, e SO no perfil `vm` ────────────────────────────
+        #
+        # O sintoma que ele resolve é medido e é comum: um agente roda `gh pr
+        # create`, pega o `gh` de verdade, que não tem token, e falha — sem nenhuma
+        # pista de que existe uma App instalada na máquina. A identidade estava num
+        # comando de nome diferente (`gh-app`), e caminho que precisa ser lembrado
+        # não é caminho.
+        #
+        # A Documentação do GitHub CLI responde se existe jeito melhor, e a
+        # resposta é que `gh auth login` NÃO tem login como App: os métodos são o
+        # fluxo web (OAuth de pessoa) e `--with-token` (PAT). O jeito documentado
+        # para um token que não vem do login é a variável `GH_TOKEN`, e a
+        # documentação é explícita que ela tem **precedência sobre as credenciais
+        # guardadas**. Ou seja: injetar `GH_TOKEN` não é contorno, é o mecanismo.
+        #
+        # POR QUE SÓ NO `vm`, e por que isso é uma decisão e não uma restrição:
+        #
+        #   * `vm` — a identidade é da MÁQUINA. Um token por comando, com o
+        #     App como fonte, é o que a fronteira quer, e o token expira sozinho.
+        #   * `host` — a identidade é da PESSOA, e o login de pessoa já funciona.
+        #     Um shim aqui sobrescreveria esse login, porque `GH_TOKEN` tem
+        #     precedência. Trocaria o que a pessoa espera pelo que a máquina
+        #     presume.
+        #
+        # E é por isso que o shim cai no `case` do perfil, e não num `if [ -f ]`
+        # de "já instalei": rodar `--profile=vm` num host deixaria o shim para
+        # sempre, e o perfil é a única coisa que sabe qual máquina é esta.
+        if [ "$PROFILE" = "vm" ] && [ -n "$_real_gh" ]; then
+            cat > "$HOME/.local/bin/gh" <<SHIM
+#!/usr/bin/env bash
+# \`gh\` com a identidade da GitHub App desta VM.
+#
+# Este shim existe porque a identidade da máquina vivia num comando de nome
+# diferente, e um \`gh pr create\` sem token falhava sem explicar por quê. A
+# Documentação do GitHub CLI diz que o caminho é \`GH_TOKEN\`, com precedência
+# sobre credenciais guardadas — então o \`gh\` puro passa a funcionar sem que
+# ninguém precise saber que a App existe.
+#
+# Sem App configurada, ou com o token expirado, ele delega ao \`gh\` de verdade
+# sem token nenhum: é o comportamento de uma máquina sem identidade de máquina.
+set -uo pipefail
+
+WRAPPER="$HOME/.local/bin/gh-app"
+REAL_GH="__REAL_GH__"
+
+if [ -x "$WRAPPER" ]; then
+  exec "$WRAPPER" "\$@"
+fi
+
+exec "$REAL_GH" "\$@"
+SHIM
+            sed -i "s|__REAL_GH__|$_real_gh|g" "$HOME/.local/bin/gh"
+            chmod 0755 "$HOME/.local/bin/gh"
+            echo -e "${GREEN}✓ Shim de 'gh' em ~/.local/bin/gh — só neste perfil (vm).${NC}"
+            echo -e "${GREEN}  'gh pr create' passa a usar a App, sem wrapper e sem token na mão.${NC}"
+        elif [ "$PROFILE" = "host" ]; then
+            echo -e "${GREEN}✓ Sem shim de 'gh' neste perfil: o login de pessoa é a identidade${NC}"
+            echo -e "${GREEN}  do host, e um shim sobrescreveria ele (GH_TOKEN tem precedência).${NC}"
+        fi
+
         else
             echo -e "${YELLOW}A App não respondeu como esperado. Verifique se o par App ID + chave${NC}" >&2
             echo -e "${YELLOW}está certo e se a App está instalada em ao menos um repositório.${NC}" >&2

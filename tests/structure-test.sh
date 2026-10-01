@@ -138,15 +138,15 @@ echo "== o runner da suite RECUSA fora de uma sandbox =="
 # O guard e estrutural de proposito: nao e um aviso, e nao e uma linha de
 # comentario. A suite executa o setup.sh de verdade, e dois scripts de teste usam
 # systemctl --user em servicos reais; rodada no host, ela derrubou a sessao.
-r=$(cat "$REPO/tests/run.sh")
-if grep -q '_dentro_de_sandbox' <<<"$r"; then ok "o runner tem um guard de sandbox"
+runner="$(cat "$REPO/tests/run.sh")"
+if grep -q '_dentro_de_sandbox' <<<"$runner"; then ok "o runner tem um guard de sandbox"
 else falha "o runner nao tem guard: ele roda em qualquer maquina"; fi
-if grep -qE 'exit 2' <<<"$r"; then ok "e ele sai com codigo diferente de zero"
+if grep -qE 'exit 2' <<<"$runner"; then ok "e ele sai com codigo diferente de zero"
 else falha "o guard nao sinaliza a recusa no codigo de saida"; fi
-n_marcas=$(grep -cE '/run/\.containerenv|/\.dockerenv' <<<"$r")
+n_marcas=$(grep -cE '/run/\.containerenv|/\.dockerenv' <<<"$runner")
 if [ "$n_marcas" -ge 2 ]; then ok "e detecta container por marcador de filesystem ($n_marcas)"
 else falha "so ha $n_marcas marcadores de container"; fi
-if grep -q 'FD_TESTS_UNSAFE' <<<"$r"; then ok "e a override existe, e e explicita"
+if grep -q 'FD_TESTS_UNSAFE' <<<"$runner"; then ok "e a override existe, e e explicita"
 else falha "a override nao existe: recusar sem saida e um beco"; fi
 # E a documentacao tem que estar onde um agente chega primeiro.
 if [ -f "$REPO/AGENTS.md" ] && grep -q 'sandbox' "$REPO/AGENTS.md"; then
@@ -219,6 +219,139 @@ echo "        instalar=$inst  remover=$((rem-2))  readme=$rd"
     ok "os únicos -f absolutos em /etc são os de arquivos soltos"
   fi
 
+
+# O codigo sem os comentarios, para as checagens que sao sobre CODIGO. Sem isto,
+# um `grep` no arquivo inteiro casa o comentario que explica a propria proibicao:
+# foi assim que a checagem do hostname acusou o codigo correto, porque a frase
+# que ela proibe sobrevivia na explicacao de por que a pergunta foi removida.
+codigo="$(grep -vE '^[[:space:]]*#' "$REPO/setup.sh")"
+
+echo "== o shim de gh, e so no perfil vm =="
+# A identidade da maquina e da pessoa sao ALTERNATIVAS. O shim injetaria
+# GH_TOKEN, e a documentacao do gh diz que essa variavel tem precedencia sobre
+# as credenciais guardadas — num host, isso sobrescreveria o login de quem usa a
+# maquina. O perfil e a unica coisa que sabe qual maquina e esta.
+# (o `codigo` abaixo e derivado deste arquivo; a variavel `r` foi eliminada para
+# que nenhuma checagem possa ler o objeto errado por heranca de nome)
+if grep -A1 'if \[ "\$PROFILE" = "vm" \] && \[ -n "\$_real_gh" \]; then' <<<"$codigo" \
+     | grep -q 'local/bin/gh'; then
+  ok "o shim de gh e instalado sob o perfil vm"
+else
+  falha "o shim de gh nao esta sob o perfil vm"
+fi
+if grep -q 'elif \[ "\$PROFILE" = "host" \]' <<<"$codigo"; then
+  ok "e o perfil host diz explicitamente que nao instala shim"
+else
+  falha "o host nao declara a ausencia do shim: sem isso, um shim herdado continua valendo"
+fi
+# O shim e o wrapper se chamariam pelo `command gh` se nenhum deles usasse caminho
+# absoluto: cada um acharia o outro e chamaria de volta, para sempre.
+n_abs=$(grep -c 'exec "\$REAL_GH"' <<<"$codigo")
+if [ "$n_abs" -ge 1 ]; then
+  ok "os wrappers chamam o gh por caminho absoluto (sem recursao entre shim e wrapper)"
+else
+  falha "nenhum wrapper usa caminho absoluto do gh: shim e wrapper podem se chamar para sempre"
+fi
+if grep -q '__REAL_GH__' <<<"$codigo"; then
+  ok "e o caminho do gh real e resolvido antes de ser assado nos dois"
+else
+  falha "o caminho do gh real nao e assado: o shim e o wrapper naoTem o que execar"
+fi
+
+echo "== o default do modo do OpenDesign =="
+# Virou container. O que torna isso seguro e o podman-compose: sem o provider,
+# `podman compose` falha e o default entregaria uma VM quebrada. Por isso a
+# ordem estas duas checagens nao e arbitraria.
+if grep -q 'Modo \[container/nativo\]' <<<"$codigo"; then
+  ok "o prompt anuncia container primeiro"
+else
+  falha "o prompt nao anuncia o default novo"
+fi
+if grep -q '\[ -n "\$OPENDESIGN_MODE" \] || OPENDESIGN_MODE="container"' <<<"$codigo"; then
+  ok "e o Enter sem resposta aplica o default (o caso aceita a string vazia)"
+else
+  falha "o Enter nao aplica o default: apertar Enter repregunta e o default e ilusao"
+fi
+if grep -q 'OPENDESIGN_MODE="container"' <<<"$codigo"; then
+  ok "e --defaults instala o modo container"
+else
+  falha "--defaults nao instala container"
+fi
+if grep -q 'sudo dnf install -y podman-compose' <<<"$codigo"; then
+  ok "e o passo podman instala o podman-compose, que o modo container exige"
+else
+  falha "o podman-compose nao e instalado: o modo container falha numa VM limpa"
+fi
+
+echo "== o .env do OpenDesign =="
+# Medido no clone: deploy/.env e coberto por deploy/.gitignore; o .env da raiz
+# NAO e coberto por nada e aparecia como '?? .env' -- e ele tem o token dentro.
+if grep -q 'cp "\$D/.env.example" "\$envf"' <<<"$codigo"; then
+  ok "o modo container parte do .env.example, como o upstream documenta"
+else
+  falha "o .env e escrito do zero e descarta as outras chaves do template"
+fi
+if grep -q 'info/exclude' <<<"$codigo"; then
+  ok "o .env da raiz e coberto por .git/info/exclude, e nao pelo .gitignore do upstream"
+else
+  falha "o .env da raiz, que tem o token, continua aparecendo como ?? .env"
+fi
+if grep -q 'check-ignore -q .env' <<<"$codigo"; then
+  ok "e a cobertura e verificada por ESTADO (check-ignore), nao pelo log impresso"
+else
+  falha "a pos-condicao do .env nao e verificada: um log sem o efeito ao lado nao prova nada"
+fi
+# Idempotencia sem destruir credencial: regerar do template com token vazio
+# apagaria um token em uso.
+if grep -q '_od_token_anterior' <<<"$codigo"; then
+  ok "e um token ja escrito e preservado quando a execucao nao traz um novo"
+else
+  falha "regerar o .env com token vazio apaga um token em uso"
+fi
+
+echo "== o login do gh e por perfil, e --defaults nao abre o handshake =="
+if grep -q 'if \[ "\$PROFILE" = "host" \]; then' <<<"$codigo"; then
+  ok "o default do login de pessoa e decidido pelo perfil"
+else
+  falha "o login de pessoa nao e decidido pelo perfil"
+fi
+# A razao do guard: `gh auth login -w` abre o navegador e espera. Foi onde o
+# --yes antigo travou para sempre, e um default que trava nao e um default.
+n_handshake=$(grep -c 'gh auth login -p https -w' <<<"$codigo")
+n_guard=$(grep -c 'ASSUME_DEFAULTS' <<<"$codigo")
+if [ "$n_guard" -ge 1 ] && [ "$n_handshake" -ge 1 ]; then
+  ok "e ha um caminho de --defaults que nao chega no handshake do navegador"
+else
+  falha "o --defaults pode chegar no handshake do gh e travar para sempre"
+fi
+
+echo "== o hostname nao tem segunda pergunta =="
+# Havia um 'Alterar o hostname para X?' depois da pergunta. Nao decidia nada: quem
+# aceitou o default ja disse sim. E o efeito era o oposto do pretendido — sob
+# --defaults ela aceitava o 'nao' e a VM ficava com o nome do hypervisor, que e
+# exatamente o que o passo existe para trocar.
+n_host=$(grep -c "Alterar o hostname para" <<<"$codigo")
+if [ "$n_host" -eq 0 ]; then
+  ok "a pergunta do hostname e unica, como as de identidade"
+else
+  falha "a segunda pergunta do hostname ainda existe ($n_host vez(es))"
+fi
+if grep -q 'Novo hostname \[\$NEW_HOSTNAME_SUGGESTED\]' <<<"$codigo"; then
+  ok "e o default vem entre colchetes, que e o formato das perguntas 1-2"
+else
+  falha "o hostname nao mostra o default entre colchetes"
+fi
+
+echo "== nenhum check_not que nao pode falhar =="
+# Um check_not passa quando a saida NAO contem o texto proibido. Se esse texto nao
+# existe no codigo, a checagem e sempre verdadeira: conta como cobertura e nao
+# mede nada. Foi assim que duas das 103 eram foles — proibiam um banner com
+# sufixo de modo que o script nunca imprimiu.
+if python3 "$LIB/check-not-vacuous.py"; then
+  ok "todo check_not proibe algo que o script poderia imprimir"
+else
+  falha "ha check_not que nao pode falhar: contam como cobertura sem medir"
+fi
 
 echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi

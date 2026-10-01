@@ -661,6 +661,177 @@ precondição medida pela metade é um bug que ainda não aconteceu.** Verificar
 maioria das condições continua igual é a forma de garantir que nenhuma mudou.
 
 
+### A décima terceira: um default novo que teria entregado uma VM quebrada
+
+O `container` passou a ser o default do OpenDesign, por decisão do dono. O
+código tinha um comentário que dizia, com razão, que isso não podia ser feito:
+
+> Escolher `container` aqui seria instalar o modo alternativo, e ele exige um
+> pacote que o perfil `vm` não instala.
+
+O comentário estava certo, e a medição na VM foi mais dura que ele:
+
+```
+$ podman compose version
+Error: looking up compose provider failed
+$ command -v podman-compose
+(nada)
+$ dnf list --available podman-compose
+podman-compose.noarch 1.6.0-1.fc44 updates
+```
+
+Ou seja: o modo container **não funcionava numa VM limpa**, porque nada instalava
+o provider, e o script só resolvia isso mandando o operador instalar o pacote à
+mão. O default novo, sozinho, teria trocado "não instala" por "instala e falha".
+
+A ordem é o que importa: o `podman-compose` entra no passo `podman`, e **depois**
+o default vira `container`. E foi verificado que instalar o pacote resolve:
+
+```
+$ sudo dnf install -y podman-compose
+$ podman compose version
+>>>> Executing external compose provider "/usr/bin/podman-compose".
+```
+
+Um default é uma promessa sobre o que a máquina vai ter. Trocar o default antes
+de instalar o pré-requisito não éprovisionar mais rápido; é deslocar a falha.
+
+### A décima quarta: dois `.env`, e só um deles era visível para o git
+
+O dono transcreveu o README do OpenDesign, e ele diz o caminho certo: `cd deploy`,
+`cp .env.example .env`, `openssl rand -hex 32`, colar em `OD_API_TOKEN=`, e só
+então `docker compose up -d`. O token é **gerado** — a minha caracterização
+anterior, de "segredo prévio à instalação", estava errada, e o script já estava
+certo: a pergunta diz "vazio = gerar um" e gera com `openssl rand -hex 32`.
+
+O que a transcrição expôs foi outra coisa, e a medição no clone resolveu qual
+dos dois arquivos era o problema:
+
+| arquivo | `git check-ignore` | tem o token |
+|---|---|---|
+| `deploy/.env` — modo container | `deploy/.gitignore:2:.env` | sim |
+| `.env` na raiz — modo nativo | **nada** — `git status` mostra `?? .env` | sim |
+
+O modo container já escrevia no caminho documentado, e o próprio upstream o
+ignora. O modo **nativo** escrevia na raiz, onde nada o ignorava. A correção vai
+para `.git/info/exclude` — estado local do clone, nunca commitado, e não suja um
+`.gitignore` que pertence ao upstream — e a pós-condição é verificada **por
+estado**, com `git check-ignore`, e não pela linha que o script acabou de
+imprimir.
+
+Duas coisas caíram junto:
+
+- o template tem **8 chaves** e o script escrevia **3**, do zero. Ele agora parte
+  do `.env.example`, como o upstream manda;
+- regerar do template com token vazio **apagaria um token em uso**. Um token já
+  escrito que ainda vale é preservado quando a execução não traz um novo — senão o
+  modo idempotente destrói a credencial em vez de preservá-la.
+
+### A décima quinta: um teste que reportava o objeto errado
+
+Duas falhas de `structure-test.sh` apontavam para o código, e o código estava
+certo nas duas:
+
+- *"o shim de gh não está sob o perfil vm"* — o padrão exigia o `if` do perfil e
+  a `cat` do shim **na mesma linha**, o que nunca acontece: o `if` decide, a
+  `cat` escreve, uma linha depois.
+- *"a segunda pergunta do hostname ainda existe"* — ela não existia mais. A
+  frase sobrevivía num **comentário que explicava por que ela foi removida**.
+
+O segundo é o padrão, e é o mesmo de sempre numa forma nova: um `grep` no
+arquivo inteiro casa a documentação do próprio teste. Um teste que acusa o
+comentário que explica a regra treina quem o mantém a não escrever a razão.
+
+E havia um terceiro, que ainda não tinha falhado: a variável `r` valia `run.sh`
+no bloco do guard do sandbox e `setup.sh` no bloco dos defaults. Duas coisas num
+nome só — uma redefinição futura mudaria silenciosamente o que uma checagem
+antiga lê, que é a forma mais cara de "um diagnóstico que mede o objeto errado".
+Cada checagem agora tem uma variável que **nomeia o arquivo que ela lê**, e as
+que são sobre código leem o script sem os comentários.
+
+### A décima sexta: duas checagens que não podiam falhar, e o `ok` que as escondia
+
+A suíte passou com **101** checagens onde antes eram **103**, e a primeira
+reação foi olhar o código. O código estava certo. A contagem é que estava errada,
+e o erro é a coisa mais instrutiva que apareceu nesta rodada.
+
+O `profile-axis` tem dois blocos que só rodam quando a pergunta do modo do
+OpenDesign existe no script, e o guard era:
+
+```bash
+if grep -q 'nativo/container' "$REPO/setup.sh"; then
+  check     "..."
+  check_not "..."
+else
+  printf '  ok    (a pergunta do modo nao esta neste checkout)\n'
+  pass=$((pass+1))
+fi
+```
+
+Mudar o default do modo de `nativo` para `container` reescreveu o prompt para
+`Modo [container/nativo]`, o `grep` deixou de casar, e cada bloco caiu no `else`.
+A aritmética fecha exatamente: dois blocos, cada um trocando **duas** checagens
+por **um** `ok` falso, dão 103 − 4 + 2 = **101**.
+
+Duas coisas estão erradas ali, e a segunda é a que importa:
+
+**O sentinela era uma literal.** `nativo/container` é o texto de hoje. O guard
+precisa saber se a **pergunta** existe, não como ela está escrita — e a primeira
+edição que mexe na ordem das opções o quebrava, sem nenhuma falha. Agora ele
+procura `Modo [`, que sobrevive a reordenar e reescrever.
+
+**O `else` fabricava aprovação.** Um `pulado` que se declara é honesto: quem lê
+vê que a cobertura não foi cobrada. Um `ok` no lugar de duas checagens enche o
+contador, e foi ele que escondeu a perda. O pulo agora imprime `PULO`, conta em
+`pulados`, e aparece no resumo — porque um pulo que não aparece é um pulo que
+ninguém vai notar.
+
+### As duas checagens que eram sempre verdade
+
+Restaurado o guard, **103 de novo** — e apareceu uma falha. A segunda metade da
+investigação mostrou que a cobertura restaurada era **folga**:
+
+```bash
+check_not "e nao chegou a instalar o modo nenhum" "==> OpenDesign (nativo)" "$out"
+check_not "e nao instalou o container"                "==> OpenDesign (container)" "$out"
+```
+
+**Nenhuma das duas strings existe no `setup.sh`.** O banner é `==> OpenDesign`,
+sem sufixo de modo. As duas checagens eram sempre verdade: contavam como
+cobertura e não mediam nada. Um membro que não pode falhar é pior que a ausência
+dele, porque compra a sensação de cobertura sem pagar por ela — e foi exatamente
+isso: as 103 incluíam 2 que não podiam falhar, então o número de checagens que
+mediam alguma coisa era 101 antes e 103 agora.
+
+Pior: a do 16c afirmava o **contrário** do que o run faz. Medido nesta VM:
+
+```
+  Modo [container/nativo]: lixo
+  Escolha 'container' ou 'nativo'.
+  Modo [container/nativo]: container
+  token do daemon: gerado (no container ele É a credencial da API, ...)
+==> OpenDesign
+```
+
+Com `lixo` recusado e `container` na linha seguinte, o modo container **é
+aceito** e o banner **sai**. A checagem afirmava que não instalou — e "passava"
+só porque procurava a string que o script nunca imprime. Agora as duas medem o
+que acontece: no EOF o banner **não** sai; na entrada inválida seguida de válida,
+ele **sai**.
+
+### A guarda que impede a classe de voltar
+
+`tests/lib/check-not-vacuous.py` procura `check_not` cuja string proibida é uma
+**variação com sufixo de uma mensagem que o script emite de verdade** — que é o
+que denunciou este caso. A regra é estreita de propósito: um "o texto proibido
+precisa existir no código" em geral daria falsos positivos, porque `RANDOM`,
+`urandom` e `date +%d%m` são justamente o que o script **não** deve usar e
+legitimamente não aparecem. O caso geral sai como aviso, e o estreito como
+falha.
+
+Verificada nos dois sentidos, que é como se prova uma guarda: `exit 0` no estado
+bom, `exit 1` com o `check_not` fole reintroduzido, `exit 0` restaurada.
+
 ### O padrão: um guarda que erra não falha, finge que não é a vez dele
 
 O caso do `native`/`nativo` é o arquétipo. O `case` da pergunta aceita
