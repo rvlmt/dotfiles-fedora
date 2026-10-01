@@ -8,6 +8,33 @@ toca a máquina. Os que abrem pty usam `lib/ptyfile2.py`, porque `read -rp` só
 imprime quando o stdin é terminal — sem pty, o script não faz uma pergunta e o
 teste passa por um motivo errado.
 
+## ⚠️ A suíte só roda em sandbox, e o runner recusa fora dela
+
+```bash
+./tests/run.sh        # recusa com exit 2 se a máquina não for descartável
+```
+
+**Um teste que quebra o sistema inteiro não é um teste: é um ataque ao ambiente
+que o executa.** A suíte executa o `setup.sh` de verdade, e alguns scripts de teste
+usam `systemctl --user` em serviços reais. Ela rodou uma vez no host de
+desenvolvimento — que tem `opencode.service` e `hermes-dashboard.service` — e dois
+scripts ficaram de fora por isso.
+
+"Deixei de fora os dois piores" não é garantia: é lembrança, e lembrança não
+sobrevive a um agente novo. Por isso o guard é **estrutural**, e não um aviso no
+README. Quem chegar aqui por qualquer caminho — pessoa, agente, script — recebe a
+recusa antes de qualquer comando rodar.
+
+Como rodar:
+
+| | |
+|---|---|
+| **1. container** | `podman run --rm -it -v "$PWD:/repo:Z" -w /repo docker.io/library/fedora:44 ./tests/run.sh` |
+| **2. VM descartável** | a de agentes serve; é o que a §9 da auditoria mediu |
+| **3. override** | `FD_TESTS_UNSAFE=1 ./tests/run.sh` — só para VM descartável, e ela avisa |
+
+A opção 3 existe para não ser um beco, não para ser o caminho padrão.
+
 ## O que está aqui
 
 | arquivo | o que verifica | custo |

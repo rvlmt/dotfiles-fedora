@@ -134,6 +134,27 @@ else
   falha "a mensagem aparece sem a guarda da flag: um run interativo diria --defaults"
 fi
 
+echo "== o runner da suite RECUSA fora de uma sandbox =="
+# O guard e estrutural de proposito: nao e um aviso, e nao e uma linha de
+# comentario. A suite executa o setup.sh de verdade, e dois scripts de teste usam
+# systemctl --user em servicos reais; rodada no host, ela derrubou a sessao.
+r=$(cat "$REPO/tests/run.sh")
+if grep -q '_dentro_de_sandbox' <<<"$r"; then ok "o runner tem um guard de sandbox"
+else falha "o runner nao tem guard: ele roda em qualquer maquina"; fi
+if grep -qE 'exit 2' <<<"$r"; then ok "e ele sai com codigo diferente de zero"
+else falha "o guard nao sinaliza a recusa no codigo de saida"; fi
+n_marcas=$(grep -cE '/run/\.containerenv|/\.dockerenv' <<<"$r")
+if [ "$n_marcas" -ge 2 ]; then ok "e detecta container por marcador de filesystem ($n_marcas)"
+else falha "so ha $n_marcas marcadores de container"; fi
+if grep -q 'FD_TESTS_UNSAFE' <<<"$r"; then ok "e a override existe, e e explicita"
+else falha "a override nao existe: recusar sem saida e um beco"; fi
+# E a documentacao tem que estar onde um agente chega primeiro.
+if [ -f "$REPO/AGENTS.md" ] && grep -q 'sandbox' "$REPO/AGENTS.md"; then
+  ok "e a AGENTS.md do repo diz o mesmo"
+else
+  falha "a AGENTS.md nao avisa sobre a sandbox — e e o arquivo que um agente le primeiro"
+fi
+
 echo "== nenhuma referencia a pin de versao do opencode =="
 if ! grep -q 'OPENCODE_VERSION' setup.sh; then ok "sem OPENCODE_VERSION"
 else falha "OPENCODE_VERSION ainda existe"; fi

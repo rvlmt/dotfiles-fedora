@@ -22,6 +22,16 @@ rodar seu próprio `setup.sh` — mas compartilham a mesma ideia de estrutura
 ./tests/run.sh
 ```
 
+⚠️ **A suíte só roda em sandbox, e o runner recusa fora dela** (`exit 2`). Ela
+executa o `setup.sh` de verdade, e alguns scripts de teste usam `systemctl --user`
+em serviços reais — numa máquina de trabalho isso para o que a pessoa está usando.
+Um teste que quebra o sistema inteiro não é um teste, é um ataque ao ambiente que
+o executa. No container:
+
+```bash
+podman run --rm -it -v "$PWD:/repo:Z" -w /repo docker.io/library/fedora:44 ./tests/run.sh
+```
+
 A suíte roda o `setup.sh` **de verdade**, com `sudo`, `dnf`, `podman`,
 `systemctl`, `tailscale` e `gh` falsos no `PATH` e um `HOME` temporário: nada
 toca a máquina. São **96 checagens** de eixos de perfil, forma do arquivo e do
