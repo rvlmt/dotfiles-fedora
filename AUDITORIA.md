@@ -254,7 +254,7 @@ Uma entrada inválida repregunta; em EOF o `read` falharia para sempre e um
 | **`device-keys` com default sim** | o `authorized_keys` sai populado, e é o que permite ao `sshd-hardening` desligar a senha em seguida | a cadeia de entrada passa a depender da conta `rvlmt` no GitHub, e o acesso é revogado **indireto e diferido**: sai-se a chave lá, e ela perde o acesso na próxima execução deste módulo |
 | **hardening com default sim na VM, não no host** | a senha do SSH — a credencial mais exposta da VM — fica desligada sem depender de alguém responder "y" numa lista | a assimetria entre os perfis é uma decisão, e ela precisa continuar visível: quem provisionar um host recebe `[y/N]`, e a diferença está documentada no `README` e nesta tabela, não na chamada do prompt |
 | **nenhuma versão pinada por número** | o `base` não pode falhar porque um número saiu do registro | o **pnpm** salta de major (10.33.2 → 12.x) contra um lockfile `9.0` |
-| **`--yes` para rodar sem terminal** | provisionamento não interativo, com o default ainda sendo **não** | **o `sudo` continua pedindo senha** — a flag tira as perguntas do script, não as do sudo |
+| **`--defaults` para rodar sem terminal** (`--yes` é alias) | provisionamento não interativo com uma semântica coerente: a flag aceita **o default de cada pergunta**, e os defaults são escolhidos para que "default" signifique "provisionar" | o nome antigo significava "responde sim a tudo", e como nove dos nove prompts tinham default "não" isso **invertia cada opt-in** — medido: o run travava para sempre no handshake do `gh`. E há um preço mesmo com a semântica nova: quemprovisiona com a flag **não vê nenhuma pergunta**, então precisa ler a saída para saber o que foi assumido |
 | **raiz do build = o clone** | o caminho é o que a doc do OpenDesign espera; −947 MB | o clone ganha arquivos não rastreados, e `git status` mostra |
 | **`gpgcheck=0` no repo do Antigravity** | o repo **não publica chave** — os dois `.repo` dão 404 e não há `gpgkey` | pacotes desse repo sem verificação de assinatura. É do perfil `host`, não afeta a VM |
 | **senhas padrão** (`hermes`, `opencode`) | nada a configurar | adivinhável por quem conheça a convenção |
@@ -426,6 +426,8 @@ e ela é a parte que importa para a próxima: nenhuma das dez aparece em
 | open-design | nada publicava o `:8444` | link anunciado não existia |
 | `confirm` | `return "$default"` num default de "sim", e `confirm` devolve **1** para não | a pergunta anunciava `[Y/n]` e o Enter respondia **não** — e o harness passava 75/75 |
 | `sshd-hardening` | decidia por `[ -f ]` num arquivo sob diretório **700** | a pergunta repetia a cada run e o `else` "já aplicado" era **código inalcançável** — o drop-in era reescrito e o `sshd` recarregado em toda execução |
+| `--yes` | respondia sim a **tudo**, e nove dos nove prompts tinham default "não" | **travava para sempre** no handshake do `gh`, que é uma pergunta dele — e antes disso inertiava o lock do root, o OpenCodex e a sobrescrita do `~/.zshrc` |
+| `--help` | o `usage` usa `cat <<EOF` sem aspas, e o texto novo tinha crase | `bash setup.sh --help` **executava o `gh`** e colava o help dele no meio do nosso, **sem nenhuma linha de erro** |
 
 ### A nona, e a primeira que o harness não pegou
 
@@ -554,6 +556,67 @@ drop-in estava **sem aspas** (`<<EOF`), e o conteúdo — `PasswordAuthenticatio
 `PermitRootLogin no` — não tem `$` nem crase. Funciona hoje. É o mesmo defeito da
 crase que esta seção documenta, na mesma função, e a correção foi uma aspa: não
 depender de o conteúdo não ter nada especial.
+
+
+### A décima primeira: uma flag que respondia "sim" quando o default era "não"
+
+O `--yes` existia há semanas e **nunca tinha rodado**. Quando rodou, na VM, ele não
+terminou: parou em
+
+```
+==> Git e GitHub CLI
+Iniciando handshake com o GitHub via navegador...
+? Authenticate Git with your GitHub credentials? (Y/n)
+```
+
+e ficou ali. A causa é uma inversão que só aparece quando os dois lados estão juntos:
+
+1. `confirm` sob a flag devolvia **0 incondicionalmente** — "sim" para tudo.
+2. **Nove dos nove** prompts do script têm default **não**.
+
+"Responder sim a tudo" era, portanto, o mesmo que **inverter cada opt-in**. E o que
+inverteu primeiro foi o login de pessoa do `gh`, que dispara `gh auth login -w`: uma
+pergunta **do `gh`**, que nenhuma variável deste repositório alcança. O run não podia
+terminar, e o script não tem como evitar isso depois de disparado.
+
+Antes de chegar lá, o `--yes` já teria travado a senha do root, instalado o proxy do
+OpenCodex, sobrescrito o `~/.zshrc` e exigido uma senha para o servidor do OpenCode.
+
+**Nada disso é novidade**: é o nono defeito desta lista com a
+inversão trocada. Os outros devolvem 0 em silêncio; este **promete uma coisa e faz a
+oposta**, que é a variante que um `bash -n` não vê e que um log sem leitura não
+denuncia.
+
+A correção é de semântica, e a decisão foi do dono do repo: a flag passa a responder
+**o default de cada pergunta**, e os defaults são escolhidos para que "default"
+signifique "provisionar". O que está na lista de passos do perfil tem default sim — o
+hostname, as chaves de dispositivo, o hardening, as CLIs de IA, a senha do OpenCode; o
+que seria entrada para um serviço externo ou destruição de credencial tem default não —
+o login do `gh`, o OpenCodex, travar a senha do root, sobrescrever o `~/.zshrc`. Com
+isso a flag **não trava por construção**, e não por sorte de ordem.
+
+E o nome mudou para `--defaults`, com `--yes` de alias, porque o nome antigo é a
+descrição errada do comportamento.
+
+### A décima segunda: eu escrevendo uma crase no heredoc que eu mesmo documentara
+
+O texto do `--help` que anunciava essa mudança foi escrito com `gh` entre crases. O
+`usage` usa `cat <<EOF` **sem aspas** — e precisa sem aspas, porque é o que expande
+`$HOST_STEPS` na linha de módulos. Resultado medido:
+
+```
+$ bash setup.sh --help | grep -c 'CORE COMMANDS'
+2
+```
+
+O `--help` **executou o `gh`** e colou o help dele no meio do nosso.
+
+É o defeito que a seção das crases já descreve, e eu escrevi o texto que o reproduziu
+duas horas depois de documentá-lo. A diferença que vale registrar: no here-doc do
+dashboard a crase dava `command not found`, que é um erro visível; aqui não houve
+**nenhuma linha de erro** — só a saída errada, que é a forma mais difícil de perceber
+que existe. A correção é uma aspa de diferença no texto, e ali a proteção que ficou é
+uma checagem estrutural: o `--help` não pode conter a saída de outro programa.
 
 
 ### O run que alinhou 12 prompts de 13, e o que ele diz sobre medir

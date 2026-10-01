@@ -49,10 +49,90 @@ else
   falha "presenca=$n_pres  versao=$n_last"
 fi
 
-echo "== o --yes esta documentado no help =="
-h=$(grep -c -- '--yes' <<<"$(bash setup.sh --help 2>/dev/null)")
-if [ "$h" -ge 2 ]; then ok "--yes no help ($h ocorrencias)"
-else falha "--yes aparece $h vez(es) no help"; fi
+echo "== o --defaults esta documentado, e --yes e alias =="
+h=$(bash "$REPO/setup.sh" --help 2>/dev/null)
+n_def=$(grep -c -- '--defaults' <<<"$h")
+n_yes=$(grep -c -- '--yes' <<<"$h")
+if [ "$n_def" -ge 2 ]; then ok "--defaults no help ($n_def ocorrencias)"
+else falha "--defaults aparece $n_def vez(es) no help"; fi
+if [ "$n_yes" -ge 1 ]; then ok "--yes ainda no help, como alias ($n_yes)"
+else falha "--yes sumiu do help: quem muscle-memoriza a flag antiga nao e avisado"; fi
+
+echo "== o help nao executa nada: o heredoc do usage e sem aspas =="
+# O `usage` usa `cat <<EOF` SEM aspas de proposito — e sem aspas e o que expande
+# `$HOST_STEPS` na linha de modulos. A consequencia e que crase e `$(` viram
+# substituicao de comando, e o help sai com a saida de outro programa colada.
+#
+# Aconteceu com o proprio texto que anunciava a mudanca do `--yes`: escrevi
+# "gh" entre crases, e `bash setup.sh --help` EXECUTOU o gh e colou o help DELE no
+# meio do meu, sem uma linha de erro. O defeito e o mesmo que a §10 da auditoria
+# registra para a crase no here-doc do dashboard; ali deu "command not found", e
+# aqui deu so a saida errada — que e a forma mais dificil de perceber.
+n_cr=$(awk '/^usage\(\) \{/,/^EOF$/' "$REPO/setup.sh" | grep -c '`')
+if [ "$n_cr" -eq 0 ]; then ok "nenhuma crase no heredoc do usage"
+else falha "$n_cr crase(s) no heredoc do usage: o --help executa o que estiver entre elas"; fi
+if grep -q 'CORE COMMANDS' <<<"$h"; then
+  falha "o help contem a saida de outro programa (CORE COMMANDS)"
+else ok "o help nao contem saida de outro programa"; fi
+
+echo "== sob --defaults, nenhum default de 'nao' vira 'sim' =="
+# A inversao que travava o run: `--yes` respondia sim a TUDO, e nove dos nove
+# prompts tinham default "nao". Este teste fixa a semantica nova pelo proprio
+# codigo: `confirm` devolve o default declarado, e nao um 0 fixo.
+c=$(awk '/^confirm\(\) \{/,/^\}$/' "$REPO/setup.sh")
+# O caminho sob a flag existe, e devolve o INVERSO do default. As duas coisas sao
+# verificadas pelo texto, porque a suite nao pode invocar o script inteiro aqui.
+if grep -q 'ASSUME_DEFAULTS:-0' <<<"$c" && grep -q 'aceitando o padrão' <<<"$c"; then
+  ok "confirm tem um caminho proprio sob a flag"
+else
+  falha "confirm perdeu o caminho sob a flag"
+fi
+if grep -qF 'if [ "$default" = "1" ]; then return 0; fi' <<<"$c"; then
+  ok "e devolve o default declarado, e nao um 0 fixo"
+else
+  falha "confirm sob a flag nao devolve o default declarado"
+fi
+
+# E nenhum dos "nao" perigosos pode ter virado "sim". As duas perguntas sao
+# chamadas de DUAS linhas: a string numa, o `&& CONFIRM_...` na outra. O primeiro
+# padrao procurava um ` 1` no fim da linha da string — que e onde ele estaria,
+# mas a string nao termina ali. Por isso a checagem junta as duas linhas e
+# exige que NAO haja um segundo argumento.
+n_lock=$(grep -A1 'confirm "Travar a senha do root' "$REPO/setup.sh" \
+         | tr '\n' ' ' | grep -cE '"[[:space:]]+[01][[:space:]]*(&&|\\)?[[:space:]]*$')
+# O fragmento procurado NAO tem apostrofo de proposito: o padrao anterior trazia
+# um, dentro de uma aspa dupla, e o escaping com tres camadas de aspas foi o que
+# quebrou.
+n_gh=$(grep -A1 'login de pessoa?' "$REPO/setup.sh" \
+       | tr '\n' ' ' | grep -cE '"[[:space:]]+[01][[:space:]]*(&&|\\)?[[:space:]]*$')
+if [ "$n_lock" -eq 0 ]; then
+  ok "o lock do root segue sem default (--defaults nao trava a senha do root)"
+else
+  falha "o lock do root ganhou default: --defaults travaria a senha do root"
+fi
+if [ "$n_gh" -eq 0 ]; then
+  ok "o login do gh segue sem default (--defaults nao o dispara)"
+else
+  falha "o login do gh ganhou default: --defaults voltaria a travar no handshake"
+fi
+
+echo "== o pulo do login do gh diz POR QUE, e so sob a flag =="
+# A verificacao estrutural, e nao de execucao: o modulo comeca por
+# `gh auth status`, que na sandbox e o `gh` de verdade, e o resultado depende da
+# conta de quem roda. O que precisa valer em qualquer maquina e que a mensagem
+# exista E que ela esteja sob a guarda da flag — sem a guarda, um run
+# interativo diria "--defaults aceitou o default" para alguem que nao passou a flag.
+if grep -q 'Login de pessoa pulado' "$REPO/setup.sh"; then
+  ok "a mensagem de pulo do login do gh existe"
+else
+  falha "a mensagem de pulo do login do gh sumiu"
+fi
+n_guard=$(awk '/Login de pessoa pulado/{print FOUND=1} FOUND&&/ASSUME_DEFAULTS:-0/{print G; exit}' "$REPO/setup.sh")
+if [ -n "$n_guard" ]; then
+  ok "e ela esta sob a guarda da flag"
+else
+  falha "a mensagem aparece sem a guarda da flag: um run interativo diria --defaults"
+fi
 
 echo "== nenhuma referencia a pin de versao do opencode =="
 if ! grep -q 'OPENCODE_VERSION' setup.sh; then ok "sem OPENCODE_VERSION"

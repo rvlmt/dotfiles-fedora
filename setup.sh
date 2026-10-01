@@ -271,6 +271,12 @@ OPENCODE_BIN="$HOME/.opencode/bin/opencode"
 # A 443 fica reservada: é o slot para o serviço que você quiser ter mais à mão.
 OPENCODE_SERVE_PORT="8443"
 
+# Senha padrão do servidor do OpenCode. É o NOME do serviço, como `hermes` no
+# dashboard do Hermes: a convenção é a mesma, e a §6 da auditoria registra as
+# duas. Ela aparece entre colchetes no prompt, como o e-mail do GitHub, e um
+# Enter a aceita.
+OPENCODE_DEFAULT_PASSWORD="opencode"
+
 # Preenche GIT_NAME/GIT_EMAIL: pula o prompt se já vierem do ambiente
 # (pré-exportados), senão pergunta com o default sugerido entre colchetes
 # (Enter aceita, digitar outra coisa sobrescreve só nesta execução).
@@ -298,7 +304,7 @@ prompt_git_identity() {
 # pessoa teria feito.
 pergunta() {
     local prompt="$1" varname="$2"
-    if [ "${ASSUME_YES:-0}" = "1" ]; then
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
         printf -v "$varname" '%s' ""
         return 0
     fi
@@ -315,21 +321,47 @@ confirm() {
     # a mais.
     local default="${2:-0}"
     local reply
-    # `--yes` responde SIM a tudo, e é o que torna o modo não interativo possível.
-    #
-    # `ASSUME_YES` é inicializado aqui, e não na linha de argumentos, porque esta
+    local sufixo="[y/N]"
+    [ "$default" = "1" ] && sufixo="[Y/n]"
+    # `ASSUME_DEFAULTS` é inicializado aqui, e não na linha de argumentos, porque esta
     # função é definida antes dela e a chamadora de `confirm` mais acima já
     # precisa do valor. Sob `set -u`, ler a variável antes de existir aborta o
     # script — e a checagem aqui é o que evita isso.
-    if [ "${ASSUME_YES:-0}" = "1" ]; then
-        echo -e "${prompt} ${GREEN}[--yes: assumindo sim]${NC}"
-        return 0
+    #
+    # ⚠️ **A flag responde o DEFAULT, e isso é uma inversão de semântica medida.**
+    #
+    # Antes ela respondia SIM a tudo. E como **nove dos nove** prompts deste script
+    # tinham default "não", "responder sim a tudo" era o mesmo que **inverter cada
+    # opt-in**. Medido numa VM provisionada, com `--yes`:
+    #
+    #     ==> Git e GitHub CLI
+    #     Iniciando handshake com o GitHub via navegador...
+    #     ? Authenticate Git with your GitHub credentials? (Y/n)
+    #
+    # e o run **parou ali para sempre**. A pergunta é do `gh`, não deste script, e
+    # nenhuma variável de ambiente deste repositório chega nela. Antes de chegar
+    # nesse ponto, `--yes` já tinha invertido: travar a senha do root, instalar o
+    # proxy do OpenCodex, sobrescrever o `~/.zshrc` e exigir uma senha para o
+    # servidor do OpenCode.
+    #
+    # A regra agora é a que o nome diz: **`--defaults` aceita todos os defaults**.
+    # E os defaults são escolhidos para que "default" signifique "provisionar": o que
+    # está na lista de passos do perfil tem default sim, e o que é entrada para um
+    # serviço externo ou destruição de credencial tem default não. Uma coisa que não
+    # pode ser respondida por script — o handshake do `gh` — nunca chega a ser
+    # perguntada, porque o prompt que a dispararia já tem default não.
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+        echo -e "${prompt} ${GREEN}[--defaults: aceitando o padrão ($sufixo)]${NC}"
+        # O `return` é o INVERSO do default, porque `confirm` devolve 0 para sim e 1
+        # para não. Escrever isso com aritmética é o que produziu o bug anterior —
+        # `return "$default"` devolvia 1 num default de "sim" — então fica escrito.
+        if [ "$default" = "1" ]; then return 0; fi
+        return 1
     fi
     # O sufixo diz o que o Enter faz, e dizer errado é pior que não dizer: um
     # `[y/N]` com default "não" e um `[Y/n]` com default "sim" são a mesma
-    # pergunta com respostas opostas.
-    local sufixo="[y/N]"
-    [ "$default" = "1" ] && sufixo="[Y/n]"
+    # pergunta com respostas opostas. Ele foi calculado acima, porque a mensagem da
+    # flag precisa dele também.
     read -rp "$prompt $sufixo " reply
     # Enter vazio vale o default declarado. Sem estas duas linhas o default seria
     # decorativo: o `read` devolveria string vazia, a comparação abaixo cairia em
@@ -2363,7 +2395,17 @@ configure_git_and_gh() {
     # preferir não colocar um token de conta dentro da fronteira. Quem não quiser
     # não responde nada nesta pergunta, e o módulo segue sem autenticar o `gh`.
     if [ "${CONFIRM_GH_LOGIN:-0}" != "1" ]; then
-        echo -e "${YELLOW}Login de pessoa não solicitado: 'gh' segue sem token próprio.${NC}"
+        # A distinção é entre "ninguém pediu" e "a flag pediu que não". Sem ela, o
+        # primeiro run de uma máquina nova deixa o módulo pulado sem explicação, e
+        # "pulei" e "esqueci" são leituras diferentes do mesmo log.
+        if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+            echo -e "${YELLOW}Login de pessoa pulado: --defaults aceitou o default 'não' desta pergunta.${NC}"
+            echo -e "${YELLOW}  É o default certo — este passo é entrada para um serviço externo, e é${NC}" >&2
+            echo -e "${YELLOW}  justamente a pergunta que o --yes antigo invertia e que travava o run no${NC}" >&2
+            echo -e "${YELLOW}  handshake do gh. Se quiser, é o passo 1 do 'pos-instalacao.md'.${NC}" >&2
+        else
+            echo -e "${YELLOW}Login de pessoa não solicitado: 'gh' segue sem token próprio.${NC}"
+        fi
         echo -e "${YELLOW}  A API dos agentes continua coberta pela GitHub App, pelo wrapper 'gh-app'.${NC}"
         echo -e "${YELLOW}  Consequência: a chave SSH desta máquina NÃO é registrada no GitHub, porque${NC}" >&2
         echo -e "${YELLOW}  registrar chave é um endpoint de usuário (POST /user/keys) e um token de${NC}" >&2
@@ -2438,7 +2480,7 @@ OPT_IN_STEPS="toolbx gui-access"
 
 usage() {
     cat <<EOF
-Uso: ./setup.sh [--profile=host|vm] [--only=modulo1,modulo2] [--skip=modulo1,modulo2] [--yes]
+Uso: ./setup.sh [--profile=host|vm] [--only=modulo1,modulo2] [--skip=modulo1,modulo2] [--defaults]
 
 Perfis:
   host   Workstation pessoal com GUI e hospedeiro de VMs. Padrão.
@@ -2450,7 +2492,17 @@ Perfis:
 Módulos:
   --only=modulo1,modulo2   Roda apenas os módulos listados, dentro do perfil.
   --skip=modulo1,modulo2  Roda o perfil inteiro, exceto os módulos listados.
-    --yes, -y               Responde sim a tudo, para rodar sem terminal.
+    --defaults               Aceita TODOS os defaults, para rodar sem terminal. É o que
+                            torna o provisionamento não interativo. Um default de "sim"
+                            instala; um de "não" pula. Os defaults são escolhidos para
+                            que "default" signifique "provisionar": o que está na lista
+                            de passos do perfil instala, e o que seria entrada para um
+                            serviço externo — ou destruir uma credencial — não.
+    --yes, -y                Alias de --defaults. O nome antigo significava "responde
+                            sim a TUDO", e como nove dos nove prompts tinham default
+                            "não", isso invertia cada opt-in: media que travava para
+                            sempre no handshake do gh, que e uma pergunta DELE e nao
+                            deste script.
                             Usa a senha padrão do dashboard (e a diz), deixa a
                             senha do OpenCode ser a aleatória do instalador, e
                             instala o OpenDesign no modo NATIVO.
@@ -2470,13 +2522,13 @@ EOF
 PROFILE="host"
 ONLY=""
 SKIP=""
-ASSUME_YES=0
+ASSUME_DEFAULTS=0
 for arg in "$@"; do
     case "$arg" in
         --profile=*) PROFILE="${arg#*=}" ;;
         --only=*) ONLY="${arg#*=}" ;;
         --skip=*) SKIP="${arg#*=}" ;;
-        --yes|-y) ASSUME_YES=1 ;;
+        --defaults|--yes|-y) ASSUME_DEFAULTS=1 ;;
         -h|--help) usage; exit 0 ;;
         *)
             echo "Argumento desconhecido: $arg" >&2
@@ -2601,7 +2653,7 @@ should_run() {
 #   configurado sem funcionar.
 #
 # O default continua sendo NÃO. Sem a flag, um Enter não instala nada.
-if [ ! -t 0 ] && [ "${ASSUME_YES:-0}" != "1" ]; then
+if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
     echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
     echo "" >&2
     echo "stdin não é um terminal (pipe, redirecionamento ou CI). Nessas condições o" >&2
@@ -2609,7 +2661,7 @@ if [ ! -t 0 ] && [ "${ASSUME_YES:-0}" != "1" ]; then
     echo "a recusa é aqui." >&2
     echo "" >&2
     echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
-    echo "Para rodar sem interação (pipe ou CI): './setup.sh --yes'." >&2
+    echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
     echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
     exit 1
 fi
@@ -2644,8 +2696,8 @@ prompt_github_app() {
     # deixaria o módulo "configurado" sem nada funcionando, que é o pior desfecho
     # possível — o `gh` voltaria a pedir login e o relatório diria que está tudo
     # certo. Então o módulo fica INATIVO, e isso é dito.
-    if [ "${ASSUME_YES:-0}" = "1" ] && [ ! -s "$GH_APP_KEY_FILE" ]; then
-        echo -e "${YELLOW}GitHub App pulada (--yes).${NC}"
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ] && [ ! -s "$GH_APP_KEY_FILE" ]; then
+        echo -e "${YELLOW}GitHub App pulada (--defaults).${NC}"
         echo -e "  A private key é um segredo que existe fora da máquina, e um App ID"
         echo -e "  inventado deixaria o módulo marcado como configurado sem funcionar."
         echo -e "  O módulo fica inativo e o \`gh\` volta a pedir login. Para ativar:"
@@ -2857,7 +2909,12 @@ if should_run "hostname"; then
         NEW_HOSTNAME="${NEW_HOSTNAME:-$NEW_HOSTNAME_SUGGESTED}"
     fi
     if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$CURRENT_HOSTNAME" ]; then
-        confirm "Alterar o hostname para '$NEW_HOSTNAME'?" && CONFIRM_HOSTNAME=1
+        # Default SIM, e a razao e a mesma do `device-keys`: o que esta na lista de
+        # passos do perfil tem default sim, para que "aceitar todos os defaults"
+        # signifique "provisionar". Sem este 1, `--defaults` aceitaria o "nao" e a
+        # VM nova ficaria com o nome que o hypervisor deu — que e o que este passo
+        # existe para trocar.
+        confirm "Alterar o hostname para '$NEW_HOSTNAME'?" 1 && CONFIRM_HOSTNAME=1
     else
         NEW_HOSTNAME=""
     fi
@@ -2930,7 +2987,7 @@ fi
 
 CONFIRM_AI_CLIS=""
 if should_run "ai-clis"; then
-    confirm "Instalar as CLIs de IA (Claude Code, Codex, Cursor Agent, Open Code, Antigravity, DeepSeek Harness) nesta máquina? (opcional, já rodam nos devcontainers)" && CONFIRM_AI_CLIS=1
+    confirm "Instalar as CLIs de IA (Claude Code, Codex, Cursor Agent, Open Code, Antigravity, DeepSeek Harness) nesta máquina? (opcional, já rodam nos devcontainers)" 1 && CONFIRM_AI_CLIS=1
 fi
 
 # A senha do servidor do OpenCode é perguntada sempre que o módulo `ai-clis` for
@@ -2945,15 +3002,30 @@ CONFIRM_OPENCODE_PASSWORD=""
 OPENCODE_PASSWORD=""
 OPENCODE_PASSWORD_SET=0
 if [ "$CONFIRM_AI_CLIS" = "1" ]; then
-    confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a que o instalador gerar)" && CONFIRM_OPENCODE_PASSWORD=1
+    confirm "Definir uma senha de sua preferencia para o servidor do OpenCode? (a senha e obrigatoria; em branco mantem a que o instalador gerar)" 1 && CONFIRM_OPENCODE_PASSWORD=1
     if [ "$CONFIRM_OPENCODE_PASSWORD" = "1" ]; then
-        if [ "${ASSUME_YES:-0}" = "1" ]; then
-            # `--yes` NÃO escolhe uma senha aqui de propósito. Forçar a senha
-            # padrão seria pior que não escolher: ela é o nome do serviço, e a
-            # senha do instalador é aleatória e fica no `service.json`, que é 600.
-            # Um segredo escolhido em silêncio é um segredo que ninguém muda.
-            echo -e "  ${GREEN}--yes: a senha do servidor fica a aleatória do instalador.${NC}"
-            echo -e "  Fica em ~/.config/opencode/service.json (600)."
+        if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
+            # A senha padrão é `opencode`, o nome do serviço — a mesma convenção do
+            # dashboard do Hermes (`hermes`) e a mesma que a §6 da auditoria já
+            # registra para as duas. E é a MESMA convenção do e-mail do GitHub: o
+            # campo traz o valor entre colchetes, e um Enter o aceita.
+            #
+            # A versão anterior fazia o oposto, com um argumento que parecia bom: um
+            # segredo escolhido em silêncio é um segredo que ninguém muda, e por isso
+            # `--yes` deixava a senha aleatória do instalador. O problema é que
+            # responder "sim" ao prompt e cair num `pergunta` que não lê devolve
+            # VAZIO, e uma senha vazia é pior que uma senha adivinhável. Entre as
+            # duas, a adivinhável é a que ao menos é declarada, é a mesma das outras
+            # duas senhas do repo, e pode ser trocada com um comando.
+            #
+            # A alternativa seria devolver a senha ALEATÓRIA do instalador, que é o
+            # que a versão anterior fazia — e aí o `--defaults` não honors a resposta
+            # que deu.
+            OPENCODE_PASSWORD="$OPENCODE_DEFAULT_PASSWORD"
+            OPENCODE_PASSWORD_SET=1
+            echo -e "  ${GREEN}--defaults: senha do servidor = '${OPENCODE_DEFAULT_PASSWORD}'.${NC}"
+            echo -e "  É o nome do serviço, a mesma convenção de 'hermes' no dashboard."
+            echo -e "  Troque depois com: opencode service set password"
         else
             echo -e "${BLUE}Senha do servidor do OpenCode${NC}"
             echo -e "  Ela é obrigatória: o servidor sempre liga basic auth em /api/*."
@@ -2992,7 +3064,7 @@ if should_run "open-design" || should_run "open-design-container"; then
     echo -e "              precisa escutar no IP da tailnet, entao expoe a $OPENDESIGN_PORT em HTTP sem TLS"
     echo -e "    ${YELLOW}container${NC} so existe atras do serve, com TLS, e nenhuma CLI do host roda dentro"
     echo
-    if [ "${ASSUME_YES:-0}" = "1" ]; then
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
         # `--yes` não tem como perguntar, e os dois modos têm consequências
         # opostas — então ele escolhe o que é o modo canônico: `nativo`. Escolher
         # `container` aqui seria instalar o modo alternativo, e ele exige um
@@ -3000,7 +3072,7 @@ if should_run "open-design" || should_run "open-design-container"; then
         # porque é a única coisa que `--yes` decide sozinho e que não é um
         # "sim".
         OPENDESIGN_MODE="nativo"
-        echo -e "  ${GREEN}--yes: instalando o modo NATIVO.${NC}"
+        echo -e "  ${GREEN}--defaults: instalando o modo NATIVO.${NC}"
     else
     while :; do
         if ! read -r -p "  Modo [nativo/container]: " OPENDESIGN_MODE; then
@@ -3044,12 +3116,12 @@ if should_run "hermes-dashboard"; then
     echo -e "  ${YELLOW}ATENÇÃO: a senha provisoria do padrão e a mesma que o nome do serviço.${NC}"
     echo -e "  Ela é adivinhável por quem conheça a convenção, e o que ela protege é a"
     echo -e "  separação entre uma pessoa da tailnet e a sua sessão — não a máquina."
-    if [ "${ASSUME_YES:-0}" = "1" ]; then
+    if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
         # `--yes` assume a senha padrão, e DIZ qual é. Uma senha escolhida em
         # silêncio é uma senha que ninguém vai saber depois; o que o script grava
         # é o hash, e o texto claro só existe no arquivo 600 que ele gera.
         HERMES_DASH_PASSWORD="$HERMES_DASH_USER"
-        echo -e "  ${GREEN}--yes: usando a senha padrão '$HERMES_DASH_USER'.${NC}"
+        echo -e "  ${GREEN}--defaults: usando a senha padrão '$HERMES_DASH_USER'.${NC}"
         echo -e "  ${YELLOW}Ela é a mesma que o nome do serviço. Troque depois.${NC}"
     else
         read -r -s -p "  Senha (vazio = a provisoria '$HERMES_DASH_USER'): " HERMES_DASH_PASSWORD
@@ -3112,9 +3184,9 @@ fi
   # exatamente o que este script quer manter quente. As alternativas são
   # `NOPASSWD` para o `dnf` da distro, ou um askpass.
   if ! sudo -v 2>/dev/null; then
-      if [ "${ASSUME_YES:-0}" = "1" ]; then
+      if [ "${ASSUME_DEFAULTS:-0}" = "1" ]; then
           echo -e "${YELLOW}Não consegui validar o sudo sem terminal.${NC}" >&2
-          echo -e "${YELLOW}  O --yes tira as perguntas do script, não as do sudo.${NC}" >&2
+          echo -e "${YELLOW}  O --defaults tira as perguntas do script, não as do sudo.${NC}" >&2
           echo -e "${YELLOW}  Antes de rodar, valide o sudo num terminal: sudo -v${NC}" >&2
           echo -e "${YELLOW}  (alternativas: NOPASSWD para o dnf, ou um askpass)${NC}" >&2
           exit 1
