@@ -256,12 +256,31 @@ echo "== 9. a mensagem final aponta para o proximo passo certo =="
 out="$(run_pty $'n\n' --profile=host --only=opencodex)"
 check "no host, o proximo passo e o Cockpit" "VM de agentes no Cockpit" "$out"
 check_not "no host, nao manda o devpod para o host" "devpod com este servidor" "$out"
+# A ordem destas quatro afirmações é a que o banner tem, e a ordem importa: a
+# pós-condição vem ANTES do banner, e é ela que decide se o banner diz "pronto" ou
+# "N pendência(s)".
+#
+# Este teste roda com o HOME temporário do harness, onde não há `~/.zshrc`. A
+# pós-condição pergunta ao sistema se o `~/.zshrc` aponta para o repositório, e a
+# resposta é não — que é a resposta CORRETA, e é o que o design manda: um run que
+# não instalou o `zshrc` não pode declarar a máquina pronta.
+#
+# A versão anterior deste teste exigia o texto de "pronto" e falhava, e ela estava
+# errada: ela tratava a pendência como defeito, sendo que a pendência é o
+# comportamento certo. A forma de perguntar agora é a que importa — o banner diz
+# que há pendência, e a pendência é nomeada.
+out="$(run_pty $'n\n' --profile=vm --only=ai-clis)"
+check "um --only se declara parcial" "run parcial" "$out"
+check_not "e nao se declara pronto sem o que faltava" "Configuração da VM de agentes finalizada" "$out"
+check "a pendencia e nomeada, nao so contada" "zshrc" "$out"
+# E o que o teste de fato queria verificar: o proximo passo aponta para o lugar
+# CERTO do perfil. Isso so aparece no banner de um run sem pendencia, entao o
+# teste cria o `zshrc` que a pos-condicao procura.
+mkdir -p "$SANDBOX" && ln -sf "$REPO/zshrc" "$SANDBOX/.zshrc"
 out="$(run_pty $'n\n' --profile=vm --only=ai-clis)"
 check "no vm, o proximo passo e o snapshot" "snapshot" "$out"
-check_not "no vm, nao manda configurar devpod no host" "configure o devpod com este servidor"
-# E o banner diz que e parcial, em vez de fingir que terminou a maquina:
-check "e um --only se declara parcial" "run parcial" "$out"
-check_not "e nao se declara pronto" "Configuração da VM de agentes finalizada" "$out" "$out"
+check_not "no vm, nao manda configurar devpod no host" "configure o devpod com este servidor" "$out"
+rm -f "$SANDBOX/.zshrc" "$out"
 
 echo
 echo "== 10. [pipe de proposito] a recusa antecipada e o comportamento de pipe =="

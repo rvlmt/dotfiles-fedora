@@ -119,18 +119,33 @@ traz **apenas os dois arquivos de que ele depende** (`zshrc` e
 auditoria, documentação — **não vem**, e o destino tem três arquivos de um
 repositório com mais de dez.
 
-### O único passo que falta é o Tailscale, e ele precisa de você
+### O Tailscale: você em qualquer modo, mas a forma depende do modo
+
+A autenticação na tailnet **sempre** precisa de você, em qualquer modo — é o
+mesmo motivo pelo qual o `gh auth login` não roda sozinho: nenhum run não
+interativo tem navegador nem conta. O que muda é **quem executa o comando**:
+
+| modo | o que o script faz com o `tailscale up` |
+|---|---|
+| **manual** (terminal, sem flag) | **roda e pausa.** Ele instala o pacote, mostra o link de autenticação e espera. Você não digita nada — e a mensagem na tela diz *"Rodando 'tailscale up' — abra o link exibido para autenticar."* |
+| **`--defaults`** | **pula e registra pendência**, com o comando. Não há navegador, então não há o que tentar. |
+
+Então, no `--defaults` — que é o comando do passo 0 — o Tailscale fica de fora
+por definição:
 
 ```bash
 sudo tailscale up
 ```
 
-Das três coisas que este caminho atravessa, duas são automáticas e uma não é:
+No modo manual, ele já acontece dentro do script, e essa linha é desnecessária.
+
+Das três coisas que o caminho do `--defaults` atravessa, duas são automáticas e
+uma não é:
 
 | passo | quem precisa | por quê |
 |---|---|---|
 | buscar o script e os anexos por HTTPS | **ninguém** | o repositório é público; não há chave, token nem senha |
-| `sudo tailscale up` | **você**, no navegador | autenticar uma conta na tailnet. É o mesmo motivo pelo qual `gh auth login` não roda sozinho: nenhum run não interativo tem navegador nem conta |
+| `sudo tailscale up` | **você**, no navegador | autenticar uma conta na tailnet |
 | o `setup.sh --defaults` | **ninguém** | não há decisão ali — o `--defaults` responde o default declarado de cada pergunta |
 
 O passo do Tailscale é o único que **para e espera por você**, e ele diz isso na
