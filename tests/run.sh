@@ -84,7 +84,7 @@ cd "$REPO"
 RAPIDOS="test-device-keys.sh"
 # Abrem pty, e por isso demoram. O `profile-axis-test.sh` é o mais longo: roda o
 # `setup.sh` de verdade dezenas de vezes.
-LENTOS="structure-test.sh profile-axis-test.sh"
+LENTOS="structure-test.sh lib/teste-montagem-pipe.py profile-axis-test.sh"
 
 falhas=0
 total=0
@@ -97,7 +97,15 @@ for f in $RAPIDOS $LENTOS; do
     [ -f "$TEST_DIR/$f" ] || { echo "  $f  AUSENTE"; continue; }
     total=$((total + 1))
     printf '  %-26s ' "$f"
-    out="$(timeout 2400 bash "$TEST_DIR/$f" 2>&1)"
+    # O interpretador segue o tipo do arquivo. A lista e heterogenea de proposito
+    # — o teste da montagem e python porque extrair funcao de um script bash sem
+    # escaping e mais seguro em python, e forcar `bash` num .py daria um erro de
+    # sintaxe que parece o script estar quebrado.
+    case "$f" in
+        *.py) _int=python3 ;;
+        *)    _int=bash ;;
+    esac
+    out="$(timeout 2400 "$_int" "$TEST_DIR/$f" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         n="$(printf '%s\n' "$out" | grep -oE '[0-9]+ ok' | tail -1)"

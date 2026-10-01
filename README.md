@@ -86,37 +86,50 @@ mesmo repo pra justificar mantê-las separadas.
 ## Passo 0. Provisionar uma VM de agentes nova
 
 > O `setup.sh` **não provisiona a VM** — ele roda *dentro* de uma máquina que já
-> existe. Este passo é o que faz a máquina existir com o repositório dentro, e ele
-> vem antes do `setup.sh` por uma razão concreta: o repositório é lido por HTTPS,
-> o que funciona numa máquina sem chave SSH nenhuma.
+> existe. Este passo é o que traz o script para a máquina nova, e ele vem antes
+> por uma razão concreta: o repositório é lido por HTTPS, o que funciona numa
+> máquina sem chave SSH nenhuma.
 
 ### O comando
 
 Uma linha, na VM nova, no console do Cockpit:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/setup.sh \
+  | bash -s -- --profile=vm --defaults
 ```
 
-O `bootstrap.sh` traz o `setup.sh` e os **dois** arquivos de que ele depende —
-`zshrc` e `bin/gh-app-token.sh` — e roda o provisionamento em seguida. Ele não
-pede nada: todas as decisões que dependem de conta de terceiro ficam para o
-depois, e o run diz quais são, com o comando de cada uma.
+O `bash -s --` não é decoração, e omitir qualquer uma das duas partes produz um
+erro diferente:
 
-Depois, o **único** passo que precisa de você é entrar na tailnet, porque
-`tailscale up` abre o navegador e a autenticação é da sua conta:
+| o que você escreve | o que acontece |
+|---|---|
+| `\| bash` | **funciona, e provisiona a máquina errada.** Sem argumentos, o perfil é `host` — a camada da máquina de trabalho, não a da VM de agentes. Sem aviso, com código 0. |
+| `\| bash --profile=vm` | morre com `bash: --profile=vm: No such file or directory` — erro **visível**. Sem o `-s`, o bash trata o primeiro argumento como nome de arquivo. |
+| `\| bash -s --profile=vm` | os argumentos somem: `--` é o que separa as opções do `bash` dos argumentos do script. |
+| `\| bash -s -- --profile=vm --defaults` | **é esta linha.** |
+
+O script detecta o primeiro caso e recusa, dizendo o comando certo — porque a
+forma curta é a que todo mundo escreve, e ela não dá nenhum sinal de que
+provisionou a máquina errada.
+
+O que acontece depois do download: o script se escreve em `~/tmp/dotfiles`,
+traz **apenas os dois arquivos de que ele depende** (`zshrc` e
+`bin/gh-app-token.sh`) e re-executa dali. O resto do repositório — testes,
+auditoria, documentação — **não vem**, e o destino tem três arquivos de um
+repositório com mais de dez.
+
+### O único passo que falta é o Tailscale, e ele precisa de você
 
 ```bash
-ssh <ip-da-vm-na-tailnet> 'sudo tailscale up'
+sudo tailscale up
 ```
-
-### Por que só o Tailscale precisa de você
 
 Das três coisas que este caminho atravessa, duas são automáticas e uma não é:
 
 | passo | quem precisa | por quê |
 |---|---|---|
-| buscar o repositório por HTTPS | **ninguém** | o repositório é público; não há chave, token nem senha |
+| buscar o script e os anexos por HTTPS | **ninguém** | o repositório é público; não há chave, token nem senha |
 | `sudo tailscale up` | **você**, no navegador | autenticar uma conta na tailnet. É o mesmo motivo pelo qual `gh auth login` não roda sozinho: nenhum run não interativo tem navegador nem conta |
 | o `setup.sh --defaults` | **ninguém** | não há decisão ali — o `--defaults` responde o default declarado de cada pergunta |
 
@@ -125,9 +138,8 @@ tela. Todo o resto passa direto.
 
 ### O que esperar do `--defaults`
 
-Ele responde o *default declarado* de cada pergunta, e os defaults são escolhidos
-para que "aceitar tudo" signifique "provisionar". As duas coisas que ficam de fora
-são as que dependeriam de um segredo ou de um navegador:
+As duas coisas que ficam de fora são as que dependeriam de um segredo ou de um
+navegador:
 
 - a **GitHub App** fica inativa — a private key é um segredo que existe fora da
   máquina, e um App ID inventado marcaria o módulo como configurado sem funcionar;
@@ -135,7 +147,7 @@ são as que dependeriam de um segredo ou de um navegador:
   navegador.
 
 O run **diz as pendências no fim**, com o comando de cada uma, e sai com código
-`1`. Isso não é alarme: é a lista do que falta, verificada por estado — o run
+`1`. Isso não é alarme: é a lista do que falta, verificada por **estado** — o run
 pergunta ao sistema se o serviço está no ar e se o container existe, e não se
 confere o log do que ele acabou de dizer que fez.
 
@@ -146,19 +158,18 @@ confere o log do que ele acabou de dizer que fez.
 gh auth login -p https -w -s admin:public_key,read:user,user:email
 ```
 
-### Por que o repositório é público
+### Sobre o repositório ser público
 
-Para que a URL do `bootstrap.sh` seja estável e para que uma VM nova não precise
-de nenhuma credencial para começar. O repositório é conferido antes de cada
-publicação:
+Para que a URL seja estável e para que uma VM nova não precise de credencial
+nenhuma para começar. O repositório é conferido antes de cada publicação:
 
 ```bash
 ./tests/lib/auditoria-publica.py
 ```
 
 A auditoria procura **material** e não nomes — um bloco PEM só conta se tiver
-corpo, e token só conta se tiver formato. Ela mede o que está versionado e diz
-quantos arquivos olhou, porque um diagnóstico que reporta "nenhum" sem ter medido
+corpo, e token só conta se tiver formato. E ela diz **quantos arquivos mediu**,
+porque um diagnóstico que reporta "nenhum segredo encontrado" sem ter medido
 nada é o pior resultado possível: é verde, e está errado.
 
 O que é público não é segredo: é convenção de nomenclatura, portas internas e o

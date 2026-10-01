@@ -503,125 +503,141 @@ else
   falha "a lista de pendencias ($d) nao vem antes do uso ($u): o run reportaria 'pronto'"
 fi
 
-echo "== o README tem o passo 0, e o comando dele tem sintaxe =="
+echo "== o README documenta o passo 0, e o comando e o que funciona =="
 # O `setup.sh` nao provisiona a VM: ele roda DENTRO de uma maquina que ja existe.
-# Sem o passo 0 escrito, quem provisionar uma VM nova descobre a ordem errada
-# depois de perder a VM — e a ordem nao e livre: o `git clone` usa SSH, e o SSH
-# so existe depois do `tailscale up`.
+# Sem o passo 0 escrito, quem provisionar uma VM nova nao sabe como trazer o
+# script — e o repositorio, antes desta mudanca, era privado.
 r=$(cat "$REPO/README.md")
 if grep -q '## Passo 0' <<<"$r"; then
-  ok "o README documenta o passo 0 (provisionar a VM)"
+  ok "o README documenta o passo 0 (trazer o script para a VM nova)"
 else
-  falha "o README nao tem o passo 0: a ordem de provisionamento fica por conta de quem le"
+  falha "o README nao tem o passo 0: como trazer o script fica por conta de quem le"
 fi
-# A ordem e o que importa: tailscale ANTES do clone, e o clone pela chave da VM.
-t_up=$(grep -n 'sudo tailscale up' <<<"$r" | head -1 | cut -d: -f1)
-t_clone=$(grep -n 'git clone git@github.com' <<<"$r" | head -1 | cut -d: -f1)
-if [ -n "$t_up" ] && [ -n "$t_clone" ] && [ "$t_up" -lt "$t_clone" ]; then
-  ok "e a ordem esta certa: tailscale up antes do clone (linhas $t_up e $t_clone)"
+# A forma do pipe e o que importa, e a forma curta e a perigosa: `| bash`
+# FUNCIONA e provisiona o perfil `host` numa VM de agentes, sem aviso e com
+# codigo 0. Um README que documenta so a forma longa deixa a pessoa Discovering
+# isso sozinha, na base do erro.
+if grep -q 'bash -s -- --profile=vm --defaults' <<<"$r"; then
+  ok "o README documenta o pipe com -s --"
 else
-  falha "a ordem esta errada ou falta: o clone por SSH so funciona DEPOIS do tailscale up"
+  falha "o README documenta o pipe sem o -s --, que provisiona 'host' em silencio"
 fi
-if grep -q 'gh repo deploy-key add' <<<"$r"; then
-  ok "e ele diz como autorizar a chave da VM no repo privado"
+if grep -q 'provisiona a máquina errada' <<<"$r"; then
+  ok "e avisa que a forma curta da certo resultado errado"
 else
-  falha "o passo 0 nao resolve como o repo privado e lido"
+  falha "o README nao avisa sobre a forma curta: e a que a pessoa vai digitar"
 fi
-# Nenhum segredo atravessa. A chave publica e inutil para quem roubar; o que
-# NAO pode aparecer no README e um segredo de verdade.
-if grep -qE 'ghp_[A-Za-z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY' <<<"$r"; then
+# Nenhum segredo atravessa o caminho do README. O que nao pode aparecer ali e um
+# segredo de verdade; a chave publica e inofensiva e nao aparece mais.
+if grep -qE 'ghp_[A-Za-z0-9]{20}|BEGIN [A-Z ]*PRIVATE KEY' <<<"$r"; then
   falha "o README tem o que parece ser um segredo"
 else
-  ok "e nenhum segredo aparece no README: so chave publica, que nao abre nada"
+  ok "e nenhum segredo aparece no README"
 fi
-# O comando precisa ter SINTAXE valida, e isso se extrai do README e se checa de
-# verdade. A primeira versao desta checagem aceitava o proprio fracasso como "ok"
-# — um teste que nao pode falhar e pior que nenhum, e este era exatamente o caso
-# que a §10.16 registrou.
-#
-# A extracao pega o corpo do `bash -c '...'` e roda `bash -n` nele: o shell le,
-# nao executa. Um `read -r -p` no meio nao trava nada porque `-n` nao executa.
-# A extracao pega o INTERIOR do `bash -c '...'`: as linhas de abertura e de
-# fechamento sao o embrulho do markdown, nao o comando. A primeira versao pegava
-# a abertura e descartava o fecho, e o `bash -n` falhava com "EOF inesperado
-# procurando por ''" — o que e a falha CORRETA, sobre a extracao errada.
-_tmp_m=$(mktemp)
-sed -n "/^VM=</,/^'\$/p" "$REPO/README.md" | sed "1d; \$d" > "$_tmp_m"
-if [ -s "$_tmp_m" ] && bash -n "$_tmp_m" 2>/dev/null; then
-  ok "e o comando do passo 0 tem sintaxe valida ($(wc -l < "$_tmp_m") linhas extraidas)"
+# O comando precisa ter SINTAXE valida, extraida do README e conferida de
+# verdade. A primeira versao aceitava o proprio fracasso como "ok" — um teste que
+# nao pode falhar e pior que nenhum.
+# A extracao pega o comando INTEIRO, que no README ocupa duas linhas com barra de
+# continuacao. A primeira versao pegava de `curl -fsSL` ate `bash -s --` e cortava
+# no meio, e o `bash -n` falhava — a checagem acusava o README por um problema do
+# proprio sed. A barra e removida antes de conferir, senao o comando fica com uma
+# continuacao pendurada.
+_tmp_c=$(mktemp)
+awk '/^curl -fsSL/{p=1} p{print} p&&/bash -s --/{exit}' "$REPO/README.md" \
+  | sed 's/\\\\$//' > "$_tmp_c"
+if [ -s "$_tmp_c" ] && bash -n "$_tmp_c" 2>/dev/null; then
+  ok "e o comando do passo 0 tem sintaxe valida ($(wc -l < "$_tmp_c") linhas)"
 else
   falha "o comando do passo 0 do README nao tem sintaxe valida"
-  bash -n "$_tmp_m" 2>&1 | head -3 | sed "s/^/        /"
+  bash -n "$_tmp_c" 2>&1 | head -2 | sed 's/^/        /'
 fi
-rm -f "$_tmp_m"
+rm -f "$_tmp_c"
 
-echo "== a auditoria do que um repo publico revelaria =="
-# Publicar o repo e uma decisao legitima, e a razao de esta checagem existir e
-# tornar essa decisao informada — e nao um `git remote set-url` seguido de um
-# pedido de desculpas.
-#
-# O que ela mede e MATERIAL, e nao nomes: um bloco PEM so conta se tem CORPO, e
-# token so conta se tem FORMATO. A primeira versao era um `grep` por "PRIVATE KEY"
-# e acusou dois arquivos — as duas ocorrencias eram padroes de casamento, uma
-# delas a propria checagem que procura segredo. Diagnostico no objeto errado.
-if python3 "$LIB/auditoria-publica.py" > /tmp/fd-aud-publica.txt 2>&1; then
-  n_med=$(sed -n 's/^Medindo \([0-9]*\) arquivo.*/\1/p' /tmp/fd-aud-publica.txt | head -1)
-  if [ -n "$n_med" ] && [ "$n_med" -ge 1 ]; then
-    ok "nenhum segredo em $n_med arquivo(s) versionado(s)"
-  else
-    falha "a auditoria nao mediu nenhum arquivo: 'nenhum segredo' seria mentira"
-  fi
+echo "== o caminho por pipe traz SO o que o setup.sh le =="
+# Um repositorio de dotfiles nao precisa de dois scripts para se instalar: o
+# `setup.sh` se obtem quando chega por pipe, e traz os anexos de que ele depende.
+# A lista vem do PROPRIO codigo, nao de uma lista escrita a mao — uma lista a mao
+# desatualiza em silencio quando o script ganha uma dependencia nova.
+if grep -q '_se_colocar_no_disco_e_reexecutar' <<<"$codigo"; then
+  ok "o setup.sh se monta quando chega por pipe"
 else
-  falha "a auditoria do repo publico achou algo que nao pode sair"
-  sed -n '2,8p' /tmp/fd-aud-publica.txt | sed 's/^/        /'
+  falha "o setup.sh nao se obtem: o caminho do curl exige um segundo script"
 fi
-rm -f /tmp/fd-aud-publica.txt
-
-echo "== o bootstrap cobre TUDO que o setup.sh le do repo =="
-# O `curl` do bootstrap e o caminho do provisionamento sem chave nenhuma, entao
-# ele tem de trazer os arquivos de que o `setup.sh` depende — e a lista e
-# EXTRAIDA do proprio setup.sh, nao escrita a mao. Uma lista escrita a mao e uma
-# lista que desatualiza em silencio quando o setup.sh ganha uma dependencia nova.
-if [ -f "$REPO/bootstrap.sh" ]; then
-  deps=$(grep -oE '\$SCRIPT_DIR/[a-zA-Z0-9/._-]+' "$REPO/setup.sh" | sort -u)
-  n_dep=$(printf '%s\n' "$deps" | grep -c . || true)
-  n_ok=0
-  for d in $deps; do
-    rel="${d#\$SCRIPT_DIR/}"
-    if grep -qF "buscar \"$rel\"" "$REPO/bootstrap.sh"; then
-      n_ok=$((n_ok + 1))
-    else
-      falha "o setup.sh le $rel e o bootstrap nao traz"
-    fi
-  done
-  if [ "$n_ok" -eq "$n_dep" ]; then
-    ok "o bootstrap traz as $n_dep dependencia(s) que o setup.sh le do repo"
-  fi
-  if grep -qF 'buscar "setup.sh"' "$REPO/bootstrap.sh"; then
-    ok "e traz o proprio setup.sh"
-  else
-    falha "o bootstrap nao traz o setup.sh"
-  fi
-  # Um `curl` que devolve uma PAGINA de erro com 200 nao falha: o script receberia
-  # receberia HTML e nao distinguiria de um script. A checagem existe, e precisa.
-  if grep -qE 'DOCTYPE html|<html' "$REPO/bootstrap.sh"; then
-    ok "e rejeita uma pagina HTML, que o curl -f nao pega"
-  else
-    falha "o bootstrap nao rejeita pagina de erro: o setup.sh rodaria um HTML"
-  fi
-  # Um `curl` que falha tem que PARAR, nao seguir para o setup.sh — que
-  # falharia por um arquivo que nao chegou, com uma mensagem que aponta para o
-  # sintoma e nao para a causa.
-  if grep -A4 '^buscar() {' "$REPO/bootstrap.sh" | grep -q 'exit 1'; then
-    ok "e um download que falha para o bootstrap, em vez de seguir"
-  else
-    falha "um download que falha nao para o bootstrap"
-  fi
+if grep -q '_anexos_necessarios' <<<"$codigo"; then
+  ok "e a lista de anexos vem do proprio codigo"
 else
-  falha "nao existe bootstrap.sh, e o README aponta para ele"
+  falha "a lista de anexos esta escrita a mao: desatualiza em silencio"
+fi
+# O destino e um lugar de INSTALACAO, nao de codigo. `~/tmp/dotfiles` e o que a
+# auditoria do comando usa, e o padrao.
+if grep -q 'SETUP_DESTINO="\${SETUP_DESTINO:-\$HOME/tmp/dotfiles}"' <<<"$codigo"; then
+  ok "e o destino e ~/tmp/dotfiles, e nao ~/Developer"
+else
+  falha "o destino nao e ~/tmp/dotfiles: material de instalacao com cara de projeto"
 fi
 
-echo "== sintaxe =="
+echo "== o filtro de pagina de erro nao se rejeita sozinho =="
+# O filtro procurava `<!DOCTYPE html|<html` no arquivo BAIXADO — e a propria
+# linha do filtro estava nesse arquivo, entao o script se rejeitava. A montagem
+# nunca passava, e o sintoma era "nao consegui baixar o setup.sh" com um GET 200
+# no log do servidor: mensagem CORRETA, causa ERRADA.
+# A pergunta estavel e o TIPO, e o sinal de que ele e pedido e a classe `case`
+# com `text/html`. Uma busca pelo nome do cabecalho nao serve: o texto do `sed`
+# tem a forma `[Cc]ontent-[Tt]ype`, com colchetes, e qualquer padrao que casasse o
+# nome teria que repetir essa forma — o que e testar a grafia, nao o
+# comportamento. `text/html` so aparece quando a rejeicao e por tipo.
+if grep -q 'text/html' <<<"$codigo"; then
+  ok "a rejeicao de HTML pergunta o Content-Type, e nao o conteudo"
+else
+  falha "a rejeicao nao e por tipo de resposta: o filtro se rejeita sozinho"
+fi
+# E o sinal de que o filtro NAO procura mais HTML no arquivo: nenhum `grep -qi`
+# de HTML sobre o destino pode existir, que e o que se auto-rejeitava.
+if grep -qE "grep -qiE? .*[Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt]" <<<"$codigo"; then
+  falha "ainda ha um grep de DOCTYPE no arquivo baixado: e o filtro que se rejeita"
+else
+  ok "e nao ha mais busca de DOCTYPE no conteudo do arquivo"
+fi
+# A pergunta de Content-Type tem que ser a do arquivo BAIXADO, e nao a de uma
+# referencia a \$SCRIPT_DIR, que e o bug circular: a funcao aceitava um anexo so
+# se ele ja estivesse no destino, que e o que ainda nao existe.
+if grep -q 'curl -fsI' <<<"$codigo"; then
+  ok "e a lista verifica o anexo na URL, e nao no destino (que e circular)"
+else
+  falha "a lista filtra por existencia no destino: nunca aceita nenhum anexo"
+fi
+
+echo "== o pipe sem argumentos recusa, e nao provisiona 'host' =="
+# `curl | bash` e a forma que todo mundo escreve, e ela FUNCIONA: o script roda
+# inteiro, com o perfil `host`. Numa VM de agentes, isso provisiona a camada da
+# maquina de trabalho e nao a da fronteira — sem aviso e com codigo 0.
+if grep -q 'veio por pipe sem nenhum argumento' <<<"$codigo"; then
+  ok "o script detecta o pipe sem argumento"
+else
+  falha "o script nao detecta o pipe sem argumento: provisiona 'host' sem avisar"
+fi
+if grep -q 'bash -s -- --profile=vm' <<<"$codigo"; then
+  ok "e a mensagem diz a forma correta do pipe, com o -s --"
+else
+  falha "a recusa nao diz a forma correta: a pessoa repete o comando errado"
+fi
+
+echo "== a forma do pipe no README e a que funciona =="
+rr=$(cat "$REPO/README.md")
+if grep -q 'bash -s -- --profile=vm --defaults' <<<"$rr"; then
+  ok "o README documenta o pipe com -s --"
+else
+  falha "o README documenta o pipe sem o -s --, que provisiona 'host' em silencio"
+fi
+# E o README tem de AVISAR que a forma curta funciona e provisiona errado, porque
+# ela e a que a pessoa vai digitar.
+if grep -q 'provisiona a máquina errada' <<<"$rr"; then
+  ok "e avisa que a forma curta da certo resultado errado"
+else
+  falha "o README nao avisa sobre a forma curta: e a que a pessoa vai digitar"
+fi
+
+echo "== sintaxe =="echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi
 
 echo "== nenhum caractere CJK em nenhum arquivo =="

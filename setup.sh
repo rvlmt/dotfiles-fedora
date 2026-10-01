@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Onde este script está em disco. Quando ele roda por pipe, `BASH_SOURCE[0]` é
+# "bash" e este diretório é o de quem executou — que não é de onde o script veio.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A URL de origem, e o nome do repositório. Só é usada quando o script precisa se
+# obter, e por isso fica vazia no caminho normal: um repositório clonado não deve
+# depender de rede para rodar.
+# Para onde o script se coloca quando chega por pipe. Um lugar só, e fora do
+# `~/Developer`: o que se guarda ali é o material de instalação, e `~/Developer`
+# é para código que a pessoa maintaina. Se o script só baixou o `setup.sh` e os
+# dois anexos, não há repositório ali — e fingir que há, criando uma pasta com
+# nome de projeto, é a forma de deixar lixo com cara de coisa importante.
+SETUP_DESTINO="${SETUP_DESTINO:-$HOME/tmp/dotfiles}"
+
+# A URL de origem. Vazio no caminho normal: um repositório clonado não deve
+# depender de rede para rodar, e a única coisa que precisa de rede é o caminho por
+# pipe, que é o que descobre a si mesmo.
+SETUP_ORIGIN=""
+REPO_SLUG="rvlmt/dotfiles-fedora"
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -2761,6 +2779,158 @@ should_run() {
     return 0
 }
 
+# ==============================================================================
+# Quando este script chega por pipe, ele se escreve em disco e segue
+# ==============================================================================
+#
+# A forma de instalar um repositório de dotfiles com um comando só é esta: a
+# pessoa digita o `curl | bash`, o script é lido pela entrada padrão em vez de
+# vir de um arquivo, e a única coisa que ele pode fazer é se colocar no disco.
+#
+# Recusar seria a resposta comfortable, e estaria errada. O motivo original da
+# recusa — o script pergunta coisas e o `read` morre no fim da entrada — continua
+# valendo, e é por isso que ela SÓ vale sem `--defaults`. Com a flag, não há
+# pergunta a fazer, e o caminho por pipe é legítimo.
+#
+# Sem a flag e por pipe, o script se obtém, avisa que a partir daqui ele é
+# interativo, e recusa a continuar se não houver terminal. Essa é a parte que não
+# se negocia: um script que pergunta e não tem onde receber a resposta morre no
+# meio, e morrer no meio sem mensagem é o pior desfecho possível.
+#
+# Os anexos vêm junto porque este script os lê, e a lista é EXTRAÍDA do próprio
+# script em vez de escrita à mão: uma lista escrita à mão desatualiza em silêncio
+# quando o script ganha uma dependência nova, e ninguém percebe até uma VM nova
+# falhar num módulo.
+
+# Os arquivos que este script lê de `$SCRIPT_DIR`, além dele mesmo. Deriva do
+# código de propósito — é a mesma lista que a checagem estrutural confere, e as
+# duas leem a mesma fonte.
+# A lista vem do CÓDIGO, e não de uma lista escrita à mão. A diferença importa:
+# uma lista à mão desatualiza em silêncio quando o script ganha uma dependência
+# nova, e ninguém percebe até uma VM nova falhar num módulo.
+#
+# E o filtro é `\$SCRIPT_DIR/`, que é o caminho de um ARQUIVO. O mesmo script usa
+# `$SCRIPT_DIR` para diretório também, e um diretório não é algo para baixar.
+# O filtro e por EXTENSAO, e eu comecei com um que pegava so `*.algo` — o que
+# perdeu o `zshrc`, que nao tem extensao. Um filtro por FORMATO DE NOME e um
+# palpite sobre o que o script usa, e a lista resultante e silenciosamente
+# incompleta: o `setup.sh` baixa dois anexos, baixa um, e o modulo do `zshrc`
+# falha depois.
+#
+# O filtro certo e por CONTEUDO: pegamos toda referencia a `$SCRIPT_DIR` e
+# descartamos as que, no proprio repositorio, sao DIRETORIO. A lista continua
+# vindo do codigo, e agora vem inteira.
+# O segundo argumento e o `setup.sh` BAIXADO. Ler `${BASH_SOURCE[0]}` funciona no
+# caminho por pipe, porque o script E o arquivo lido — mas isso e uma coincidencia
+# do caso, e nao uma propriedade: num teste que copia esta funcao para outro
+# arquivo, a lista volta vazia e parece um bug da funcao. Passar o caminho
+# explicitamente deixa a dependencia visivel e o comportamento igual nos dois casos.
+# O segundo argumento e o `setup.sh` BAIXADO; o terceiro e a URL base.
+#
+# O filtro de existencia olha para a URL, e nao para o destino — e essa troca e
+# a correcao de um bug que era CIRCULAR: a funcao aceitava um anexo so se ele ja
+# estivesse no destino, que e justamente o arquivo que ainda nao existe. A lista
+# saia vazia, o script se montava sozinho, e o modulo do `zshrc` falhava depois
+# com "arquivo ausente" — um sintoma que aponta para o modulo, e nao para a
+# montagem, que e a forma mais cara de um erro aparecer no lugar errado.
+#
+# Ler `${BASH_SOURCE[0]}` em vez do caminho passado tambem funciona no script
+# real, porque ele E o arquivo lido. Mas isso e coincidencia do caso, nao
+# propriedade: um teste que copia a funcao para outro arquivo tem a lista vazia e
+# parece um bug da funcao. Passar o caminho explicitamente torna a dependencia
+# visivel e o comportamento igual nos dois casos.
+_anexos_necessarios() {
+    local quem="$1" url_base="$2" rel
+    grep -oE '\$SCRIPT_DIR/[a-zA-Z0-9/._-]+' "$quem" 2>/dev/null \
+        | sort -u | sed 's|^\$SCRIPT_DIR/||' | while read -r rel; do
+            [ -n "$rel" ] || continue
+            # Um HEAD evita baixar um anexo que nao existe e descobrir so no 404.
+            # `curl -fI` devolve codigo diferente de zero para um 404, que e o que
+            # importa aqui.
+            if curl -fsI "$url_base/$rel" >/dev/null 2>&1; then
+                printf '%s\n' "$rel"
+            fi
+        done
+}
+
+# Uma URL de raw que devolveu HTML em vez do arquivo não pode passar: o script
+# receberia uma página e a executaria. O `curl -f` não pega isso, porque a
+# resposta é 200.
+_baixar_anexo() {
+    local rel="$1" destino="$2" url="$3"
+    # O `Content-Type` e a pergunta certa, e a checagem do conteudo do arquivo e a
+    # errada de um jeito que so aparece aqui: o proprio filtro procurava
+    # `<!DOCTYPE html|<html` no arquivo baixado, e a LINHA DO FILTRO ESTAVA NELE.
+    # O script se rejeitava — a montagem nunca passava, e o sintoma era
+    # "não consegui baixar o setup.sh" com um `GET 200` no log do servidor.
+    #
+    # Um `raw` de repositorio privado devolve uma pagina HTML, e o curl -f nao
+    # pega: a resposta e 200. O que distingue a pagina do arquivo e o tipo
+    # declarado, e e isso que se pergunta.
+    local ctype
+    ctype="$(curl -fsSLI "$url" 2>/dev/null | tr -d '\r' \
+        | sed -n 's/^[Cc]ontent-[Tt]ype:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)"
+    case "${ctype:-}" in
+        text/html | application/xhtml+xml*)
+            return 1 ;;
+    esac
+
+    if ! curl -fsSL "$url" -o "$destino" 2>/dev/null; then
+        return 1
+    fi
+    # Estado, nao confianca: o arquivo chegou, e agora e preciso ver se tem o que
+    # um arquivo tem. O `-s` pega o caso do corpo vazio, que o `-f` nao pega.
+    [ -s "$destino" ] || { rm -f "$destino"; return 1; }
+    return 0
+}
+
+# Coloca o script e seus anexos no disco, e re-executa dali. O `exec` substitui o
+# processo, então o script só roda uma vez de verdade: sem ele, o script original
+# continuaria depois do download, com o `SCRIPT_DIR` apontando para o lugar
+# errado.
+_se_colocar_no_disco_e_reexecutar() {
+    local url_base="$1" destino_dir="$2"
+    shift 2
+    local args=("$@")
+
+    mkdir -p "$destino_dir" || return 1
+
+    # O script primeiro: sem ele, os anexos não têm quem os use.
+    if ! _baixar_anexo "setup.sh" "$destino_dir/setup.sh" "$url_base/setup.sh"; then
+        echo "ERRO: não consegui baixar o setup.sh de $url_base/setup.sh" >&2
+        echo "      O repositório precisa estar PÚBLICO para o caminho por pipe funcionar:" >&2
+        echo "      um repositório privado devolve uma página de erro, não o arquivo." >&2
+        return 1
+    fi
+    chmod 0755 "$destino_dir/setup.sh" 2>/dev/null || true
+
+    # Agora os anexos. A lista vem do script que acabou de chegar, e não de uma
+    # lista escrita aqui — que é o que a mantém verdadeira sem manutenção.
+    local n=0 rel destino
+    for rel in $(_anexos_necessarios "$destino_dir/setup.sh" "$url_base"); do
+        destino="$destino_dir/$rel"
+        mkdir -p "$(dirname "$destino")" || return 1
+        if _baixar_anexo "$rel" "$destino" "$url_base/$rel"; then
+            chmod 0755 "$destino" 2>/dev/null || true
+            n=$((n + 1))
+        else
+            # Um anexo que falta é um módulo que vai falhar depois, com uma
+            # mensagem que aponta para o sintoma. Melhor dizer agora e nomear o
+            # arquivo.
+            echo "ERRO: não consegui baixar o anexo '$rel'." >&2
+            echo "      Ele é lido por este script, e sem ele um módulo falha depois." >&2
+            return 1
+        fi
+    done
+
+    echo "Repositório montado em $destino_dir ($n anexo(s) além do setup.sh)." >&2
+    echo "A partir daqui o script é interativo." >&2
+    echo
+
+    cd "$destino_dir" || return 1
+    exec bash ./setup.sh "${args[@]}"
+}
+
 # Recusa antecipada quando o stdin não é um terminal.
 #
 # As perguntas usam `read -rp`, que o bash só imprime quando o stdin é terminal.
@@ -2785,16 +2955,77 @@ should_run() {
 #   marcaria o módulo como configurado sem funcionar.
 #
 # O default continua sendo NÃO. Sem a flag, um Enter não instala nada.
+# Sem `--defaults` e sem terminal, há dois casos que precisam de respostas
+# diferentes, e confundi-los custou um dia de trabalho.
+#
+# O caso BOM é o pipe de propósito: `curl ... | bash`. O script chegou pela
+# entrada padrão, não tem onde se ler, e a única coisa que pode fazer é se colocar
+# no disco. Recusar aqui seria recusar o caminho de instalação mais direto que
+# existe, e sem motivo: o script tem a URL, tem o `curl`, e tem o que fazer.
+#
+# O caso MAU é o pipe sem propósito: `./setup.sh < /dev/null` em CI, um
+# redirecionamento qualquer. Aqui o script está no disco e a recusa vale — ele
+# perguntaria coisas e o `read` morreria no fim da entrada, sem mensagem, no meio.
+#
+# A diferença entre os dois é uma, e é verificável: de onde o script veio.
 if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
-    echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
-    echo "" >&2
-    echo "stdin não é um terminal (pipe, redirecionamento ou CI). Nessas condições o" >&2
-    echo "comportamento seria morrer no meio, sem aviso, em vez de recusar — por isso" >&2
-    echo "a recusa é aqui." >&2
-    echo "" >&2
-    echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
-    echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
-    echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
+    # Veio de um arquivo que existe? Então o pipe é acidental e a recusa vale.
+    if [ -f "${BASH_SOURCE[0]}" ] && [ -s "${BASH_SOURCE[0]}" ]; then
+        echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
+        echo "" >&2
+        echo "stdin não é um terminal (pipe, redirecionamento ou CI), e este script está" >&2
+        echo "no disco — então o pipe é acidental. O comportamento seria morrer no meio," >&2
+        echo "sem aviso, em vez de recusar — por isso a recusa é aqui." >&2
+        echo "" >&2
+        echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
+        echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
+        echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
+        exit 1
+    fi
+
+    # Veio pela entrada padrão: este é o caminho de instalação. Se a URL de
+    # origem é conhecida, ele se obtém; se não é, diz como chamá-lo.
+    #
+    # E antes: veio por pipe SEM nenhum argumento? Essa é a combinação perigosa,
+    # e ela é mais provável do que parece. `curl -fsSL URL | bash` é a forma que
+    # todo mundo escreve e ela FUNCIONA — o script inteiro roda, com o perfil
+    # `host`. Numa VM de agentes, isso provisiona a camada da máquina de trabalho
+    # e não a da fronteira, sem aviso e com exit 0.
+    #
+    # A causa é do bash: sem o `-s`, o primeiro argumento depois do pipe vira nome
+    # de arquivo. Então `| bash --profile=vm` morre com "No such file or
+    # directory" — erro visível —, e `| bash` sem nada roda errado — erro
+    # invisível. O segundo é o que precisa de defesa.
+    if [ "$#" -eq 0 ] && [ -z "${SETUP_ORIGIN:-}" ]; then
+        echo "Este script veio por pipe sem nenhum argumento, e isso instala o perfil" >&2
+        echo "'host' — a camada da máquina de trabalho, não a da VM de agentes." >&2
+        echo "" >&2
+        echo "Para uma VM de agentes, o comando completo é:" >&2
+        echo "" >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh \\"
+        echo "    | bash -s -- --profile=vm --defaults" >&2
+        echo "" >&2
+        echo "O '-s --' não é decoração: sem ele, '--profile=vm' vira nome de arquivo" >&2
+        echo "e o bash morre. E sem '--' os argumentos somem, e o perfil vira 'host'." >&2
+        echo "" >&2
+        echo "Se a intenção era provisionar esta máquina de trabalho, siga com:" >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh \\"
+        echo "    | bash -s -- --profile=host" >&2
+        exit 1
+    fi
+
+    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
+    if [ -n "$SETUP_ORIGIN" ]; then
+        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
+        echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
+        echo "      sudo dnf install -y curl" >&2
+        exit 1
+    fi
+    _se_colocar_no_disco_e_reexecutar "$_url_base" "$SETUP_DESTINO" "$@"
+    echo "ERRO: não consegui me montar no disco. A saída acima diz o motivo." >&2
     exit 1
 fi
 
