@@ -1442,6 +1442,34 @@ setup_open_design_serve() {
     return 1
 }
 
+# O clone do OpenDesign, compartilhado pelos dois modos.
+#
+# Ele vivia dentro de `_setup_open_design_native`, e o modo container nao tinha
+# clone nenhum: comecava em `local D="$OPENDESIGN_SRC/deploy"` e seguia, como se o
+# repositorio ja estivesse na mao. Numa maquina nova ele nao esta, e o modulo
+# falhava com "Falta .../deploy/docker-compose.yml" — que aponta para um arquivo
+# e nao para a ausencia do clone que o produziria.
+#
+# Os dois modos precisam do repositorio: o nativo compila de fonte, e o container
+# le o `deploy/docker-compose.yml` de dentro dele. O que e do nativo sozinho e o
+# `pnpm install` do build, e esse continua onde estava.
+_garantir_clone_open_design() {
+    if [ -d "$OPENDESIGN_SRC/.git" ]; then
+        return 0
+    fi
+    echo -e "${BLUE}  Clonando o OpenDesign (modo $OPENDESIGN_MODE)…${NC}"
+    mkdir -p "$(dirname "$OPENDESIGN_SRC")"
+    if ! git clone -q --depth 1 "$OPENDESIGN_REPO_URL" "$OPENDESIGN_SRC"; then
+        # `rm -rf` de um clone parcial: sem isso o proximo run acha o diretorio e
+        # pula o clone, e falha depois num `pnpm` que nao existe — o sintoma de um
+        # clone malformado no lugar do sintoma do clone que falhou.
+        rm -rf "$OPENDESIGN_SRC"
+        echo -e "${YELLOW}Não consegui clonar o OpenDesign de $OPENDESIGN_REPO_URL.${NC}" >&2
+        return 1
+    fi
+    return 0
+}
+
 _setup_open_design_native() {
     _open_design_exclusive || return 1
 
@@ -1573,18 +1601,9 @@ _setup_open_design_native() {
     fi
     echo -e "${BLUE}  pnpm em uso: $pnpm_ver${NC}"
 
-    # O modo nativo compila de fonte e nao tem imagem para baixar, entao o repo
-    # e clonado aqui. Antes este passo IMPRIMIA um placeholder e parava, o que
-    # transformava a instalacao em manual — o README tinha a URL, o script nao.
-    if [ ! -d "$OPENDESIGN_SRC/.git" ]; then
-        echo -e "${BLUE}Clonando o OpenDesign…${NC}"
-        mkdir -p "$(dirname "$OPENDESIGN_SRC")"
-        git clone -q --depth 1 "$OPENDESIGN_REPO_URL" "$OPENDESIGN_SRC" || {
-            rm -rf "$OPENDESIGN_SRC"
-            echo -e "${YELLOW}Não consegui clonar o OpenDesign de $OPENDESIGN_REPO_URL.${NC}" >&2
-            return 1
-        }
-    fi
+    # O repo e clonado aqui, mas pela rotina compartilhada: o modo container
+    # precisa dele tambem, e ele nao tinha clone nenhum.
+    _garantir_clone_open_design || return 1
 
     if [ ! -d "$OPENDESIGN_SRC/node_modules" ]; then
         echo -e "${BLUE}Instalando as dependencias (a etapa longa, ~1,5 GB)…${NC}"
@@ -1830,9 +1849,18 @@ _setup_open_design_container() {
         return 1
     fi
 
+    # O clone ANTES de qualquer uso dele. Este modo nao tinha clone algum, e o
+    # `Falta .../docker-compose.yml` que ele reclamava era consequencia, e nao
+    # causa: o arquivo nao existia porque o repositorio nunca tinha sido clonado.
+    # A mensagem continuaria correta e continuaria apontando para o lugar errado.
+    _garantir_clone_open_design || return 1
+
     local D="$OPENDESIGN_SRC/deploy"
     [ -f "$D/docker-compose.yml" ] || {
-        echo -e "${YELLOW}Falta $D/docker-compose.yml.${NC}" >&2; return 1; }
+        echo -e "${YELLOW}Falta $D/docker-compose.yml depois de clonar.${NC}" >&2
+        echo -e "${YELLOW}  O repositorio foi baixado mas nao tem deploy/: ${NC}" >&2
+        echo -e "${YELLOW}  git -C $OPENDESIGN_SRC log --oneline -1${NC}" >&2
+        return 1; }
 
     # A origem da tailnet na lista de permitidos. A base do compose JA tem a
     # linha certa (OD_ALLOWED_ORIGINS <- OPEN_DESIGN_ALLOWED_ORIGINS); o que
@@ -2245,7 +2273,48 @@ sync_device_keys_from_github() {
 
     local dir="$HOME/.ssh"
     ( umask 077; mkdir -p "$dir" )
-    if cat "$novo" > "$ak.novo" 2>/dev/null && mv "$ak.novo" "$ak" 2>/dev/null; then
+    # So reescreve quando o conteudo MUDA. O `mv` incondicional deixava o mtime do
+    # authorized_keys advancedo em todo run, mesmo com o arquivo identico — e o
+    # teste de idempotencia (medido nesta sessao, no container) acusava
+    # "mtime nao mudou: esperado N, obtido N+1" num run cujo conteudo estava
+    # certo. A leitura que a maquina faz e a do sshd, e o sshd nao cares de mtime;
+    # quem cares e quem vigia mudancas no arquivo — e um arquivo reescrito a cada
+    # execucao sem mudanca parece mudanca onde nao houve.
+    #
+    # O `cmp` compara o conteudo byte a byte. Com conteudo igual, o arquivo fica
+    # como esta, e o `chmod`/`restorecon` do ramo de dentro ainda correm: eles
+    # consertam o que precisa ser consertado (modo, contexto SELinux) sem mudar o
+    # conteudo nem o mtime.
+    #
+    # E o `cmp` NAO pode estar com o erro escondido. Medido nesta sessao, num
+    # container sem `diffutils`: `cmp` nao existe, `cmp -s ... 2>/dev/null` devolve
+    # "nao zero" — o mesmo codigo de "os arquivos diferem" — e o `if` caia no ramo
+    # de reescrever. O arquivo era identico e mesmo assim era reescrito, que e o
+    # exato defeito que esta mudanca veio corrigir. Um `2>/dev/null` em volta de
+    # uma comparacao transforma "a ferramenta nao esta" em "o conteudo mudou", e
+    # as duas coisas levam a caminhos opostos.
+    #
+    # Sem `cmp`, a comparacao e feita por hash, que e o que o proprio modulo ja usa
+    # para o conteudo. Sem nenhuma das duas, o arquivo e reescrito — que e o
+    # comportamento seguro, e nao uma comparacao silenciosamente falsa.
+    _mudar=1
+    _igual=1
+    if [ -e "$ak" ]; then
+        if command -v cmp >/dev/null 2>&1; then
+            cmp -s "$novo" "$ak" || _igual=0
+        else
+            _h1=$(md5sum < "$novo" 2>/dev/null | cut -d" " -f1)
+            _h2=$(md5sum < "$ak" 2>/dev/null | cut -d" " -f1)
+            [ -n "$_h1" ] && [ "$_h1" = "$_h2" ] || _igual=0
+        fi
+    else
+        _igual=0
+    fi
+    if [ "$_igual" -eq 1 ]; then
+        _mudar=0
+        rm -f "$ak.novo"
+    fi
+    if { [ "$_mudar" -eq 0 ] || { cat "$novo" > "$ak.novo" 2>/dev/null && mv "$ak.novo" "$ak" 2>/dev/null; }; }; then
         chmod 700 "$dir" 2>/dev/null || true
         chmod 600 "$ak" 2>/dev/null || true
         # SELinux está Enforcing nas duas máquinas, e contexto errado no
@@ -2971,8 +3040,54 @@ _se_colocar_no_disco_e_reexecutar() {
 # perguntaria coisas e o `read` morreria no fim da entrada, sem mensagem, no meio.
 #
 # A diferença entre os dois é uma, e é verificável: de onde o script veio.
+# ── Veio por pipe? O script não está no disco: ele se coloca no disco. ──────
+#
+# ESTE `if` fica ANTES do do pipe acidental, e é separado dele. A montagem
+# estava dentro do tratamento do pipe acidental, que é condicional a
+# `--defaults` — e o caminho do `curl` é não-terminal COM `--defaults`, então a
+# condição nunca era verdadeira e a montagem nunca rodava.
+#
+# O motivo de a montagem ser necessária em qualquer caso é que `SCRIPT_DIR` é o
+# diretório de onde a pessoa digitou, quando o script vem de um pipe. E
+# `SCRIPT_DIR` não é cosmético: o módulo do `zshrc` faz `ln -s "$SCRIPT_DIR/zshrc"`
+# e o `gh-app` instala `"$SCRIPT_DIR/bin/gh-app-token.sh"`. Com o `SCRIPT_DIR`
+# errado, os dois fabricam caminhos que não existem, e o primeiro deixa um symlink
+# quebrado na máquina.
+if [ ! -t 0 ] && [ ! -s "${BASH_SOURCE[0]:-}" ]; then
+    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
+    if [ -n "$SETUP_ORIGIN" ]; then
+        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
+        echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
+        echo "      sudo dnf install -y curl" >&2
+        exit 1
+    fi
+    if ! _se_colocar_no_disco_e_reexecutar "$_url_base" "$SETUP_DESTINO" "$@"; then
+        # A montagem FALHOU, e sem isto o script continuaria: os módulos usariam um
+        # `SCRIPT_DIR` que é o diretório de onde a pessoa digitou, e o módulo do
+        # `zshrc` criaria um symlink quebrado em `$HOME`. Medido na VM nova.
+        echo "ERRO: não consegui me montar no disco, e sem isso os módulos" >&2
+        echo "      usariam um caminho errado. A saída acima diz o motivo." >&2
+        exit 1
+    fi
+    exit 1
+fi
+
+# ── O script está no disco e a entrada não é terminal: pipe acidental ───────
+#
+# Sem `--defaults` e sem terminal, há dois casos que precisam de respostas
+# diferentes, e confundi-los custou um dia de trabalho.
+#
+# O caso BOM é o pipe de propósito: `curl ... | bash`. O script chegou pela
+# entrada padrão, não tem onde se ler, e a única coisa que pode fazer é se colocar
+# no disco — o que o `if` acima já fez.
+#
+# O caso MAU é o pipe sem propósito: `./setup.sh < /dev/null` em CI. Aqui o
+# script está no disco e a recusa vale — ele perguntaria coisas e o `read` morreria
+# no fim da entrada, sem mensagem, no meio.
 if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
-    # Veio de um arquivo que existe? Então o pipe é acidental e a recusa vale.
     if [ -f "${BASH_SOURCE[0]}" ] && [ -s "${BASH_SOURCE[0]}" ]; then
         echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
         echo "" >&2
@@ -4608,8 +4723,61 @@ if should_run "zshrc"; then
     echo -e "\n${BLUE}==> zsh como shell de login${NC}"
     sudo dnf install -y --skip-unavailable zsh zsh-autosuggestions zsh-syntax-highlighting
     link_zshrc
-    if [ "$SHELL" != "$(command -v zsh)" ]; then
-        sudo chsh -s "$(command -v zsh)" "$USER" && echo -e "${GREEN}✓ Shell padrão alterado para zsh (efeito no próximo login).${NC}"
+    # ── o shell de login, medido pelo ESTADO e nao pelo `&&` do `chsh` ────────
+    #
+    # Medido no container, com um usuario de teste:
+    #
+    #     $ chsh -s /bin/bash tester     # o shell que ele JA tinha
+    #     Changing shell for tester.
+    #     chsh: Shell not changed.
+    #     exit=0
+    #
+    # O `chsh` sai com 0 QUANDO NAO MUDOU NADA. E o `man` diz "0 se a operacao
+    # deu certo, 1 se falhou" — o que, para quem le, parece "0 = shell trocado".
+    # Com o `&&` do jeito antigo, o script imprimia
+    #
+    #     ✓ Shell padrão alterado para zsh
+    #
+    # depois de um `chsh` que tinha dito "Shell not changed.". Foi assim que o
+    # log mentiu na VM nova: a mensagem de sucesso estava lá, e o shell não tinha
+    # mudado. `&&` so protege quando a ferramenta usa o codigo de saida para
+    # distinguir "fiz" de "nao tinha nada a fazer" — e o `chsh` nao distingue.
+    #
+    # E o guard antigo comparava `$SHELL`, que e o shell do PROCESSO (herdado de
+    # quem abriu a sessao), nao o shell de LOGIN do usuario. Sao coisas diferentes:
+    # o `$SHELL` pode ja ser o zsh com o passwd ainda em bash, ou o contrario.
+    # Quem responde "qual e o shell de login" e a entrada do passwd, e ela e
+    # legivel sem privilegio.
+    _shell_login() { getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7; }
+    _zsh_alvo="$(command -v zsh || true)"
+    if [ -z "$_zsh_alvo" ]; then
+        echo -e "${YELLOW}zsh nao instalado; o shell de login ficou como estava.${NC}" >&2
+    else
+        _shell_atual="$(_shell_login)"
+        if [ "$_shell_atual" = "$_zsh_alvo" ]; then
+            echo -e "${GREEN}✓ Shell de login ja e zsh (${_zsh_alvo}).${NC}"
+        else
+            echo -e "${BLUE}  Shell de login atual: ${_shell_atual:-desconhecido}${NC}"
+            if sudo chsh -s "$_zsh_alvo" "$(id -un)"; then
+                # O `chsh` nao serve como prova: ele sai com 0 sem mudar nada.
+                # A prova e a entrada do passwd DEPOIS.
+                if [ "$(_shell_login)" = "$_zsh_alvo" ]; then
+                    echo -e "${GREEN}✓ Shell de login alterado para zsh (${_zsh_alvo}); efeito no proximo login.${NC}"
+                else
+                    # `$(_shell_login)`, e nao `${_shell_login:-desconhecido}`: os
+                    # parenteses sao a chamada da funcao. Com chaves, isso e
+                    # expansao de uma variavel cujo NOME e o valor da funcao — e o
+                    # resultado e a string "desconhecido", sempre. A frase saia
+                    # "`continua desconhecido`" mesmo com o shell a vista, o que e
+                    # pior que nao dizer nada: aponta para o lugar errado.
+                    echo -e "${YELLOW}O chsh disse que foi, mas o shell de login continua $(_shell_login).${NC}" >&2
+                    echo -e "${YELLOW}  Verifique: getent passwd $(id -un)${NC}" >&2
+                fi
+            else
+                echo -e "${YELLOW}O chsh falhou (saida diferente de zero); o shell de login continua ${_shell_atual:-desconhecido}.${NC}" >&2
+                echo -e "${YELLOW}  O zsh precisa estar em /etc/shells para o chsh aceitar.${NC}" >&2
+            fi
+        fi
     fi
 fi
 

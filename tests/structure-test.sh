@@ -215,7 +215,7 @@ echo "        instalar=$inst  remover=$((rem-2))  readme=$rd"
     m=$(stat -c '%a' "$d" 2>/dev/null || echo "?")
     printf '        %-28s modo %s\n' "$d" "$m"
   done
-  if grep -nE '\[ +!?-f +/etc/' setup.sh | grep -v 'sshd_config' | grep -q .; then
+  if grep -nE '\[ +!?-f +/etc/' setup.sh | grep -v 'sshd_config' | grep -c . >/dev/null; then
     ok "os únicos -f absolutos em /etc são os de arquivos soltos"
   fi
 
@@ -234,7 +234,7 @@ echo "== o shim de gh, e so no perfil vm =="
 # (o `codigo` abaixo e derivado deste arquivo; a variavel `r` foi eliminada para
 # que nenhuma checagem possa ler o objeto errado por heranca de nome)
 if grep -A1 'if \[ "\$PROFILE" = "vm" \] && \[ -n "\$_real_gh" \]; then' <<<"$codigo" \
-     | grep -q 'local/bin/gh'; then
+     | grep -c 'local/bin/gh' >/dev/null ; then
   ok "o shim de gh e instalado sob o perfil vm"
 else
   falha "o shim de gh nao esta sob o perfil vm"
@@ -476,7 +476,7 @@ echo "== o 'tailscale up' e pendencia, e nao travamento =="
 # falha que travou o --yes antigo no handshake do gh, agora no modulo que da
 # acesso a maquina.
 if grep -q 'sudo tailscale up' <<<"$codigo"; then
-  if grep -B12 'sudo tailscale up' <<<"$codigo" | grep -q 'ASSUME_DEFAULTS'; then
+  if grep -B12 'sudo tailscale up' <<<"$codigo" | grep -c 'ASSUME_DEFAULTS' >/dev/null ; then
     ok "o 'tailscale up' e pulado sob --defaults"
   else
     falha "o 'tailscale up' roda sem guarda: trava o --defaults numa VM nova"
@@ -484,7 +484,7 @@ if grep -q 'sudo tailscale up' <<<"$codigo"; then
 else
   falha "nao ha 'tailscale up' no script: a VM nunca entra na tailnet"
 fi
-if grep -q "sudo tailscale up'" <<<"$codigo" || grep -q 'rode .sudo tailscale up' <<<"$codigo"; then
+if grep -q "sudo tailscale up'" <<<"$codigo" || grep -c 'rode .sudo tailscale up' <<<"$codigo"; then
   ok "e a pendencia diz o comando, em vez de so dizer que falhou"
 else
   falha "a pendencia do tailscale nao diz o comando que resolve"
@@ -637,11 +637,136 @@ else
   falha "o README nao avisa sobre a forma curta: e a que a pessoa vai digitar"
 fi
 
-echo "== sintaxe =="echo "== sintaxe =="
+echo "== a montagem por pipe roda TAMBEM com --defaults =="
+# O bug: a montagem estava DENTRO de `if [ ! -t 0 ] && [ ASSUME_DEFAULTS != 1 ]`,
+# que e o tratamento do pipe ACIDENTAL. O caminho do `curl` e nao-terminal COM
+# --defaults, entao a condicao e `verdadeiro E falso`, e a montagem nunca rodava.
+# Resultado medido em tres runs seguidos na VM nova: o `SCRIPT_DIR` ficava sendo o
+# diretorio de onde a pessoa digitou, e o modulo do `zshrc` criava um symlink
+# quebrado para `$HOME/zshrc`.
+#
+# A ordem e o que se verifica: a montagem ANTES do tratamento do pipe acidental.
+m_mont=$(grep -n 'if ! _se_colocar_no_disco_e_reexecutar' <<<"$codigo" | head -1 | cut -d: -f1)
+m_acid=$(grep -n 'if \[ ! -t 0 \] && \[ "\${ASSUME_DEFAULTS' <<<"$codigo" | head -1 | cut -d: -f1)
+if [ -n "$m_mont" ] && [ -n "$m_acid" ] && [ "$m_mont" -lt "$m_acid" ]; then
+  ok "a montagem ($m_mont) vem antes do pipe acidental ($m_acid)"
+else
+  falha "a montagem esta depois ou dentro do pipe acidental: com --defaults ela nunca roda"
+fi
+# E a sua propria condicao so pode ser "veio por pipe de verdade" — sem
+# --defaults e sem depender de onde a pessoa digitou.
+# A janela do `-A` precisa ser MAIOR que a distancia entre o `if` e a chamada, e
+# a primeira versao usou `-A7` contra uma distancia de 11. O grep nao achou a
+# chamada e acusou a CHEIAGEM de estar errada — quando a condicao dela estava
+# certa. Um teste que depende de uma janela magica quebra quando o codigo cresce
+# dentro dela, e o sintoma e uma acusacao falsa.
+_c_mont=$(grep -n 'if ! _se_colocar_no_disco_e_reexecutar' <<<"$codigo" | head -1 | cut -d: -f1)
+_c_if=$(grep -n 'if \[ ! -t 0 \] && \[ ! -s "\${BASH_SOURCE\[0\]:-}" \]; then' <<<"$codigo" | head -1 | cut -d: -f1)
+if [ -n "$_c_if" ] && [ -n "$_c_mont" ] && [ "$_c_mont" -gt "$_c_if" ] \
+   && [ $((_c_mont - _c_if)) -le 20 ] \
+   && awk -v a="$_c_if" 'NR>=a && NR<=a+20' <<<"$codigo" | grep -c '_se_colocar_no_disco_e_reexecutar' >/dev/null ; then
+  ok "e a condicao dela e so 'veio por pipe de verdade'"
+else
+  falha "a montagem continua condicionada a algo alem de ter vindo por pipe"
+fi
+
+echo "== os DOIS modos do OpenDesign clonam o repositorio =="
+# Medido na VM nova com o modo container (o default): o modulo reclamou
+# "Falta .../deploy/docker-compose.yml". O clone vivia dentro de
+# `_setup_open_design_native`, e o container nao tinha clone nenhum — ele usava
+# `$OPENDESIGN_SRC/deploy` como se o repositorio ja estivesse la.
+# A mensagem estava CORRETA e apontava para o lugar ERRADO: o arquivo nao existia
+# porque o clone nunca tinha sido feito.
+if grep -q '_garantir_clone_open_design' <<<"$codigo"; then
+  ok "existe uma rotina de clone compartilhada"
+else
+  falha "o clone continua dentro de um so modo, e o outro falha sem o repositorio"
+fi
+n_modos=0
+for m in '_setup_open_design_native' '_setup_open_design_container'; do
+  ini=$(grep -n "^${m}() {" <<<"$codigo" | head -1 | cut -d: -f1)
+  [ -z "$ini" ] && continue
+  # O fecho e o primeiro `}` NA COLUNA 0 DEPOIS do inicio. Um `^}` achado antes
+  # (o fim de um `if` interno com o `}` indentado nao conta, mas um bloco
+  #fechado sem indentacao sim) encurtaria a janela e a funcao pareceria nao ter
+  # a chamada. Por isso a busca comeca DEPOIS da linha de inicio.
+  fim=$(awk -v s="$ini" 'NR>s && /^}/ {print NR; exit}' <<<"$codigo")
+  # `grep -q` sai assim que acha, o `awk` recebe SIGPIPE, e o `pipefail` do topo da
+  # suite transforma o 141 em FALHA — mesmo com a ocorrencia la. Medido: `exit=141`
+  # com pipefail e `exit=0` sem. E o `grep -q` estava na posicao de quem
+  # encontra a linha; o `grep -c` le tudo e nao sofre com isso.
+  if awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -c '_garantir_clone_open_design' >/dev/null; then
+    n_modos=$((n_modos + 1))
+  else
+    falha "$m nao garante o clone (linhas $ini..${fim:-?})"
+  fi
+done
+if [ "$n_modos" -eq 2 ]; then
+  ok "e os dois modos o usam"
+fi
+# E um clone que falhou nao pode deixar diretorio pela metade: sem isso o
+# proximo run acha o diretorio, pula o clone, e falha num `pnpm` que nao existe —
+# o sintoma de um clone quebrado no lugar do sintoma do clone que falhou.
+if grep -A14 'if ! git clone -q --depth 1' <<<"$codigo" | grep -c 'rm -rf "\$OPENDESIGN_SRC"' >/dev/null ; then
+  ok "e um clone que falhou nao deixa diretorio pela metade"
+else
+  falha "um clone malformado fica no disco e o proximo run pula o clone"
+fi
+
+echo "== o shell de login e medido pelo passwd, nao pelo codigo de saida do chsh =="
+# Medido no container, com um usuario de teste:
+#
+#     $ chsh -s /bin/bash tester     # o shell que ele JA tinha
+#     Changing shell for tester.
+#     chsh: Shell not changed.
+#     exit=0
+#
+# O `chsh` sai com 0 QUANDO NAO MUDOU NADA, e o `man` nao avisa disso: "0 se a
+# operacao deu certo, 1 se falhou". Com o `&&` do jeito antigo, o script imprimia
+# "✓ Shell padrão alterado" depois de um chsh que tinha dito "Shell not changed."
+# — foi assim que o log mentiu na VM nova.
+#
+# A prova e a entrada do passwd depois da chamada, e nao o codigo de saida dela.
+n_chsh=$(grep -c 'chsh -s' <<<"$codigo")
+if [ "$n_chsh" -eq 1 ]; then
+  ok "o chsh aparece uma vez, e a decisao esta em volta dele"
+else
+  falha "o chsh aparece $n_chsh vez(es); a decisao precisa estar em um lugar so"
+fi
+# O `&&` do chsh e o que fabricava o sucesso. Nao pode sobrar.
+if grep 'chsh -s' <<<"$codigo" | grep -c '&&' >/dev/null; then
+  falha "o chsh ainda esta ligado por && — e ele sai com 0 sem mudar nada"
+else
+  ok "e nao esta mais ligado por &&"
+fi
+# E o estado tem de ser lido do passwd, e nao do $SHELL (que e o shell do
+# PROCESSO, herdado de quem abriu a sessao, e nao o shell de LOGIN do usuario).
+if grep -q 'getent passwd' <<<"$codigo"; then
+  ok "o shell de login e lido do passwd, e nao do \$SHELL"
+else
+  falha "o shell de login ainda vem do \$SHELL, que e o shell do processo"
+fi
+# A leitura tem de acontecer DEPOIS do chsh tambem: e a comparacao pos-chamada que
+# distingue "mudou" de "disse que mudou".
+if grep -c '_shell_login' <<<"$codigo" >/dev/null && [ "$(grep -c '_shell_login' <<<"$codigo")" -ge 3 ]; then
+  ok "e a funcao de leitura e usada antes e depois do chsh"
+else
+  falha "a leitura do passwd aparece uma vez so; sem a comparacao pos-chamada nao ha prova"
+fi
+# O padrao `${_shell_login:-desconhecido}` e o bug do,sai do parentesis. Com
+# chaves, bash expande uma variavel chamada pelo VALOR da funcao, e o resultado e
+# sempre a string "desconhecido" — a frase aponta para o lugar errado.
+if grep -c '${_shell_login' <<<"$codigo" >/dev/null; then
+  falha "tem \${_shell_login:-...}: isso nao chama a funcao, e sempre da 'desconhecido'"
+else
+  ok "e a funcao e chamada com \$(), nao com \${}"
+fi
+
+echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi
 
 echo "== nenhum caractere CJK em nenhum arquivo =="
-if python3 "$LIB/cjk-scan.py" | grep -q nenhum; then ok "sem CJK"
+if python3 "$LIB/cjk-scan.py" | grep -c nenhum >/dev/null; then ok "sem CJK"
 else falha "CJK encontrado"; fi
 
 echo
