@@ -38,6 +38,25 @@ done
 # `git`. Sem eles o harness gerava uma chave Ed25519 de verdade dentro da sandbox
 # e chamava `gh auth login -p https -w`, que abre navegador e espera um código.
 # Falsos porque a idempotência desses módulos é testada por outro caminho.
+# `openssl` entrou na lista pelo motivo medido: o run do teste 12 usa
+# `--skip=base`, e o `base` e quem instala o `openssl` (linha 3764). Sem o falso,
+# o script morre em `openssl rand -hex 32` (linha 3587) sob `set -e`, e TUDO que
+# vem depois some da saida — o `check` acusava "`==> firewalld` nao rodou", e o
+# que tinha acontecido e o script ter morrido numa linha antes.
+#
+# E o detalhe que impede um `exit 0` cego: o script usa o openssl para GERAR o
+# token, e usa a SAIDA dele. Um falso mudo daria um token vazio, e o modulo do
+# OpenDesign gravaria um `.env` sem credencial — o teste passaria e a maquina
+# ficaria sem token. Entao o falso gera um hex do tamanho que o script espera.
+cat > "$BIN/openssl" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+rand) printf '%s\n' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ;;
+*) exit 0 ;;
+esac
+EOF
+chmod +x "$BIN/openssl"
+
 for c in gh git ssh-keygen ssh-add ssh-agent ssh; do
   cat > "$BIN/$c" <<'EOF'
 #!/usr/bin/env bash

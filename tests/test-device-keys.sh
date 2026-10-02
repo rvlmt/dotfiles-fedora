@@ -73,7 +73,26 @@ echo
 
 echo "== 2. segunda execucao, mesmo feed: idempotente =="
 antes=$(md5sum "$(ak)" | cut -d' ' -f1); mt=$(stat -c %Y "$(ak)")
-sleep 1; run >/dev/null
+# O `sleep` existe so para o arquivo poder ter um mtime DIFERENTE do que tinha, se
+# o script o reescrever. E um segundo inteiro nao garante isso: a virada de segundo
+# acontece na grade, e `sleep 1` pode sair no mesmo segundo em que entrou.
+# Medido neste host e num container: `sleep 1.2` deu delta=0 nos DOIS.
+#
+# Entao o teste espera ate o segundo virar DE FATO, e so entao roda:
+#
+#     while [ "$(stat -c %Y AGORA)" = "$mt" ]; do sleep 0.2; ...; done
+#
+# Sem isso o check de mtime mede a grade de segundos, e nao o script: um run
+# perfeitamente idempotente pode ser acusado de ter reescrito o arquivo. Era o
+# que acontecia, com `sleep 1` — e a falha era do teste.
+_agora="$(date +%s)"
+_t=0
+while [ "$_agora" = "$mt" ] && [ "$_t" -lt 25 ]; do
+    sleep 0.2
+    _agora="$(date +%s)"
+    _t=$((_t + 1))
+done
+run >/dev/null
 checar "conteudo nao mudou"   "$antes"          "$(md5sum "$(ak)" | cut -d' ' -f1)"
 checar "mtime nao mudou"      "$mt"             "$(stat -c %Y "$(ak)")"
 checar "3 chaves no bloco"    "$(chaves_no_bloco)" "3"

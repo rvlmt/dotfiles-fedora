@@ -12,15 +12,33 @@ Aqui a entrada e entregue em fatias: cada vez que o pty fica em silencio por uma
 fracao de segundo (isto e, o prompt foi pintado e o shell esta esperando), manda a
 proxima linha. E o fim do arquivo vira EOF de verdade, fechando a entrada.
 """
+import fcntl
 import os
 import pty
 import select
 import signal
+import struct
 import sys
+import termios
 import time
 
 if len(sys.argv) < 3:
     sys.exit("uso: ptyfile2.py <arquivo-de-entrada> <comando> [args...]")
+
+# O tamanho do pty e FIXADO, e nao herdado do terminal de quem roda.
+#
+# `pty.fork()` copia o winsize do terminal atual. O `setup.sh` escreve varias
+# linhas por bloco, e o terminal quebra a linha conforme a largura; com um pty
+# estreito a saida ganha mais quebras, o pty devolve mais bytes, e o `run_pty`
+# capta uma forma diferente da mesma coisa. O efeito observado na suite, num
+# container sem terminal: a saida parava em "Nome completo para o Git" e quatro
+# checks acusavam modulos que nem tinham comecado — o pty e o ambiente, e a leitura
+# apontava para o `setup.sh`.
+#
+# E o mesmo principio da regra da suite: um teste que depende da conta, do
+# terminal e do cwd de quem roda nao mede o codigo, mede a pessoa.
+COLS = int(os.environ.get("PTYFILE_COLS", "120"))
+LINES = int(os.environ.get("PTYFILE_LINES", "400"))
 
 dados = open(sys.argv[1], "rb").read()
 linhas = dados.splitlines(keepends=True)
@@ -31,12 +49,35 @@ if pid == 0:
     os.environ["TERM"] = "dumb"
     os.execvp(cmd[0], cmd)
 
+# No PAIS, logo depois do fork: o filho ja pode ter saido, mas o winsize do pty
+# ainda pode ser ajustado enquanto ele nao leu nada. `TIOCSWINSZ` aqui, e nao no
+# filho, porque o filho nao tem o `fd` do pty.
+try:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", LINES, COLS, 0, 0))
+except OSError:
+    pass
+
 saida = b""
 enviados = 0
 silencio = 0.0          # segundos em que o pty nao devolveu nada
 ultimo_envio = 0.0
 ultimo_saida = time.time()   # quando o pty devolveu algo pela ultima vez
-LIMITE = float(os.environ.get("PTYFILE_TIMEOUT", "90"))
+# O `LIMITE` conta a VIDA do run, e nao o silencio — e o loop so termina por ele
+# enquanto o pty esta produzindo. Por isso ele precisa ser generoso: um modulo
+# longo (o `base` faz `dnf upgrade` de 835 pacotes) passa dos 90s default com o
+# pty ativo, e o driver encerra o filho no meio.
+#
+# Medido nesta sessao, num container: com `PTYFILE_TIMEOUT` no default, quatro
+# checks falhavam todos no MESMO ponto — a saida parava no banner e na primeira
+# pergunta, e os modulos que vinham depois nunca apareciam. O `check` acusava
+# "`==> firewalld` nao rodou"; o que acontecia e o driver matando o processo, e o
+# sintoma e indistinguivel do modulo ter falhado. Com `PTYFILE_TIMEOUT=600` os
+# mesmos quatro checks passaram.
+#
+# O `IDLE` (240s sem saida) continua sendo o parametro que distingue "trabalhando"
+# de "travado", e e ele que deve derrubar um processo pendurado. O `LIMITE` e so
+# um teto de seguranca, e por isso e alto.
+LIMITE = float(os.environ.get("PTYFILE_TIMEOUT", "1800"))
 fim = time.time() + LIMITE
 
 while time.time() < fim:

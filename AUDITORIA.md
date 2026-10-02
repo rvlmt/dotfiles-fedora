@@ -1008,3 +1008,185 @@ a §10.14 conta o resto.
 
 ---
 
+### Os cinco que a roda seguinte derrubou
+
+Todos medidos, e quase todos nasciam de **uma checagem que não podia falhar** ou de
+**um código de saída que significa outra coisa**. Nenhum deles apareceria numa
+máquina já provisionada, e quatro não apareceriam numa revisão de código — só
+rodando.
+
+#### 1. O `chsh` sai com 0 quando não muda nada
+
+O script anunciava a troca do shell de login com `&&`:
+
+```bash
+sudo chsh -s "$(command -v zsh)" "$USER" && echo "✓ Shell padrão alterado"
+```
+
+Medido num container, com um usuário de teste:
+
+```
+$ chsh -s /bin/bash tester     # o shell que ele JÁ tinha
+Changing shell for tester.
+chsh: Shell not changed.
+exit=0
+```
+
+O `man` do util-linux diz *"0 se a operação deu certo, 1 se falhou"*, e isso
+lê-se como "0 = trocou". O `&&` não protegia nada, e o log dizia
+`✓ Shell padrão alterado` depois de um `chsh` que tinha dito `Shell not changed.`
+
+O guard também comparava a coisa errada: `$SHELL` é o shell do **processo**,
+herdado de quem abriu a sessão, não o shell de **login** do usuário. Quem responde
+é a entrada do passwd, legível sem privilégio.
+
+Agora o bloco mede o passwd antes e depois, e tem um ramo a mais para cada
+resultado possível: já é zsh, mudou, o `chsh` disse que mudou e não mudou, e o
+`chsh` falhou. O `✓` só sai quando a **entrada do passwd** mudou.
+
+Na reescrita apareceu um terceiro defeito, do mesmo tipo:
+`${_shell_login:-desconhecido}` é expansão de uma variável cujo *nome* é o valor
+da função — o resultado é a string `desconhecido`, sempre. Com `$()` na volta, a
+frase passou a dizer o shell real.
+
+#### 2. O clone do OpenDesign só existia no modo `nativo`
+
+O modo `container` — que é o default desde a #86 — **não tinha clone nenhum**.
+Começava em `local D="$OPENDESIGN_SRC/deploy"` e seguia, como se o repositório já
+estivesse na mão:
+
+```
+==> OpenDesign
+Falta /home/agent/Developer/open-design/deploy/docker-compose.yml.
+```
+
+A mensagem estava correta e apontava para o lugar errado: o arquivo não existia
+porque o clone nunca tinha sido feito. É a assinatura de um diagnóstico que
+descreve o sintoma em vez da causa — e por isso ela resistiu a três rodadas.
+
+O clone virou a rotina compartilhada `_garantir_clone_open_design`, e um clone que
+falha remove o diretório pela metade: senão o próximo run acha o diretório, pula o
+clone, e falha num `pnpm` que não existe.
+
+#### 3. `grep -q` + `pipefail` = `exit 141`
+
+Um check acusava uma função de "não chamar a rotina de clone". O `grep -q` sai
+assim que acha a linha, o `awk` do outro lado do pipe recebe `SIGPIPE`, e o
+`pipefail` do topo da suíte transforma o 141 em falha — **com a ocorrência lá
+dentro**:
+
+```
+com pipefail:  exit=141
+sem pipefail:  exit=0
+```
+
+O sintoma mentia: a condição estava certa. Sete checagens da suíte tinham o mesmo
+padrão; todas foram trocadas por `grep -c ... >/dev/null`, que lê tudo.
+
+#### 4. Um `2>/dev/null` que dizia "o conteúdo mudou"
+
+Ao tornar a reescrita do `authorized_keys` condicional ao conteúdo, veio:
+
+```bash
+if [ -e "$ak" ] && cmp -s "$novo" "$ak" 2>/dev/null; then
+```
+
+Num container sem `diffutils`, `cmp` não existe. `cmp -s ... 2>/dev/null` devolve
+"não zero" — **o mesmo código de "os arquivos diferem"** — e o `if` caía no ramo
+de reescrever. O arquivo era idêntico e mesmo assim era reescrito, que é o exato
+defeito que a mudança veio corrigir.
+
+Um `2>/dev/null` em volta de uma **comparação** transforma "a ferramenta não
+está" em "o conteúdo mudou", e as duas coisas levam a caminhos opostos. Agora há
+`command -v cmp` explícito, com queda para hash, e sem nenhuma das duas o
+arquivo é reescrito — que é o comportamento seguro.
+
+#### 5. O pty matava o processo, e a leitura apontava para o script
+
+Quatro checks do `profile-axis` falhavam todos **no mesmo ponto**: a saída parava
+no banner e na primeira pergunta, e os módulos seguintes nunca apareciam. O `check`
+acusava "`==> firewalld` não rodou".
+
+O `ptyfile2.py` tinha `PTYFILE_TIMEOUT=90`, contando a **vida inteira** do run.
+Um módulo longo passa dos 90s com o pty ativo, e o driver encerra o filho no meio.
+O sintoma é indistinguível do módulo ter falhado. Com `PTYFILE_TIMEOUT=600` os
+quatro passaram.
+
+O `IDLE` (240s sem saída) continua sendo o parâmetro que distingue "trabalhando"
+de "travado" — e é ele que deve derrubar um processo pendurado. O `LIMITE` é só
+um teto de segurança, e por isso agora é alto.
+
+A **causa raiz** desse era outra, e só apareceu porque o sintoma foi seguido até o
+fim: `openssl: command not found`, linha 3587. O `set -e` matou o script inteiro,
+e tudo depois sumiu. O `base` instala o `openssl` (linha 3764) e o teste 12 usa
+`--skip=base` — então o harness passou a falsificar `openssl`, como já fazia com
+`git`, `gh` e `curl`. E o falso **não** é um `exit 0` cego: o script usa o
+`openssl` para *gerar* o token e usa a *saída* dele, e um falso mudo gravaria um
+`.env` sem credencial.
+
+#### O padrão, que é o mesmo dos outros quatro
+
+Cinco defeitos, e quatro deles são a mesma coisa sob dressups diferentes:
+
+> **Uma verificação que não pode falhar, ou um código de saída que significa outra
+> coisa, produz um relatório que não é sobre o sistema.**
+
+O `&&` do `chsh`, o `2>/dev/null` do `cmp`, o `grep -q` com `pipefail` e o
+`PTYFILE_TIMEOUT` contando vida em vez de silêncio são, cada um, uma checagem
+confiante que não estava checando. E em todos os quatro o sintoma apontava para
+o **script** quando o culpado era o **teste**.
+
+A correção que fecha o padrão não é "cuidar mais": é **não existir uma checagem
+cujo resultado não possa ser o oposto do que ela diz**. Daí as três decisões que
+vieram com esta rodada:
+
+- o `check` do caso "com o bug" só é executado se o caminho certo montou, senão
+  ele passa por acidente — que é um `check_not` que não pode falhar;
+- o check do "re-exec saiu com 0" tem a mesma guarda, porque um script que não
+  fez nada também sai com 0;
+- `tests/lib/teste-chsh-por-estado.py` casa com a **frase que o código diz**, e
+  recusa a frase proibida. A primeira versão casava com tokens do próprio harness
+  (`MUDOU_OK`, `CHSH_MENTIU`) e deu 0 ok / 5 falhas com o código certo.
+
+E há um quarto item que não é defeito do script, e sim uma **falsa premissa**:
+
+> Um teste não pode depender de quem o roda.
+
+O `ptyfile2.py` herdava o tamanho do terminal de quem executa; o
+`test-device-keys.sh` usava `sleep 1` e torcia pela virada de segundo — medido no
+host e no container, `sleep 1.2` deu `delta=0` nos dois. O `pty` agora tem winsize
+fixo e o `sleep` espera a **condição**, não um número.
+
+#### Verificado nos dois sentidos
+
+Nenhum dos testes novos é aceito por ter passado uma vez:
+
+| teste | com o código certo | com o defeito de volta |
+|---|---|---|
+| `teste-pipe-defaults-completo.py` | 5 ok, `exit 0` | **0 ok, 4 falhas** |
+| `teste-chsh-por-estado.py` | 4 ok, `exit 0` | 3 de 5 checagens estruturais falham |
+| `ptyfile2.py` com `PTYFILE_TIMEOUT=90` | 4 checks falham | 4 checks passam |
+
+E a primeira versão do `teste-pipe-defaults-completo.py` **não rodava como root**:
+o `setup.sh` recusa root antes de montar, então tudo falhava por permissão — e o
+caso "com o bug" dava `ok` porque nele a montagem também não acontecia. Era um
+`check_not` que não podia falhar, encontrado pelo caminho errado: ele só apareceu
+quando o container rodou como `uid=1000`.
+
+**Estado medido ao fim:** suíte completa num container descartável local,
+**6 arquivos, todos `ok`, `exit 0`** — 106 checagens no `profile-axis`, 5 no
+caminho completo, 4 no `chsh`.
+
+### O arquivo reescrito sem mudar
+
+O `test-device-keys.sh` esperava que o `authorized_keys` **não** mudasse de mtime
+num run idempotente. O `mv` do script era incondicional, e o arquivo era
+reescrito mesmo idêntico.
+
+O `setup.sh` passou a só reescrever quando o conteúdo difere — e a comparação é
+por `cmp`, com queda para hash. O `chmod` e o `restorecon` continuam rodando: eles
+consertam modo e contexto SELinux sem tocar no conteúdo nem no mtime.
+
+Um arquivo reescrito a cada execução, sem mudança nenhuma, parece mudança onde não
+houve. Ninguém que vigila `authorized_keys` distingue uma coisa da outra — e o
+`sshd` não repara, porque lê o conteúdo.
