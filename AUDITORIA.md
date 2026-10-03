@@ -1190,3 +1190,98 @@ consertam modo e contexto SELinux sem tocar no conteúdo nem no mtime.
 Um arquivo reescrito a cada execução, sem mudança nenhuma, parece mudança onde não
 houve. Ninguém que vigila `authorized_keys` distingue uma coisa da outra — e o
 `sshd` não repara, porque lê o conteúdo.
+
+### O mesmo defeito, três vezes: um passo que só existe em um caminho
+
+O §10.18 corrigiu um clone que vivia só no modo `nativo`. A rodada seguinte
+achou **o mesmo defeito** em mais dois lugares, e o terceiro só apareceu porque a
+pós-condição perguntou por estado depois de o container ter ficado healthy:
+
+| passo | onde só vivia | sintoma na VM |
+|---|---|---|
+| `git clone` do OpenDesign | modo `nativo` | `Falta .../deploy/docker-compose.yml` |
+| `tailscale serve` na `:8444` | modo `nativo` | pendência `não publicado na tailnet em :8444` |
+| `compose pull` da imagem | — (ninguém dos dois) | container não sobe |
+
+Os dois primeiros são a mesma omissão, e ela é silenciosa por construção: **o modo
+`container` chegava ao `return 0` sem nunca tentar**, e a pós-condição do run
+perguntava pelo estado de qualquer jeito. O relatório dizia `não publicado`,
+como se o modo container tivesse publicado e falhado. Ele não tinha publicado
+nada — a pergunta era justa e a resposta era sobre uma omissão que ele não podia
+cometer.
+
+E nenhum dos três apareceria numa máquina já provisionada no modo nativo, que é
+como os dois primeiros sobreviveram a todas as rodadas anteriores. O modo nativo
+é o caminho que ninguém testa, porque funciona.
+
+**O padrão, aplicável a qualquer lista de caminhos:**
+
+> Quando há mais de um caminho para o mesmo efeito, os passos que são
+> **compartilhados** precisam ser funções, e não linhas duplicadas dentro do
+> primeiro caminho. Passos que só fazem sentido em um caminho — compilar de fonte,
+> puxar imagem — ficam onde estão, e a diferença entre os dois é o que se declara.
+
+O `_garantir_clone_open_design` e o `setup_open_design_serve` são a forma depois
+disso: o clone compartilhado virou rotina, e o `serve` passou a ser chamado nos
+dois modos. O `pull` ficou só no container, porque compilar de fonte e baixar
+imagem são operações diferentes por natureza — não por esquecimento.
+
+E a checagem estrutural que fecha: **os dois modos chamam o passo compartilhado**.
+Ela não verifica se o passo funciona; verifica que ele não desapareceu de um dos
+caminhos, que é a forma como o defeito se manifesta.
+
+### O `curl` que falha em silêncio, e o `chsh` que mente
+
+Dois casos da mesma família, e que valem juntos porque um é no README e o outro
+no código:
+
+| o que a pessoa escreve | o que a ferramenta devolve |
+|---|---|
+| `curl -fsSL URL \| bash` com URL em 404 | `curl` sai 22, **`bash` sai 0** |
+| `chsh -s <shell> $USER` quando já é esse shell | imprime `Shell not changed.`, **sai 0** |
+
+Nos dois, o código de saída é 0 e nenhuma providência foi tomada. Nos dois, o 0 é
+lido como sucesso — e é o sinal que a pessoa procura para seguir em frente.
+
+O `chsh` é o pior dos dois porque o `man` diz *"0 se a operação deu certo, 1 se
+falhou"*, e a documentação não avisa que "não havia nada a fazer" compartilha o
+código de "fiz". O conserto foi ler a entrada do passwd depois da chamada, e não
+confiar no código de saída dela.
+
+O `curl | bash` não tem conserto no `bash`: o código de saída de um pipeline é o
+da última etapa. O conserto é `set -o pipefail` antes, e é o que o README passou
+a prescrever.
+
+**A regra que os dois Ensina:**
+
+> Antes de confiar num código de saída, leia a documentação dele procurando o caso
+> "não havia nada a fazer" — e se ele compartilha o código com "fiz", a verificação
+> tem que ser por **estado**, lida depois da chamada.
+
+É o que as pós-condições deste script já faziam por estado para os serviços, e o
+que faltava para o `chsh`.
+
+### Um link quebrado não é conteúdo
+
+`link_zshrc` tinha quatro estados para decidir e três ramos:
+
+```bash
+if   [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
+elif [ -e "$dest" ] || [ -L "$dest" ]; then
+else
+```
+
+`-e` responde sobre o **destino** (o link é seguido) e `-L` sobre o **link**. Um
+symlink quebrado satisfaz `-L` e nunca `-e`, então caía no ramo que pergunta, como
+se tivesse conteúdo. Com `--defaults`, que tem default *não*, a pergunta virava
+pendência permanente sobre um link que apontava para o vazio.
+
+Não é mudança de default: o default protege quem tem conteúdo a perder, e um link
+sem destino não tem. A distinção é ter conteúdo ou não, e ela já estava implícita
+na pergunta — faltava a condição que a faz existir.
+
+Vale a lição mais geral, porque `|| [ -L ]` é um padrão comum em shell:
+
+> **Antes de juntar dois testes num `||`, verifique se eles respondem sobre a mesma
+> coisa.** `-e` e `-L` parecem ambos "existe", e significam "o destino existe" e "o
+> link existe" — que só coincidem quando o link funciona.

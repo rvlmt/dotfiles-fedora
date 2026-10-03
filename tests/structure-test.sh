@@ -762,6 +762,84 @@ else
   ok "e a funcao e chamada com \$(), nao com \${}"
 fi
 
+echo "== os DOIS modos do OpenDesign publicam na tailnet =="
+# `setup_open_design_serve` so era chamada no fim do modo NATIVO. O container — que
+# e o DEFAULT — chegava ao `return 0` sem publicar, e a pos-condicao do run
+# perguntava por `:8444` de qualquer jeito. O resultado era uma pendencia
+# "nao publicado na tailnet em :8444" que o modo nunca tinha tentado resolver.
+#
+# Medido na VM: com o container healthy e o run no fim, a unica pendencia era
+# justamente a da porta que ninguem tinha publicado.
+#
+# E a mesma forma do bug do clone, que tambem so vivia no nativo. A regra que
+# emerge: um passo que so existe em UM dos modos e uma omissao silenciosa no
+# outro, e a pos-condicao nao distingue as duas coisas.
+n_serve=0
+for m in '_setup_open_design_native' '_setup_open_design_container'; do
+  ini=$(grep -n "^${m}() {" <<<"$codigo" | head -1 | cut -d: -f1)
+  [ -z "$ini" ] && continue
+  fim=$(awk -v s="$ini" 'NR>s && /^}/ {print NR; exit}' <<<"$codigo")
+  if awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -c 'setup_open_design_serve' >/dev/null; then
+    n_serve=$((n_serve + 1))
+  else
+    falha "$m nao publica na tailnet"
+  fi
+done
+if [ "$n_serve" -eq 2 ]; then
+  ok "e os dois modos chamam setup_open_design_serve"
+fi
+
+echo "== o modo container PUXA a imagem antes de subir =="
+# O upstream documenta o deploy em duas linhas: `compose pull` e `compose up -d
+# --no-build`. O script so fazia a segunda. Com a imagem fixada por DIGEST, o
+# `up` nao tem de onde tira-la se ela nao estiver na store local.
+n_pull=0
+ini=$(grep -n '^_setup_open_design_container() {' <<<"$codigo" | cut -d: -f1)
+fim=$(awk -v s="$ini" 'NR>s && /^}/ {print NR; exit}' <<<"$codigo")
+_pull_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -n 'pull --quiet' | cut -d: -f1)
+_up_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -n 'up -d --no-build' | cut -d: -f1)
+if [ -n "$_pull_l" ] && [ -n "$_up_l" ]; then
+  ok "o pull existe (linha $_pull_l da funcao)"
+  if [ "$_pull_l" -lt "$_up_l" ]; then
+    ok "e vem ANTES do up (linha $_up_l), como a doc upstream prescreve"
+  else
+    falha "o pull vem DEPOIS do up: o up nao tem a imagem na store"
+  fi
+else
+  n_pull=1
+  falha "o modo container nao puxa a imagem; o up falha sem ela na store"
+fi
+
+echo "== o script se identifica: versao em tres lugares =="
+# O `raw` do GitHub ja serviu versao velha desta URL varias vezes nesta sessao, e
+# a forma de saber qual script rodou e ler a versao. Um lugar so nao cobre o caso
+# em que o `curl` falha e a pessoa so tem o arquivo na mao.
+# O `$codigo` do topo e o setup.sh SEM COMENTARIOS, porque o runner usa ele para
+# nao contar o que o codigo afirma sobre o codigo. O marcador de versao e um
+# comentario POR DEFINICAO — e o shell nunca o executa, ele existe para ser lido.
+# Procurar por ele no `$codigo` da 0 sempre, que foi o que aconteceu.
+n_ver=$(grep -c 'setup.sh versão:' "$REPO/setup.sh")
+if [ "$n_ver" -ge 2 ]; then
+  ok "o marcador aparece em $n_ver lugares"
+else
+  falha "o marcador de versao aparece em $n_ver lugar(es); so nao cobre o curl falho"
+fi
+# E a constante tem de bater com o que esta impresso: um marcador que mente e
+# pior do que nenhum, porque e a unica evidencia que a pessoa tem.
+_ult=$(grep 'setup.sh versão:' "$REPO/setup.sh" | tail -1 | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-z0-9.+-]+')
+_const=$(grep -oE 'SETUP_VERSION="[^"]+"' <<<"$codigo" | head -1 | sed 's/.*="//; s/"$//')
+if [ -n "$_ult" ] && [ "$_ult" = "$_const" ]; then
+  ok "e a ultima linha e a constante dizem a mesma versao: $_ult"
+else
+  falha "a ultima linha diz '$_ult' e a constante diz '$_const' — um dos dois mente"
+fi
+# E no banner, que e o que a pessoa ve na tela.
+if grep -c 'echo -e .*setup.sh \${SETUP_VERSION}' <<<"$codigo" >/dev/null; then
+  ok "e o banner imprime a mesma constante"
+else
+  falha "o banner nao imprime a versao; quem so tem a tela nao sabe qual rodou"
+fi
+
 echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi
 
