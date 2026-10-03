@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh versão: 2026.10.03-e952827+pull-serve
+# setup.sh versão: 2026.10.03-ref-pin
 set -eo pipefail
 
 # Onde este script está em disco. Quando ele roda por pipe, `BASH_SOURCE[0]` é
@@ -34,11 +34,31 @@ REPO_SLUG="rvlmt/dotfiles-fedora"
 # mecanismo que lê o arquivo cortar o fim — o que o `bash` FAZ, quando lê pela
 # entrada padrão em fatias: um script de 265 KB que faz `exec` é lido só até o
 # ponto da troca de processo.
-SETUP_VERSION="2026.10.03-e952827+pull-serve"
+SETUP_VERSION="2026.10.03-ref-pin"
+
+# O ref de onde este script se obtem quando vem por pipe. Vazio = `main`.
+#
+# A montagem usava `main` HARDCODED, e isso fazia o `curl .../<SHA>/setup.sh`
+# rodar um OUTRO script: o da branch servia so para fazer a montagem, e o
+# `exec` rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
+# instalou (o clone do #89 esta no `main`), e as duas pendencias do #90 e do #91
+# continuaram — porque elas nunca executaram.
+#
+# E o pior detalhe: nada disso aparece. O run termina, sai com 1, e a leitura
+# natural e "as correcoes nao funcionaram", quando o que aconteceu e "as
+# correcoes nunca foram executadas". Tres rodadas foram para essa leitura.
+#
+# Quem quiser pinar o ref exporta antes do pipe:
+#
+#     SETUP_REF=<sha-ou-tag> curl ... | bash -s -- --profile=vm --defaults
+#
+# Sem isso, `main` e o comportamento padrao — e o aviso de versao logo abaixo
+# avisa quando o script montado nao e o que entrou.
+SETUP_REF="${SETUP_REF:-}"
 
 # A última linha do arquivo. Ela é um comentário, então o shell nunca a executa:
 # serve para ser lida, não para rodar.
-# setup.sh versão: 2026.10.03-e952827+pull-serve
+# setup.sh versão: 2026.10.03-ref-pin
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -3094,6 +3114,32 @@ _se_colocar_no_disco_e_reexecutar() {
 
     echo "Repositório montado em $destino_dir ($n anexo(s) além do setup.sh)." >&2
     echo "A partir daqui o script é interativo." >&2
+
+    # A versao do script MONTADO, comparada com a do script que ENTROU.
+    #
+    # A montagem baixa o `setup.sh` de novo, e de um ref proprio. Sem esta
+    # comparacao, ela pode trocar a versao em silencio — e foi assim que o
+    # `1a44d13` (com as correcoes do serve, do pull e do zshrc) virou `e952827`
+    # na maquina, sem um sinal. O run terminava, as pendencias continuavam, e a
+    # leitura natural era "as correcoes nao funcionaram".
+    #
+    # Ler a versao do arquivo montado e comparar com a deste processo e a unica
+    # forma de incipiente saber, porque as duas podem ser diferentes e nada mais
+    # na execucao diz isso.
+    local _v_montada
+    _v_montada="$(sed -n 's/^SETUP_VERSION="\(.*\)"$/\1/p' "$destino_dir/setup.sh" 2>/dev/null | head -1)"
+    if [ -n "$_v_montada" ] && [ "$_v_montada" != "$SETUP_VERSION" ]; then
+        echo "ATENCAO: o script montado e de OUTRA versao." >&2
+        echo "  entrou:  $SETUP_VERSION" >&2
+        echo "  montou:  $_v_montada   (em $destino_dir/setup.sh)" >&2
+        echo "  As correcoes da versao que entrou NAO vao rodar. Para pinar, exporte" >&2
+        echo "  SETUP_REF antes do comando, ou rode do disco em vez de por pipe." >&2
+    elif [ -z "$_v_montada" ]; then
+        # Sem `SETUP_VERSION` no arquivo montado: e um script anterior ao marcador.
+        # Isso e AVISO, nao erro — quem roda e a pessoa, e ela sabe o que
+        # pediu. Mas sem o marcador a comparacao nao existe, e vale dizer.
+        echo "aviso: o script montado nao tem marcador de versao; nao da para comparar." >&2
+    fi
     echo
 
     cd "$destino_dir" || return 1
@@ -3154,10 +3200,33 @@ _se_colocar_no_disco_e_reexecutar() {
 # errado, os dois fabricam caminhos que não existem, e o primeiro deixa um symlink
 # quebrado na máquina.
 if [ ! -t 0 ] && [ ! -s "${BASH_SOURCE[0]:-}" ]; then
-    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
-    if [ -n "$SETUP_ORIGIN" ]; then
-        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    # O ref pode vir do ambiente (para pinar) ou ficar no padrao. Sem isto, um
+    # `curl` de uma branch montava o `main` e rodava um script DIFERENTE do que a
+    # pessoa escolheu — o da branch servia so para fazer a montagem, e o `exec`
+    # rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
+    # instalou (o clone do #89 esta no `main`) e as duas pendencias do #90 e do
+    # #91 continuaram, porque elas nunca executaram.
+    _ref="${SETUP_REF:-main}"
+    # `SETUP_BASE_URL` existe para o TESTE: com ele, a montagem pode buscar em
+    # outro lugar do que o pipe buscou — que e como se reproduz a divergencia de
+    # versao. Numa maquina de verdade ela esta vazia e a URL e a do GitHub.
+    # Com `SETUP_BASE_URL` apontando para um servidor local, o caminho tem de
+    # ENTRAR pela raiz: o servidor de teste serve `/setup.sh` e nao
+    # `/<owner>/<repo>/<ref>/setup.sh`. Sem esta distincao, a montagem procura um
+    # caminho que no GitHub existe e no servidor de teste nao — e o teste falha
+    # com "nao consegui baixar", que parece rede e e geometria de URL.
+    # O servidor de teste expoe `/setup.sh` na RAIZ, sem o `ref` no caminho — ele
+    # NAO e o GitHub, e fingir que e custa um segmento inteiro. Com o ref vazio a
+    # URL local fica `/setup.sh`, que e o que o servidor serve.
+    if [ -n "${SETUP_BASE_URL:-}" ]; then
+        _url_base="${SETUP_BASE_URL%/}/"
+    else
+        _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/${_ref}"
+        if [ -n "$SETUP_ORIGIN" ]; then
+            _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/${_ref}"
+        fi
     fi
+    echo "Montando a partir do ref: $_ref (a versao que entrou: $SETUP_VERSION)" >&2
     if ! command -v curl >/dev/null 2>&1; then
         echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
         echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
@@ -3232,10 +3301,33 @@ if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
         exit 1
     fi
 
-    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
-    if [ -n "$SETUP_ORIGIN" ]; then
-        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    # O ref pode vir do ambiente (para pinar) ou ficar no padrao. Sem isto, um
+    # `curl` de uma branch montava o `main` e rodava um script DIFERENTE do que a
+    # pessoa escolheu — o da branch servia so para fazer a montagem, e o `exec`
+    # rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
+    # instalou (o clone do #89 esta no `main`) e as duas pendencias do #90 e do
+    # #91 continuaram, porque elas nunca executaram.
+    _ref="${SETUP_REF:-main}"
+    # `SETUP_BASE_URL` existe para o TESTE: com ele, a montagem pode buscar em
+    # outro lugar do que o pipe buscou — que e como se reproduz a divergencia de
+    # versao. Numa maquina de verdade ela esta vazia e a URL e a do GitHub.
+    # Com `SETUP_BASE_URL` apontando para um servidor local, o caminho tem de
+    # ENTRAR pela raiz: o servidor de teste serve `/setup.sh` e nao
+    # `/<owner>/<repo>/<ref>/setup.sh`. Sem esta distincao, a montagem procura um
+    # caminho que no GitHub existe e no servidor de teste nao — e o teste falha
+    # com "nao consegui baixar", que parece rede e e geometria de URL.
+    # O servidor de teste expoe `/setup.sh` na RAIZ, sem o `ref` no caminho — ele
+    # NAO e o GitHub, e fingir que e custa um segmento inteiro. Com o ref vazio a
+    # URL local fica `/setup.sh`, que e o que o servidor serve.
+    if [ -n "${SETUP_BASE_URL:-}" ]; then
+        _url_base="${SETUP_BASE_URL%/}/"
+    else
+        _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/${_ref}"
+        if [ -n "$SETUP_ORIGIN" ]; then
+            _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/${_ref}"
+        fi
     fi
+    echo "Montando a partir do ref: $_ref (a versao que entrou: $SETUP_VERSION)" >&2
     if ! command -v curl >/dev/null 2>&1; then
         echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
         echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
@@ -5134,4 +5226,4 @@ if [ "${#_FALHAS[@]}" -ne 0 ]; then
     exit 1
 fi
 exit 0
-# setup.sh versão: 2026.10.03-e952827+pull-serve (última linha; leia-a para saber qual script é este)
+# setup.sh versão: 2026.10.03-ref-pin (última linha; leia-a para saber qual script é este)
