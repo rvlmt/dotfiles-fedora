@@ -840,6 +840,77 @@ else
   falha "o banner nao imprime a versao; quem so tem a tela nao sabe qual rodou"
 fi
 
+echo "== a montagem nao troca a versao em silencio =="
+# O `curl .../<SHA>/setup.sh` servia so para fazer a montagem, e o `exec` rodava o
+# `main`. Medido nesta VM: o `1a44d13` (com as correcoes do serve, do pull e do
+# zshrc) virou `e952827`, sem um sinal. As pendencias continuaram, e a leitura
+# natural — "as correcoes nao funcionam" — era errada: elas nunca executaram.
+#
+# A montagem precisa de duas coisas, e a segunda e a que ninguém tinha:
+#   1. respeitar um ref pinado (SETUP_REF);
+#   2. COMPARAR a versao do arquivo montado com a que entrou, e avisar.
+
+if grep -q 'SETUP_REF=' <<<"$codigo"; then
+  ok "existe SETUP_REF, que pina o ref de onde o script se obtem"
+else
+  falha "nao existe SETUP_REF: a montagem so consegue usar main"
+fi
+# `main` na URL de montagem e o defeito. Ela tem de vir do ref, com `main` como
+# PADRAO declarado — e nao como literal na URL.
+# A URL que o script USA e a URL que ele IMPRIME na mensagem de erro do pipe sem
+# argumento. As duas tem `main`, e so a primeira e o defeito — a segunda e texto
+# que diz o comando a pessoa digitar, e `main` ali esta CORRETO (e o que o
+# README prescreve).
+#
+# A checagem contava as duas e acusava 2, sendo que o defeito era zero. E o
+# oposto tambem seria verdade: um dia a mensagem passa a sugerir um ref pinado, e
+# a checagem continuaria acusando. Por isso o filtro e `^_url_base=`, e nao o
+# texto.
+n_hard=$(grep -c '^ *_url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"' <<<"$codigo")
+if [ "$n_hard" -eq 0 ]; then
+  ok "e nenhuma URL de montagem tem main hardcoded"
+else
+  falha "$n_hard URL(s) de montagem ainda tem main hardcoded: o pin nao tem efeito"
+fi
+if grep -c 'SETUP_REF:-main' <<<"$codigo" >/dev/null; then
+  ok "e o ref tem main como padrao declarado, nao como literal"
+else
+  falha "o ref nao declara main como padrao"
+fi
+
+# E a comparacao de versao, que e o que torna o pin visivel quando nao ha pin.
+if grep -c '_v_montada' <<<"$codigo" >/dev/null && [ "$(grep -c '_v_montada' <<<"$codigo")" -ge 3 ]; then
+  ok "a montagem le a versao do arquivo montado"
+  ok "e compara com a que entrou"
+else
+  falha "a montagem nao compara versoes: trocar de script continua silencioso"
+fi
+# E a mensagem tem de dizer o que fazer, e nao so que algo esta diferente.
+if grep -c 'SETUP_REF antes do comando' <<<"$codigo" >/dev/null; then
+  ok "e o aviso diz como pinar"
+else
+  falha "o aviso diz que ha divergencia e nao diz como resolver"
+fi
+
+# E o marcador de versao tem de mudar quando o comportamento muda. Duas versoes
+# com a MESMA string sao indistinguiveis, que e o que aconteceu com o
+# `2026.10.03-e952827+pull-serve`: ele foi escrito no #90 e ficou no #91, e a
+# versao nao distinguia uma da outra.
+_ult=$(grep 'setup.sh versão:' "$REPO/setup.sh" | tail -1 | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-z0-9.+-]+')
+_const=$(grep -oE 'SETUP_VERSION="[^"]+"' <<<"$codigo" | head -1 | sed 's/.*="//; s/"$//')
+if [ -n "$_ult" ] && [ "$_ult" = "$_const" ]; then
+  ok "e a ultima linha e a constante dizem a mesma versao: $_ult"
+else
+  falha "a ultima linha diz '$_ult' e a constante diz '$_const' — um dos dois mente"
+fi
+# O sufixo precisa carregar o QUE MUDOU, nao so a data: e o que permite dizer se
+# um SHA traz uma correcao que o outro nao traz, sem abrir o diff.
+if grep -oE 'SETUP_VERSION="[0-9.]+-ref-pin' <<<"$codigo" >/dev/null; then
+  ok "e o sufixo nomeia a mudanca (ref-pin), nao so a data"
+else
+  falha "o sufixo da versao nao nomeia a mudanca; dois SHAs ficam indistinguiveis"
+fi
+
 echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi
 
