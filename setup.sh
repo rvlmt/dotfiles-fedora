@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# setup.sh versão: 2026.10.03-e952827+pull-serve
 set -eo pipefail
 
 # Onde este script está em disco. Quando ele roda por pipe, `BASH_SOURCE[0]` é
@@ -20,6 +21,24 @@ SETUP_DESTINO="${SETUP_DESTINO:-$HOME/tmp/dotfiles}"
 # pipe, que é o que descobre a si mesmo.
 SETUP_ORIGIN=""
 REPO_SLUG="rvlmt/dotfiles-fedora"
+
+# A versão deste script, impressa no banner e na ÚLTIMA linha do arquivo.
+#
+# A segunda ocorrência não é redundância: o `raw.githubusercontent.com` ja serviu
+# versão velha desta URL quatro vezes nesta mesma sessão, e a forma de descobrir
+# que rodou o script errado é conferir a última linha do que foi baixado. Uma
+# constante impressa no banner ajuda quem le a tela; a linha no fim do arquivo
+# ajuda quem tem o arquivo na mão e não a tela.
+#
+# A primeira linha do arquivo também carrega a versão, para o caso de o
+# mecanismo que lê o arquivo cortar o fim — o que o `bash` FAZ, quando lê pela
+# entrada padrão em fatias: um script de 265 KB que faz `exec` é lido só até o
+# ponto da troca de processo.
+SETUP_VERSION="2026.10.03-e952827+pull-serve"
+
+# A última linha do arquivo. Ela é um comentário, então o shell nunca a executa:
+# serve para ser lida, não para rodar.
+# setup.sh versão: 2026.10.03-e952827+pull-serve
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -1944,6 +1963,38 @@ ODLOCAL
     # `--no-build` e obrigatorio: a base traz `image:` e `build:` juntos, o que e
     # normal para quem desenvolve do repo, e sem a flag o Podman tenta COMPILAR DA
     # FONTE — uma operacao longa com aparencia legitima.
+    # O `pull` ANTES do `up`, e e o passo que faltava.
+    #
+    # O upstream documenta o deploy em duas linhas:
+    #
+    #     OPEN_DESIGN_IMAGE=... docker compose pull
+    #     OPEN_DESIGN_IMAGE=... docker compose up -d --no-build
+    #
+    # O script so fazia a segunda. Com a imagem fixada por DIGEST
+    # (`ghcr.io/nexu-io/od@sha256:...`), o `up` nao tem de onde tirar a imagem se
+    # ela nao estiver na store local — e o Podman nao resolve digest por conta
+    # propria. O sintoma e o `compose up` falhar falando de uma imagem que ele
+    # deveria ter baixado.
+    #
+    # O `pull` tambem separa as duas falhas: se a imagem nao baixa, o erro e de
+    # rede ou de registro e nomeia a imagem; se o `up` falha, e de compose. Sem
+    # o pull, os dois se confundem num mesmo erro de `up`.
+    #
+    # O `--quiet` e porque o progresso de uma imagem de centenas de MB dwarfs o
+    # resto da saida do modulo. Um erro de pull continua aparecendo: o `--quiet`
+    # cala o progresso, nao a mensagem do registro.
+    #
+    # O `--ignore-pull-failures` NAO esta aqui de proposito. Se a imagem nao
+    # baixou, subir o container e o pior resultado possivel — um container criado
+    # que falha no primeiro request, com o run_reportando sucesso.
+    ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
+        pull --quiet ) || {
+    echo -e "${YELLOW}Nao consegui baixar a imagem do OpenDesign.${NC}" >&2
+    echo -e "${YELLOW}  imagem: $OPENDESIGN_IMAGE${NC}" >&2
+    echo -e "${YELLOW}  Verifique a rede e o acesso anonimo ao ghcr.io:${NC}" >&2
+    echo -e "${YELLOW}  podman pull $OPENDESIGN_IMAGE${NC}" >&2
+    return 1; }
+
     ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
         up -d --no-build ) || {
         echo -e "${YELLOW}O compose up falhou; a saida esta acima.${NC}" >&2; return 1; }
@@ -1965,6 +2016,27 @@ ODLOCAL
     fi
     echo -e "${GREEN}✓ OpenDesign em container, so atras do serve, com TLS.${NC}" >&2
     echo -e "${YELLOW}  Nenhuma CLI do host roda dentro: sao ELF glibc e a imagem e Alpine.${NC}" >&2
+
+    # A publicacao na tailnet, que este modo NAO fazia.
+    #
+    # `setup_open_design_serve` so era chamada no fim do modo NATIVO. O modo
+    # container — que e o DEFAULT — chegava ao `return 0` sem nunca publicar, e a
+    # pos-condicao do run perguntava pelo estado de qualquer jeito. O resultado era
+    # uma pendencia "nao publicado na tailnet em :8444" que este modo nunca tinha
+    # tentado resolver: um relato de uma omissao que ele nunca podia cometer.
+    #
+    # E a MESMA forma do bug do clone, que tambem so vivia no modo nativo. Dois
+    # passos que o modo container nao tinha, e nenhum dos dois apareceria numa
+    # maquina ja provisionada no modo nativo.
+    #
+    # O alvo e `127.0.0.1:$OPENDESIGN_PORT`, e a imagem do container faz bind
+    # nele. O `serve` e quem da TLS e quem restringe a origem; o container expoe
+    # HTTP em loopback e nao deve ser alcancado de fora sem essa etapa.
+    #
+    # A falha nao derruba o modulo: o container esta no ar e verificado, e sem a
+    # publicacao ele ainda esta acessivel por loopback. O motivo sai na saida.
+    setup_open_design_serve \
+        || echo -e "${YELLOW}O OpenDesign está no ar mas não foi publicado na tailnet.${NC}" >&2
     return 0
 }
 
@@ -3163,6 +3235,15 @@ case "$PROFILE" in
     host) echo -e "${BLUE}=== Setup do Fedora Workstation: workstation pessoal + hospedeiro de VMs ===${NC}\n" ;;
     vm) echo -e "${BLUE}=== Setup da VM de agentes: a fronteira ===${NC}\n" ;;
 esac
+
+# A versão, logo abaixo do banner. Ela está na PRIMEIRA e na ÚLTIMA linha do
+# arquivo também, e nos dois lugares por um motivo que a experiência mostrou: o
+# `raw` do GitHub já serviu versão velha desta URL, e a forma de saber qual
+# script rodou é ler a versão de um lado ou do outro.
+#
+# Quem tem a tela lê esta linha. Quem tem o arquivo — porque o `curl` falhou, ou
+# porque quer conferir antes de rodar — lê a última linha.
+echo -e "${BLUE}setup.sh ${SETUP_VERSION}${NC}\n"
 
 if should_run "git" || should_run "ssh"; then
     prompt_git_identity
@@ -5025,4 +5106,4 @@ if [ "${#_FALHAS[@]}" -ne 0 ]; then
     exit 1
 fi
 exit 0
-
+# setup.sh versão: 2026.10.03-e952827+pull-serve (última linha; leia-a para saber qual script é este)
