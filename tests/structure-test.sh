@@ -762,6 +762,155 @@ else
   ok "e a funcao e chamada com \$(), nao com \${}"
 fi
 
+echo "== os DOIS modos do OpenDesign publicam na tailnet =="
+# `setup_open_design_serve` so era chamada no fim do modo NATIVO. O container — que
+# e o DEFAULT — chegava ao `return 0` sem publicar, e a pos-condicao do run
+# perguntava por `:8444` de qualquer jeito. O resultado era uma pendencia
+# "nao publicado na tailnet em :8444" que o modo nunca tinha tentado resolver.
+#
+# Medido na VM: com o container healthy e o run no fim, a unica pendencia era
+# justamente a da porta que ninguem tinha publicado.
+#
+# E a mesma forma do bug do clone, que tambem so vivia no nativo. A regra que
+# emerge: um passo que so existe em UM dos modos e uma omissao silenciosa no
+# outro, e a pos-condicao nao distingue as duas coisas.
+n_serve=0
+for m in '_setup_open_design_native' '_setup_open_design_container'; do
+  ini=$(grep -n "^${m}() {" <<<"$codigo" | head -1 | cut -d: -f1)
+  [ -z "$ini" ] && continue
+  fim=$(awk -v s="$ini" 'NR>s && /^}/ {print NR; exit}' <<<"$codigo")
+  if awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -c 'setup_open_design_serve' >/dev/null; then
+    n_serve=$((n_serve + 1))
+  else
+    falha "$m nao publica na tailnet"
+  fi
+done
+if [ "$n_serve" -eq 2 ]; then
+  ok "e os dois modos chamam setup_open_design_serve"
+fi
+
+echo "== o modo container PUXA a imagem antes de subir =="
+# O upstream documenta o deploy em duas linhas: `compose pull` e `compose up -d
+# --no-build`. O script so fazia a segunda. Com a imagem fixada por DIGEST, o
+# `up` nao tem de onde tira-la se ela nao estiver na store local.
+n_pull=0
+ini=$(grep -n '^_setup_open_design_container() {' <<<"$codigo" | cut -d: -f1)
+fim=$(awk -v s="$ini" 'NR>s && /^}/ {print NR; exit}' <<<"$codigo")
+_pull_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -n 'pull --quiet' | cut -d: -f1)
+_up_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -n 'up -d --no-build' | cut -d: -f1)
+if [ -n "$_pull_l" ] && [ -n "$_up_l" ]; then
+  ok "o pull existe (linha $_pull_l da funcao)"
+  if [ "$_pull_l" -lt "$_up_l" ]; then
+    ok "e vem ANTES do up (linha $_up_l), como a doc upstream prescreve"
+  else
+    falha "o pull vem DEPOIS do up: o up nao tem a imagem na store"
+  fi
+else
+  n_pull=1
+  falha "o modo container nao puxa a imagem; o up falha sem ela na store"
+fi
+
+echo "== o script se identifica: versao em tres lugares =="
+# O `raw` do GitHub ja serviu versao velha desta URL varias vezes nesta sessao, e
+# a forma de saber qual script rodou e ler a versao. Um lugar so nao cobre o caso
+# em que o `curl` falha e a pessoa so tem o arquivo na mao.
+# O `$codigo` do topo e o setup.sh SEM COMENTARIOS, porque o runner usa ele para
+# nao contar o que o codigo afirma sobre o codigo. O marcador de versao e um
+# comentario POR DEFINICAO — e o shell nunca o executa, ele existe para ser lido.
+# Procurar por ele no `$codigo` da 0 sempre, que foi o que aconteceu.
+n_ver=$(grep -c 'setup.sh versão:' "$REPO/setup.sh")
+if [ "$n_ver" -ge 2 ]; then
+  ok "o marcador aparece em $n_ver lugares"
+else
+  falha "o marcador de versao aparece em $n_ver lugar(es); so nao cobre o curl falho"
+fi
+# E a constante tem de bater com o que esta impresso: um marcador que mente e
+# pior do que nenhum, porque e a unica evidencia que a pessoa tem.
+_ult=$(grep 'setup.sh versão:' "$REPO/setup.sh" | tail -1 | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-z0-9.+-]+')
+_const=$(grep -oE 'SETUP_VERSION="[^"]+"' <<<"$codigo" | head -1 | sed 's/.*="//; s/"$//')
+if [ -n "$_ult" ] && [ "$_ult" = "$_const" ]; then
+  ok "e a ultima linha e a constante dizem a mesma versao: $_ult"
+else
+  falha "a ultima linha diz '$_ult' e a constante diz '$_const' — um dos dois mente"
+fi
+# E no banner, que e o que a pessoa ve na tela.
+if grep -c 'echo -e .*setup.sh \${SETUP_VERSION}' <<<"$codigo" >/dev/null; then
+  ok "e o banner imprime a mesma constante"
+else
+  falha "o banner nao imprime a versao; quem so tem a tela nao sabe qual rodou"
+fi
+
+echo "== a montagem nao troca a versao em silencio =="
+# O `curl .../<SHA>/setup.sh` servia so para fazer a montagem, e o `exec` rodava o
+# `main`. Medido nesta VM: o `1a44d13` (com as correcoes do serve, do pull e do
+# zshrc) virou `e952827`, sem um sinal. As pendencias continuaram, e a leitura
+# natural — "as correcoes nao funcionam" — era errada: elas nunca executaram.
+#
+# A montagem precisa de duas coisas, e a segunda e a que ninguém tinha:
+#   1. respeitar um ref pinado (SETUP_REF);
+#   2. COMPARAR a versao do arquivo montado com a que entrou, e avisar.
+
+if grep -q 'SETUP_REF=' <<<"$codigo"; then
+  ok "existe SETUP_REF, que pina o ref de onde o script se obtem"
+else
+  falha "nao existe SETUP_REF: a montagem so consegue usar main"
+fi
+# `main` na URL de montagem e o defeito. Ela tem de vir do ref, com `main` como
+# PADRAO declarado — e nao como literal na URL.
+# A URL que o script USA e a URL que ele IMPRIME na mensagem de erro do pipe sem
+# argumento. As duas tem `main`, e so a primeira e o defeito — a segunda e texto
+# que diz o comando a pessoa digitar, e `main` ali esta CORRETO (e o que o
+# README prescreve).
+#
+# A checagem contava as duas e acusava 2, sendo que o defeito era zero. E o
+# oposto tambem seria verdade: um dia a mensagem passa a sugerir um ref pinado, e
+# a checagem continuaria acusando. Por isso o filtro e `^_url_base=`, e nao o
+# texto.
+n_hard=$(grep -c '^ *_url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"' <<<"$codigo")
+if [ "$n_hard" -eq 0 ]; then
+  ok "e nenhuma URL de montagem tem main hardcoded"
+else
+  falha "$n_hard URL(s) de montagem ainda tem main hardcoded: o pin nao tem efeito"
+fi
+if grep -c 'SETUP_REF:-main' <<<"$codigo" >/dev/null; then
+  ok "e o ref tem main como padrao declarado, nao como literal"
+else
+  falha "o ref nao declara main como padrao"
+fi
+
+# E a comparacao de versao, que e o que torna o pin visivel quando nao ha pin.
+if grep -c '_v_montada' <<<"$codigo" >/dev/null && [ "$(grep -c '_v_montada' <<<"$codigo")" -ge 3 ]; then
+  ok "a montagem le a versao do arquivo montado"
+  ok "e compara com a que entrou"
+else
+  falha "a montagem nao compara versoes: trocar de script continua silencioso"
+fi
+# E a mensagem tem de dizer o que fazer, e nao so que algo esta diferente.
+if grep -c 'SETUP_REF antes do comando' <<<"$codigo" >/dev/null; then
+  ok "e o aviso diz como pinar"
+else
+  falha "o aviso diz que ha divergencia e nao diz como resolver"
+fi
+
+# E o marcador de versao tem de mudar quando o comportamento muda. Duas versoes
+# com a MESMA string sao indistinguiveis, que e o que aconteceu com o
+# `2026.10.03-e952827+pull-serve`: ele foi escrito no #90 e ficou no #91, e a
+# versao nao distinguia uma da outra.
+_ult=$(grep 'setup.sh versão:' "$REPO/setup.sh" | tail -1 | grep -oE '[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-z0-9.+-]+')
+_const=$(grep -oE 'SETUP_VERSION="[^"]+"' <<<"$codigo" | head -1 | sed 's/.*="//; s/"$//')
+if [ -n "$_ult" ] && [ "$_ult" = "$_const" ]; then
+  ok "e a ultima linha e a constante dizem a mesma versao: $_ult"
+else
+  falha "a ultima linha diz '$_ult' e a constante diz '$_const' — um dos dois mente"
+fi
+# O sufixo precisa carregar o QUE MUDOU, nao so a data: e o que permite dizer se
+# um SHA traz uma correcao que o outro nao traz, sem abrir o diff.
+if grep -oE 'SETUP_VERSION="[0-9.]+-ref-pin' <<<"$codigo" >/dev/null; then
+  ok "e o sufixo nomeia a mudanca (ref-pin), nao so a data"
+else
+  falha "o sufixo da versao nao nomeia a mudanca; dois SHAs ficam indistinguiveis"
+fi
+
 echo "== sintaxe =="
 if bash -n setup.sh 2>/dev/null; then ok "bash -n limpo"; else falha "bash -n"; fi
 

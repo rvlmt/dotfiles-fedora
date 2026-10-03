@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# setup.sh versão: 2026.10.03-ref-pin
 set -eo pipefail
 
 # Onde este script está em disco. Quando ele roda por pipe, `BASH_SOURCE[0]` é
@@ -20,6 +21,44 @@ SETUP_DESTINO="${SETUP_DESTINO:-$HOME/tmp/dotfiles}"
 # pipe, que é o que descobre a si mesmo.
 SETUP_ORIGIN=""
 REPO_SLUG="rvlmt/dotfiles-fedora"
+
+# A versão deste script, impressa no banner e na ÚLTIMA linha do arquivo.
+#
+# A segunda ocorrência não é redundância: o `raw.githubusercontent.com` ja serviu
+# versão velha desta URL quatro vezes nesta mesma sessão, e a forma de descobrir
+# que rodou o script errado é conferir a última linha do que foi baixado. Uma
+# constante impressa no banner ajuda quem le a tela; a linha no fim do arquivo
+# ajuda quem tem o arquivo na mão e não a tela.
+#
+# A primeira linha do arquivo também carrega a versão, para o caso de o
+# mecanismo que lê o arquivo cortar o fim — o que o `bash` FAZ, quando lê pela
+# entrada padrão em fatias: um script de 265 KB que faz `exec` é lido só até o
+# ponto da troca de processo.
+SETUP_VERSION="2026.10.03-ref-pin"
+
+# O ref de onde este script se obtem quando vem por pipe. Vazio = `main`.
+#
+# A montagem usava `main` HARDCODED, e isso fazia o `curl .../<SHA>/setup.sh`
+# rodar um OUTRO script: o da branch servia so para fazer a montagem, e o
+# `exec` rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
+# instalou (o clone do #89 esta no `main`), e as duas pendencias do #90 e do #91
+# continuaram — porque elas nunca executaram.
+#
+# E o pior detalhe: nada disso aparece. O run termina, sai com 1, e a leitura
+# natural e "as correcoes nao funcionaram", quando o que aconteceu e "as
+# correcoes nunca foram executadas". Tres rodadas foram para essa leitura.
+#
+# Quem quiser pinar o ref exporta antes do pipe:
+#
+#     SETUP_REF=<sha-ou-tag> curl ... | bash -s -- --profile=vm --defaults
+#
+# Sem isso, `main` e o comportamento padrao — e o aviso de versao logo abaixo
+# avisa quando o script montado nao e o que entrou.
+SETUP_REF="${SETUP_REF:-}"
+
+# A última linha do arquivo. Ela é um comentário, então o shell nunca a executa:
+# serve para ser lida, não para rodar.
+# setup.sh versão: 2026.10.03-ref-pin
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -1944,6 +1983,38 @@ ODLOCAL
     # `--no-build` e obrigatorio: a base traz `image:` e `build:` juntos, o que e
     # normal para quem desenvolve do repo, e sem a flag o Podman tenta COMPILAR DA
     # FONTE — uma operacao longa com aparencia legitima.
+    # O `pull` ANTES do `up`, e e o passo que faltava.
+    #
+    # O upstream documenta o deploy em duas linhas:
+    #
+    #     OPEN_DESIGN_IMAGE=... docker compose pull
+    #     OPEN_DESIGN_IMAGE=... docker compose up -d --no-build
+    #
+    # O script so fazia a segunda. Com a imagem fixada por DIGEST
+    # (`ghcr.io/nexu-io/od@sha256:...`), o `up` nao tem de onde tirar a imagem se
+    # ela nao estiver na store local — e o Podman nao resolve digest por conta
+    # propria. O sintoma e o `compose up` falhar falando de uma imagem que ele
+    # deveria ter baixado.
+    #
+    # O `pull` tambem separa as duas falhas: se a imagem nao baixa, o erro e de
+    # rede ou de registro e nomeia a imagem; se o `up` falha, e de compose. Sem
+    # o pull, os dois se confundem num mesmo erro de `up`.
+    #
+    # O `--quiet` e porque o progresso de uma imagem de centenas de MB dwarfs o
+    # resto da saida do modulo. Um erro de pull continua aparecendo: o `--quiet`
+    # cala o progresso, nao a mensagem do registro.
+    #
+    # O `--ignore-pull-failures` NAO esta aqui de proposito. Se a imagem nao
+    # baixou, subir o container e o pior resultado possivel — um container criado
+    # que falha no primeiro request, com o run_reportando sucesso.
+    ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
+        pull --quiet ) || {
+    echo -e "${YELLOW}Nao consegui baixar a imagem do OpenDesign.${NC}" >&2
+    echo -e "${YELLOW}  imagem: $OPENDESIGN_IMAGE${NC}" >&2
+    echo -e "${YELLOW}  Verifique a rede e o acesso anonimo ao ghcr.io:${NC}" >&2
+    echo -e "${YELLOW}  podman pull $OPENDESIGN_IMAGE${NC}" >&2
+    return 1; }
+
     ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
         up -d --no-build ) || {
         echo -e "${YELLOW}O compose up falhou; a saida esta acima.${NC}" >&2; return 1; }
@@ -1965,6 +2036,27 @@ ODLOCAL
     fi
     echo -e "${GREEN}✓ OpenDesign em container, so atras do serve, com TLS.${NC}" >&2
     echo -e "${YELLOW}  Nenhuma CLI do host roda dentro: sao ELF glibc e a imagem e Alpine.${NC}" >&2
+
+    # A publicacao na tailnet, que este modo NAO fazia.
+    #
+    # `setup_open_design_serve` so era chamada no fim do modo NATIVO. O modo
+    # container — que e o DEFAULT — chegava ao `return 0` sem nunca publicar, e a
+    # pos-condicao do run perguntava pelo estado de qualquer jeito. O resultado era
+    # uma pendencia "nao publicado na tailnet em :8444" que este modo nunca tinha
+    # tentado resolver: um relato de uma omissao que ele nunca podia cometer.
+    #
+    # E a MESMA forma do bug do clone, que tambem so vivia no modo nativo. Dois
+    # passos que o modo container nao tinha, e nenhum dos dois apareceria numa
+    # maquina ja provisionada no modo nativo.
+    #
+    # O alvo e `127.0.0.1:$OPENDESIGN_PORT`, e a imagem do container faz bind
+    # nele. O `serve` e quem da TLS e quem restringe a origem; o container expoe
+    # HTTP em loopback e nao deve ser alcancado de fora sem essa etapa.
+    #
+    # A falha nao derruba o modulo: o container esta no ar e verificado, e sem a
+    # publicacao ele ainda esta acessivel por loopback. O motivo sai na saida.
+    setup_open_design_serve \
+        || echo -e "${YELLOW}O OpenDesign está no ar mas não foi publicado na tailnet.${NC}" >&2
     return 0
 }
 
@@ -2657,7 +2749,35 @@ link_zshrc() {
 
     if [ -L "$zshrc_dest" ] && [ "$(readlink "$zshrc_dest")" = "$zshrc_src" ]; then
         echo -e "${GREEN}✓ ~/.zshrc já aponta para este repositório.${NC}"
-    elif [ -e "$zshrc_dest" ] || [ -L "$zshrc_dest" ]; then
+    elif [ -L "$zshrc_dest" ] && [ ! -e "$zshrc_dest" ]; then
+        # Symlink QUEBRADO: o nome existe, o destino não.
+        #
+        # Este caso estava sendo tratado como "já existe um ~/.zshrc seu, não toco".
+        # É a leitura errada, e ela vem de como o teste é escrito: `[ -e ] || [ -L ]`
+        # junta as duas coisas, e um symlink quebrado satisfaz só o segundo. O
+        # resultado é que o script pede confirmação para "sobrescrever" algo que não
+        # tem conteúdo — e o `--defaults` recusa, porque o default aqui é *não*.
+        #
+        # Medido nesta VM: `~/.zshrc` → `/home/agent/zshrc`, que não existe. É o
+        # rastro do bug da montagem (§10.18), em que o `SCRIPT_DIR` era o `$HOME` e
+        # o link apontava para `$HOME/zshrc`. O run seguinte declarava pendência
+        # "nao aponta para o zshrc deste repositorio" sobre um link que não apontava
+        # para lugar nenhum — e o conserto é repondo o link, não perguntando.
+        #
+        # Por que não há backup: um symlink quebrado não tem conteúdo a preservar.
+        # Salvar o nome seria guardar um ponteiro para o vazio, e o backup seria
+        # ele próprio inútil. E por que isso NÃO é mudar o default: o default
+        # protege um `~/.zshrc` com conteúdo, e aqui não há conteúdo nenhum. A
+        # pergunta continua valendo para o arquivo de verdade, uma linha abaixo.
+        # O alvo antigo e lido ANTES do `ln`: depois de repor o link, o
+        # `readlink` devolve o novo, e a mensagem diria "estava quebrado para
+        # /home/agent/tmp/dotfiles/zshrc" — que e o destino bom, e nao o quebrado.
+        local alvo_antigo
+        alvo_antigo="$(readlink "$zshrc_dest" 2>/dev/null || echo '?')"
+        ln -sfn "$zshrc_src" "$zshrc_dest"
+        echo -e "${GREEN}✓ ~/.zshrc estava quebrado (→ $alvo_antigo), agora aponta para $zshrc_src${NC}"
+        echo -e "${YELLOW}  Nada foi perdido: o link antigo não tinha destino, e por isso não há backup.${NC}" >&2
+    elif [ -e "$zshrc_dest" ]; then
         if [ "$CONFIRM_ZSHRC_OVERWRITE" = "1" ]; then
             local backup
             backup="$zshrc_dest.backup.$(date +%Y%m%d%H%M%S)"
@@ -2994,6 +3114,32 @@ _se_colocar_no_disco_e_reexecutar() {
 
     echo "Repositório montado em $destino_dir ($n anexo(s) além do setup.sh)." >&2
     echo "A partir daqui o script é interativo." >&2
+
+    # A versao do script MONTADO, comparada com a do script que ENTROU.
+    #
+    # A montagem baixa o `setup.sh` de novo, e de um ref proprio. Sem esta
+    # comparacao, ela pode trocar a versao em silencio — e foi assim que o
+    # `1a44d13` (com as correcoes do serve, do pull e do zshrc) virou `e952827`
+    # na maquina, sem um sinal. O run terminava, as pendencias continuavam, e a
+    # leitura natural era "as correcoes nao funcionaram".
+    #
+    # Ler a versao do arquivo montado e comparar com a deste processo e a unica
+    # forma de incipiente saber, porque as duas podem ser diferentes e nada mais
+    # na execucao diz isso.
+    local _v_montada
+    _v_montada="$(sed -n 's/^SETUP_VERSION="\(.*\)"$/\1/p' "$destino_dir/setup.sh" 2>/dev/null | head -1)"
+    if [ -n "$_v_montada" ] && [ "$_v_montada" != "$SETUP_VERSION" ]; then
+        echo "ATENCAO: o script montado e de OUTRA versao." >&2
+        echo "  entrou:  $SETUP_VERSION" >&2
+        echo "  montou:  $_v_montada   (em $destino_dir/setup.sh)" >&2
+        echo "  As correcoes da versao que entrou NAO vao rodar. Para pinar, exporte" >&2
+        echo "  SETUP_REF antes do comando, ou rode do disco em vez de por pipe." >&2
+    elif [ -z "$_v_montada" ]; then
+        # Sem `SETUP_VERSION` no arquivo montado: e um script anterior ao marcador.
+        # Isso e AVISO, nao erro — quem roda e a pessoa, e ela sabe o que
+        # pediu. Mas sem o marcador a comparacao nao existe, e vale dizer.
+        echo "aviso: o script montado nao tem marcador de versao; nao da para comparar." >&2
+    fi
     echo
 
     cd "$destino_dir" || return 1
@@ -3054,10 +3200,33 @@ _se_colocar_no_disco_e_reexecutar() {
 # errado, os dois fabricam caminhos que não existem, e o primeiro deixa um symlink
 # quebrado na máquina.
 if [ ! -t 0 ] && [ ! -s "${BASH_SOURCE[0]:-}" ]; then
-    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
-    if [ -n "$SETUP_ORIGIN" ]; then
-        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    # O ref pode vir do ambiente (para pinar) ou ficar no padrao. Sem isto, um
+    # `curl` de uma branch montava o `main` e rodava um script DIFERENTE do que a
+    # pessoa escolheu — o da branch servia so para fazer a montagem, e o `exec`
+    # rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
+    # instalou (o clone do #89 esta no `main`) e as duas pendencias do #90 e do
+    # #91 continuaram, porque elas nunca executaram.
+    _ref="${SETUP_REF:-main}"
+    # `SETUP_BASE_URL` existe para o TESTE: com ele, a montagem pode buscar em
+    # outro lugar do que o pipe buscou — que e como se reproduz a divergencia de
+    # versao. Numa maquina de verdade ela esta vazia e a URL e a do GitHub.
+    # Com `SETUP_BASE_URL` apontando para um servidor local, o caminho tem de
+    # ENTRAR pela raiz: o servidor de teste serve `/setup.sh` e nao
+    # `/<owner>/<repo>/<ref>/setup.sh`. Sem esta distincao, a montagem procura um
+    # caminho que no GitHub existe e no servidor de teste nao — e o teste falha
+    # com "nao consegui baixar", que parece rede e e geometria de URL.
+    # O servidor de teste expoe `/setup.sh` na RAIZ, sem o `ref` no caminho — ele
+    # NAO e o GitHub, e fingir que e custa um segmento inteiro. Com o ref vazio a
+    # URL local fica `/setup.sh`, que e o que o servidor serve.
+    if [ -n "${SETUP_BASE_URL:-}" ]; then
+        _url_base="${SETUP_BASE_URL%/}/"
+    else
+        _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/${_ref}"
+        if [ -n "$SETUP_ORIGIN" ]; then
+            _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/${_ref}"
+        fi
     fi
+    echo "Montando a partir do ref: $_ref (a versao que entrou: $SETUP_VERSION)" >&2
     if ! command -v curl >/dev/null 2>&1; then
         echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
         echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
@@ -3132,10 +3301,33 @@ if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
         exit 1
     fi
 
-    _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/main"
-    if [ -n "$SETUP_ORIGIN" ]; then
-        _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/main"
+    # O ref pode vir do ambiente (para pinar) ou ficar no padrao. Sem isto, um
+    # `curl` de uma branch montava o `main` e rodava um script DIFERENTE do que a
+    # pessoa escolheu — o da branch servia so para fazer a montagem, e o `exec`
+    # rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
+    # instalou (o clone do #89 esta no `main`) e as duas pendencias do #90 e do
+    # #91 continuaram, porque elas nunca executaram.
+    _ref="${SETUP_REF:-main}"
+    # `SETUP_BASE_URL` existe para o TESTE: com ele, a montagem pode buscar em
+    # outro lugar do que o pipe buscou — que e como se reproduz a divergencia de
+    # versao. Numa maquina de verdade ela esta vazia e a URL e a do GitHub.
+    # Com `SETUP_BASE_URL` apontando para um servidor local, o caminho tem de
+    # ENTRAR pela raiz: o servidor de teste serve `/setup.sh` e nao
+    # `/<owner>/<repo>/<ref>/setup.sh`. Sem esta distincao, a montagem procura um
+    # caminho que no GitHub existe e no servidor de teste nao — e o teste falha
+    # com "nao consegui baixar", que parece rede e e geometria de URL.
+    # O servidor de teste expoe `/setup.sh` na RAIZ, sem o `ref` no caminho — ele
+    # NAO e o GitHub, e fingir que e custa um segmento inteiro. Com o ref vazio a
+    # URL local fica `/setup.sh`, que e o que o servidor serve.
+    if [ -n "${SETUP_BASE_URL:-}" ]; then
+        _url_base="${SETUP_BASE_URL%/}/"
+    else
+        _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/${_ref}"
+        if [ -n "$SETUP_ORIGIN" ]; then
+            _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/${_ref}"
+        fi
     fi
+    echo "Montando a partir do ref: $_ref (a versao que entrou: $SETUP_VERSION)" >&2
     if ! command -v curl >/dev/null 2>&1; then
         echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
         echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
@@ -3163,6 +3355,15 @@ case "$PROFILE" in
     host) echo -e "${BLUE}=== Setup do Fedora Workstation: workstation pessoal + hospedeiro de VMs ===${NC}\n" ;;
     vm) echo -e "${BLUE}=== Setup da VM de agentes: a fronteira ===${NC}\n" ;;
 esac
+
+# A versão, logo abaixo do banner. Ela está na PRIMEIRA e na ÚLTIMA linha do
+# arquivo também, e nos dois lugares por um motivo que a experiência mostrou: o
+# `raw` do GitHub já serviu versão velha desta URL, e a forma de saber qual
+# script rodou é ler a versão de um lado ou do outro.
+#
+# Quem tem a tela lê esta linha. Quem tem o arquivo — porque o `curl` falhou, ou
+# porque quer conferir antes de rodar — lê a última linha.
+echo -e "${BLUE}setup.sh ${SETUP_VERSION}${NC}\n"
 
 if should_run "git" || should_run "ssh"; then
     prompt_git_identity
@@ -5025,4 +5226,4 @@ if [ "${#_FALHAS[@]}" -ne 0 ]; then
     exit 1
 fi
 exit 0
-
+# setup.sh versão: 2026.10.03-ref-pin (última linha; leia-a para saber qual script é este)
