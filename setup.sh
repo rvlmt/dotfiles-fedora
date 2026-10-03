@@ -2729,7 +2729,35 @@ link_zshrc() {
 
     if [ -L "$zshrc_dest" ] && [ "$(readlink "$zshrc_dest")" = "$zshrc_src" ]; then
         echo -e "${GREEN}✓ ~/.zshrc já aponta para este repositório.${NC}"
-    elif [ -e "$zshrc_dest" ] || [ -L "$zshrc_dest" ]; then
+    elif [ -L "$zshrc_dest" ] && [ ! -e "$zshrc_dest" ]; then
+        # Symlink QUEBRADO: o nome existe, o destino não.
+        #
+        # Este caso estava sendo tratado como "já existe um ~/.zshrc seu, não toco".
+        # É a leitura errada, e ela vem de como o teste é escrito: `[ -e ] || [ -L ]`
+        # junta as duas coisas, e um symlink quebrado satisfaz só o segundo. O
+        # resultado é que o script pede confirmação para "sobrescrever" algo que não
+        # tem conteúdo — e o `--defaults` recusa, porque o default aqui é *não*.
+        #
+        # Medido nesta VM: `~/.zshrc` → `/home/agent/zshrc`, que não existe. É o
+        # rastro do bug da montagem (§10.18), em que o `SCRIPT_DIR` era o `$HOME` e
+        # o link apontava para `$HOME/zshrc`. O run seguinte declarava pendência
+        # "nao aponta para o zshrc deste repositorio" sobre um link que não apontava
+        # para lugar nenhum — e o conserto é repondo o link, não perguntando.
+        #
+        # Por que não há backup: um symlink quebrado não tem conteúdo a preservar.
+        # Salvar o nome seria guardar um ponteiro para o vazio, e o backup seria
+        # ele próprio inútil. E por que isso NÃO é mudar o default: o default
+        # protege um `~/.zshrc` com conteúdo, e aqui não há conteúdo nenhum. A
+        # pergunta continua valendo para o arquivo de verdade, uma linha abaixo.
+        # O alvo antigo e lido ANTES do `ln`: depois de repor o link, o
+        # `readlink` devolve o novo, e a mensagem diria "estava quebrado para
+        # /home/agent/tmp/dotfiles/zshrc" — que e o destino bom, e nao o quebrado.
+        local alvo_antigo
+        alvo_antigo="$(readlink "$zshrc_dest" 2>/dev/null || echo '?')"
+        ln -sfn "$zshrc_src" "$zshrc_dest"
+        echo -e "${GREEN}✓ ~/.zshrc estava quebrado (→ $alvo_antigo), agora aponta para $zshrc_src${NC}"
+        echo -e "${YELLOW}  Nada foi perdido: o link antigo não tinha destino, e por isso não há backup.${NC}" >&2
+    elif [ -e "$zshrc_dest" ]; then
         if [ "$CONFIRM_ZSHRC_OVERWRITE" = "1" ]; then
             local backup
             backup="$zshrc_dest.backup.$(date +%Y%m%d%H%M%S)"
