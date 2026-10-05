@@ -2000,24 +2000,53 @@ ODLOCAL
     # rede ou de registro e nomeia a imagem; se o `up` falha, e de compose. Sem
     # o pull, os dois se confundem num mesmo erro de `up`.
     #
-    # O `--quiet` e porque o progresso de uma imagem de centenas de MB dwarfs o
-    # resto da saida do modulo. Um erro de pull continua aparecendo: o `--quiet`
-    # cala o progresso, nao a mensagem do registro.
+    # SEM `--quiet`, e nao por esquecimento: o `podman compose` delega ao
+    # `podman-compose`, que e outra interface. Medido na VM:
+    #
+    #     podman-compose: error: unrecognized arguments: --quiet
+    #
+    # E o `podman-compose pull --help` responde:
+    #
+    #     usage: podman-compose pull [-h] [--force-local] [services ...]
+    #
+    # Nao existe `--quiet`. A flag existe no `docker compose` do upstream, e e por
+    # isso que ela foi escrita aqui sem ser verificada — o comando da documentacao
+    # e do `docker`, e nao do provider que roda aqui.
+    #
+    # O progresso do pull aparece na saida, e e o preco de o provider nao ter a
+    # flag. Ele e util: sem ele, um pull que trava nao parece um pull que trava.
     #
     # O `--ignore-pull-failures` NAO esta aqui de proposito. Se a imagem nao
     # baixou, subir o container e o pior resultado possivel — um container criado
     # que falha no primeiro request, com o run_reportando sucesso.
+    # A falha do PULL nao interrompe o modulo: ela e da imagem, e a publicacao na
+    # tailnet e de outra coisa.
+    #
+    # Medido nesta VM: o `pull` falhou por causa de uma flag que o
+    # `podman-compose` nao tem, e o `return 1` ali dentro impediu a funcao de
+    # chegar ao `setup_open_design_serve`. O resultado foi DUAS pendencias na tela,
+    # e a segunda — `nao publicado na tailnet em :8444` — nao tinha nada a ver com
+    # a falha da imagem. O modulo morreu no primeiro `return`, e a segunda
+    # pendencia era consequencia do corte, e nao um defeito proprio.
+    #
+    # Sem o `return`, o `up` tenta subir mesmo sem a imagem local, e o container
+    # que ja estiver no ar continua no ar — que e o estado que a maquina tinha.
+    # A imagem que faltou vira pendencia por estado, na pos-condicao, que e onde
+    # ela pertence.
+    local _pull_ok=1
     ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
-        pull --quiet ) || {
-    echo -e "${YELLOW}Nao consegui baixar a imagem do OpenDesign.${NC}" >&2
+        pull ) || {
+    _pull_ok=0
+    echo -e "${YELLOW}Nao consegui baixar a imagem do OpenDesign; continuo com o que ha.${NC}" >&2
     echo -e "${YELLOW}  imagem: $OPENDESIGN_IMAGE${NC}" >&2
     echo -e "${YELLOW}  Verifique a rede e o acesso anonimo ao ghcr.io:${NC}" >&2
-    echo -e "${YELLOW}  podman pull $OPENDESIGN_IMAGE${NC}" >&2
-    return 1; }
+    echo -e "${YELLOW}  podman pull $OPENDESIGN_IMAGE${NC}" >&2; }
 
     ( cd "$D" && podman compose -f docker-compose.yml -f docker-compose.local.yml \
         up -d --no-build ) || {
-        echo -e "${YELLOW}O compose up falhou; a saida esta acima.${NC}" >&2; return 1; }
+        echo -e "${YELLOW}O compose up falhou; a saida esta acima.${NC}" >&2
+        return 1; }
+    [ "$_pull_ok" -eq 1 ] || echo -e "${YELLOW}  (a imagem nao baixou; se o container subiu, e de uma execucao anterior)${NC}" >&2
     unset OPENDESIGN_TOKEN
 
     local i st
