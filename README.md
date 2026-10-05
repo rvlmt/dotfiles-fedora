@@ -95,9 +95,34 @@ mesmo repo pra justificar mantê-las separadas.
 Uma linha, na VM nova, no console do Cockpit:
 
 ```bash
+set -o pipefail
 curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/setup.sh \
   | bash -s -- --profile=vm --defaults
 ```
+
+O `set -o pipefail` é o que faz essa linha poder ser confiar. Sem ele, um `curl`
+que falha **não** aparece em lugar nenhum: o código de saída de um pipeline é o da
+última etapa, e a última etapa é o `bash`. Medido, com uma URL que responde 404:
+
+```
+curl: (22) The requested URL returned error: 404
+echo $?
+0
+```
+
+O `curl` falhou, entregou **zero bytes**, e o `bash` executou um script vazio e
+saiu com **0**. A máquina não foi provisionada e o comando pareceu ter funcionado —
+que é o pior par possível, porque o `0` é o sinal que a pessoa procura para seguir
+em frente.
+
+Isso já aconteceu aqui. Uma branch foi apagada logo depois de um merge, a URL
+apontou para o nada, e o comando "rodou" com sucesso sem executar uma linha. A
+mensagem na tela era a de uma execução anterior, e a leitura natural — "o script
+está velho" — apontava para o lugar errado.
+
+O `pipefail` transforma o 22 do `curl` no código de saída do comando, e o `0` volta
+a significar "o script rodou".
+
 
 O `bash -s --` não é decoração, e omitir qualquer uma das duas partes produz um
 erro diferente:
@@ -112,6 +137,30 @@ erro diferente:
 O script detecta o primeiro caso e recusa, dizendo o comando certo — porque a
 forma curta é a que todo mundo escreve, e ela não dá nenhum sinal de que
 provisionou a máquina errada.
+
+A tabela é sobre o que você escreve **depois** do `|`. O que vem antes tem um caso
+a mais, e ele não aparece em nenhum sinal: se o `curl` falhar, o comando inteiro
+sai com **0**. A linha de cima resolve com `set -o pipefail`; sem ela, use
+`set -o pipefail && curl ... | bash`, que é a mesma coisa.
+
+### Uma mensagem que não é erro
+
+Depois do passo do OpenDesign, a tela mostra:
+
+```
+curl: (23) Failure writing output to destination, passed 16348 returned 8192
+```
+
+**Não é erro, e o script ter funcionado é a causa.** O `bash` lê o script pela
+entrada padrão em fatias, não inteiro de uma vez. Quando o `setup.sh` se executa de
+novo a partir de `~/tmp/dotfiles`, ele substitui o processo — e o `bash` original
+para de ler. O pipe fecha, o `curl` que ainda estava escrevendo leva `EPIPE`, e
+`23` é o código dele.
+
+O número confirma: 265 KB de script e 16 KB lidos é exatamente o ponto em que a
+troca de processo acontece. Se o `curl` reclamasse de **23 logo no começo**, com
+poucos bytes lidos, aí sim seria o download falhando.
+
 
 O que acontece depois do download: o script se escreve em `~/tmp/dotfiles`,
 traz **apenas os dois arquivos de que ele depende** (`zshrc` e
