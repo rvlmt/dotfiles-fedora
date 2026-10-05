@@ -95,33 +95,9 @@ mesmo repo pra justificar mantê-las separadas.
 Uma linha, na VM nova, no console do Cockpit:
 
 ```bash
-set -o pipefail
 curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/setup.sh \
   | bash -s -- --profile=vm --defaults
 ```
-
-O `set -o pipefail` é o que faz essa linha poder ser confiar. Sem ele, um `curl`
-que falha **não** aparece em lugar nenhum: o código de saída de um pipeline é o da
-última etapa, e a última etapa é o `bash`. Medido, com uma URL que responde 404:
-
-```
-curl: (22) The requested URL returned error: 404
-echo $?
-0
-```
-
-O `curl` falhou, entregou **zero bytes**, e o `bash` executou um script vazio e
-saiu com **0**. A máquina não foi provisionada e o comando pareceu ter funcionado —
-que é o pior par possível, porque o `0` é o sinal que a pessoa procura para seguir
-em frente.
-
-Isso já aconteceu aqui. Uma branch foi apagada logo depois de um merge, a URL
-apontou para o nada, e o comando "rodou" com sucesso sem executar uma linha. A
-mensagem na tela era a de uma execução anterior, e a leitura natural — "o script
-está velho" — apontava para o lugar errado.
-
-O `pipefail` transforma o 22 do `curl` no código de saída do comando, e o `0` volta
-a significar "o script rodou".
 
 
 O `bash -s --` não é decoração, e omitir qualquer uma das duas partes produz um
@@ -140,26 +116,8 @@ provisionou a máquina errada.
 
 A tabela é sobre o que você escreve **depois** do `|`. O que vem antes tem um caso
 a mais, e ele não aparece em nenhum sinal: se o `curl` falhar, o comando inteiro
-sai com **0**. A linha de cima resolve com `set -o pipefail`; sem ela, use
-`set -o pipefail && curl ... | bash`, que é a mesma coisa.
-
-### Uma mensagem que não é erro
-
-Depois do passo do OpenDesign, a tela mostra:
-
-```
-curl: (23) Failure writing output to destination, passed 16348 returned 8192
-```
-
-**Não é erro, e o script ter funcionado é a causa.** O `bash` lê o script pela
-entrada padrão em fatias, não inteiro de uma vez. Quando o `setup.sh` se executa de
-novo a partir de `~/tmp/dotfiles`, ele substitui o processo — e o `bash` original
-para de ler. O pipe fecha, o `curl` que ainda estava escrevendo leva `EPIPE`, e
-`23` é o código dele.
-
-O número confirma: 265 KB de script e 16 KB lidos é exatamente o ponto em que a
-troca de processo acontece. Se o `curl` reclamasse de **23 logo no começo**, com
-poucos bytes lidos, aí sim seria o download falhando.
+sai com **0**. Isso está em [quando o comando não provisiona nada](#quando-o-comando-nao-provisiona-nada),
+e é um caso raro — a URL acima responde.
 
 
 O que acontece depois do download: o script se escreve em `~/tmp/dotfiles`,
@@ -167,6 +125,55 @@ traz **apenas os dois arquivos de que ele depende** (`zshrc` e
 `bin/gh-app-token.sh`) e re-executa dali. O resto do repositório — testes,
 auditoria, documentação — **não vem**, e o destino tem três arquivos de um
 repositório com mais de dez.
+
+### Quando o comando não provisiona nada
+
+Não faz parte do passo 0, e não precisa ser decorado. Está aqui para quando o
+comando rodar, sair com `0`, e a máquina continuar como estava.
+
+**O sintoma:** o run termina rápido, sem nenhum módulo, e a tela não mostra
+`=== Setup da VM de agentes`. No fim, o `curl` reclama de `23`.
+
+**A causa:** o código de saída de um pipeline é o da última etapa, e a última etapa
+é o `bash`. Se o `curl` falha, ele entrega zero bytes, o `bash` executa um script
+vazio e sai com **0**. Medido, com uma URL que responde 404:
+
+```
+$ curl -fsSL .../branch-apagada/setup.sh | bash -s -- --profile=vm --defaults
+curl: (22) The requested URL returned error: 404
+$ echo $?
+0
+```
+
+O `curl` falhou, e o comando "funcionou". Isso aconteceu aqui mais de uma vez: uma
+branch apagada logo depois de um merge, e uma branch reescrita — o commit antigo
+some do servidor e o novo tem outro SHA.
+
+**O `curl: (23)` que aparece no fim do run não é erro.** O `bash` lê o script
+pela entrada padrão em fatias; quando o `setup.sh` se re-executa a partir de
+`~/tmp/dotfiles`, ele substitui o processo, o `bash` original para de ler, o pipe
+fecha e o `curl` leva `EPIPE`. Se o `23` vier logo no começo, com poucos bytes
+lidos, aí sim é o download falhando.
+
+**Como conferir, em qualquer momento:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rvlmt/dotfiles-fedora/main/setup.sh \
+  | tail -1
+```
+
+A última linha do arquivo é a versão dele. Se a tela mostrar outra, o `curl`
+trouxe outra — e aí o motivo está entre o `raw` e você.
+
+**Para o comando sair com o código do `curl`, e não o do `bash`:**
+
+```bash
+set -o pipefail
+curl -fsSL ... | bash -s -- --profile=vm --defaults
+```
+
+Só é necessário no diagnóstico. No caminho normal, `main` responde e o `0` já
+significa "o script rodou".
 
 ### O Tailscale: você em qualquer modo, mas a forma depende do modo
 
