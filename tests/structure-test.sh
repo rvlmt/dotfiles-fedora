@@ -796,7 +796,13 @@ echo "== o modo container PUXA a imagem antes de subir =="
 n_pull=0
 ini=$(grep -n '^_setup_open_design_container() {' <<<"$codigo" | cut -d: -f1)
 fim=$(awk -v s="$ini" 'NR>s && /^}/ {print NR; exit}' <<<"$codigo")
-_pull_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -n 'pull --quiet' | cut -d: -f1)
+# A busca e pela LINHA do comando, e nao pela flag. A versao anterior casava
+# `pull --quiet`, e o `--quiet` foi removido porque o `podman-compose` nao tem essa
+# flag — a checagem passou a acusar um pull que existe. Pior: uma checagem que
+# casa pela flag impede justamente a correcao, porque o conserto deixa de casar.
+#
+# A forma e a mesma do `up`: a palavra do subcomando, no fim da linha do comando.
+_pull_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -nE '^ *pull( |\))' | cut -d: -f1)
 _up_l=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" | grep -n 'up -d --no-build' | cut -d: -f1)
 if [ -n "$_pull_l" ] && [ -n "$_up_l" ]; then
   ok "o pull existe (linha $_pull_l da funcao)"
@@ -809,6 +815,40 @@ else
   n_pull=1
   falha "o modo container nao puxa a imagem; o up falha sem ela na store"
 fi
+
+echo "== nenhuma flag inventada no pull ou no up =="
+# A doc upstream do OpenDesign prescreve, literalmente:
+#
+#     OPEN_DESIGN_IMAGE=... docker compose pull
+#     OPEN_DESIGN_IMAGE=... docker compose up -d --no-build
+#
+# E o `podman compose` delega ao `podman-compose`, que tem OUTRA interface.
+# Medido, com o provider instalado aqui:
+#
+#     $ podman-compose pull --help
+#     usage: podman-compose pull [-h] [--force-local] [services ...]
+#
+# Nao existe `--quiet`. Escrever essa flag foi deduzir em vez de ler, e o modulo
+# morreu nela com `unrecognized arguments` — e, como o `return` estava logo depois,
+# a publicacao na tailnet nunca chegou a ser tentada, o que produziu uma segunda
+# pendencia sem nenhuma relacao com a primeira.
+#
+# A regra que fecha: a interface e a DO PROVIDER QUE RODA AQUI, e nao a do
+# `docker compose` do upstream. O provider pode ser outro (`podman-compose`,
+# `docker-compose`, `docker`), e cada um tem o seu conjunto de flags.
+_pflags=$(awk -v a="$ini" -v b="$fim" 'NR>=a && NR<=b' <<<"$codigo" \
+  | grep -oE '(pull|up)[^|]*' | tr ' ' '\n' | grep '^-' | sort -u)
+# `--no-build` e do `up` e existe; `--quiet` nao existe no `pull` do provider.
+if printf '%s\n' "$_pflags" | grep -c 'quiet' >/dev/null; then
+  falha "o pull/up usa --quiet, que o podman-compose nao tem"
+else
+  ok "nenhuma flag --quiet no pull nem no up"
+fi
+for _f in --no-build; do
+  if printf '%s\n' "$_pflags" | grep -c -- "$_f" >/dev/null; then
+    ok "$_f e uma flag real"
+  fi
+done
 
 echo "== o script se identifica: versao em tres lugares =="
 # O `raw` do GitHub ja serviu versao velha desta URL varias vezes nesta sessao, e
