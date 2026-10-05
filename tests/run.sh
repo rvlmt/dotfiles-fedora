@@ -81,7 +81,7 @@ cd "$REPO"
 # Uma suíte que leva dez minutos não é uma que se roda antes de commitar.
 
 # Instantâneos, e sem pty.
-RAPIDOS="test-device-keys.sh lib/teste-chsh-por-estado.py"
+RAPIDOS="test-device-keys.sh lib/teste-chsh-por-estado.py lib/teste-zshrc-quatro-ramos.py"
 # Abrem pty, e por isso demoram. O `profile-axis-test.sh` é o mais longo: roda o
 # `setup.sh` de verdade dezenas de vezes.
 LENTOS="structure-test.sh lib/teste-montagem-pipe.py lib/teste-pipe-defaults-completo.py profile-axis-test.sh"
