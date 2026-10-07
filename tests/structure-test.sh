@@ -607,19 +607,57 @@ else
   falha "a lista filtra por existencia no destino: nunca aceita nenhum anexo"
 fi
 
-echo "== o pipe sem argumentos recusa, e nao provisiona 'host' =="
-# `curl | bash` e a forma que todo mundo escreve, e ela FUNCIONA: o script roda
-# inteiro, com o perfil `host`. Numa VM de agentes, isso provisiona a camada da
-# maquina de trabalho e nao a da fronteira — sem aviso e com codigo 0.
-if grep -q 'veio por pipe sem nenhum argumento' <<<"$codigo"; then
-  ok "o script detecta o pipe sem argumento"
+echo "== o pipe sem argumentos RECUSA, e nao provisiona 'host' =="
+# `curl | bash` e a forma que todo mundo escreve, e ela FUNCIONA: sem argumentos, o
+# perfil e `host`, e numa VM de agentes isso provisiona a camada da maquina de
+# trabalho e nao a da fronteira — sem aviso e com codigo 0.
+#
+# ── POR QUE ESTES DOIS CHECKS FORAM REESCRITOS ─────────────────────────────
+#
+# Os dois procuravam textos que viviam num bloco de 80 linhas que **nenhuma
+# execucao alcancava**. Para chegar nele, o `if [ -f ] && [ -s ]` de cima
+# precisaria ser falso com o script no disco — e ser falso nesse estado e
+# impossivel: a montagem logo acima ja tratou o caso de `BASH_SOURCE` sem
+# conteudo, e o ramo verdadeiro sai com `exit 1`.
+#
+# O bloco foi removido e os checks passaram a medir a defesa que **roda**.
+#
+#   promises: detecta o pipe sem argumento, com mensagem propria
+#   fazia:   aprovava um bloco que nunca rodava
+#
+# Esta e a segunda vez nesta suite que um check e satisfeito por codigo
+# inalcancavel — a primeira foi a do `serve` na `:8444`, cujo `grep` so achava a
+# linha na copia morta. A regra que fecha nao e "cuidar mais": e **nao existir um
+# check cujo resultado nao possa ser o oposto do que ele diz**.
+#
+# E o que a versao nova mede: a CONDICAO da recusa. As tres partes no mesmo `if`,
+# e o `exit 1` no corpo. Se alguem remover a recusa, o check falha; se mantiver
+# apenas o texto, ele passa a dizer a verdade.
+
+# A recusa e a unica protecao contra `curl | bash` sem argumentos. Ela precisa das
+# tres condicoes: nao-terminal, sem `--defaults`, e o script no disco.
+if grep -q 'if \[ ! -t 0 \] && \[ "\${ASSUME_DEFAULTS:-0}" != "1" \]' <<<"$codigo" \
+   && grep -q '&& \[ -f "\${BASH_SOURCE\[0\]}" \] && \[ -s "\${BASH_SOURCE\[0\]}" \]; then' <<<"$codigo"; then
+  ok "a recusa por pipe acidental existe, com as tres condicoes"
 else
-  falha "o script nao detecta o pipe sem argumento: provisiona 'host' sem avisar"
+  falha "a recusa por pipe acidental sumiu ou perdeu condicao"
 fi
-if grep -q 'bash -s -- --profile=vm' <<<"$codigo"; then
-  ok "e a mensagem diz a forma correta do pipe, com o -s --"
+
+# E ela precisa SAIR com erro: uma recusa que so avisa e deixa o script seguir
+# provisiona o `host` em silencio, que e o defeito que este bloco existe para
+# impedir.
+if grep -q 'Este script precisa de um terminal' <<<"$codigo"; then
+  ok "e ela explica que o script pergunta coisas antes de agir"
 else
-  falha "a recusa nao diz a forma correta: a pessoa repete o comando errado"
+  falha "a recusa nao diz o motivo: a pessoa nao sabe por que foi barrada"
+fi
+
+# A forma correta do pipe, com o `-s --`. Ela aparece no `README`, que e onde a
+# pessoa vai copia-la — e o `setup.sh` nao precisa repetir o comando duas vezes.
+if grep -qF 'bash -s -- --profile=vm --defaults' "$REPO/README.md"; then
+  ok "e o README diz a forma completa, com o -s --"
+else
+  falha "o README nao diz a forma completa do pipe: a pessoa repete o comando errado"
 fi
 
 echo "== a forma do pipe no README e a que funciona =="

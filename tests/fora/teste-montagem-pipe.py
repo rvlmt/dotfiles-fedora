@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """Testa a montagem do setup.sh pelo caminho por pipe, sem escaping no meio.
 
+ESTE ARQUIVO ESTA FORA DA SUITE. Ver `LEIA-ME-MONTAGEM.md` ao lado: o motivo
+e que `tests/lib/teste-pipe-defaults-completo.py` mede o mesmo pelo caminho
+COMPLETO, com o `if` que chama a montagem vivo, e ainda faz a contra-prova de
+reintroduzir o defeito. Este aqui extrai as funcoes e chama a montagem direto, e
+e por isso que ele nao pegou o defeito que morou tres rodadas: a funcao estava
+perfeita, e ninguem a chamava.
+
+Para rodar: python3 tests/fora/teste-montagem-pipe.py
+
 As versoes anteriores deste teste eram bash com `sed` dentro de heredoc, e
 escapar o `${REPO_SLUG}` atravessando tres camadas foi a origem de quatro
 rodadas perdidas: o `sed` nao casava, o teste falhava, e a falha parecia da
@@ -27,6 +36,7 @@ import time
 # repositorio, e um caminho absoluto aqui faria o teste medir OUTRO checkout — ou
 # nenhum, se a arvore estivesse em outro lugar. Foi assim que a primeira versao
 # deste teste mediu zero arquivos e nao disse nada.
+# `tests/fora/` tem DOIS niveis ate a raiz do repositorio; `tests/lib/` tem tres.
 RAIZ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PORTA = int(os.environ.get("FD_TESTE_PORTA", "8741"))
 SERVIDOR = "/tmp/opencode/http6"

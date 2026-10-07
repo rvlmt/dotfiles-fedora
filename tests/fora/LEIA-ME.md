@@ -1,4 +1,4 @@
-# Fora da suíte: dois testes que affirms um contrato morto
+# Fora da suite: dois testes que afirmam um contrato morto, e um que outro mede melhor
 
 Estes dois **são** testes de verdade — têm contador de falha e saem com `1` quando
 algo falha. Eles não estão aqui porque estão **podres**, e a causa está documentada
@@ -21,3 +21,15 @@ O que faria para trazê-los de volta: reescrever as asserções para o contrato
 decisão registrada. Não foi feito aqui de propósito: reescrever uma asserção é
 fácil demais para acabar virando "asserir o que o código faz", e essa é uma
 coragem que precisa da decisão de quem dono do repo, não de quem só move arquivos.
+
+---
+
+# E um terceiro: `teste-montagem-pipe.py`
+
+Este é diferente dos dois acima: ele **passa**, e não está aqui porque está podre.
+Está aqui porque `tests/lib/teste-pipe-defaults-completo.py` mede a mesma coisa
+melhor, e a razão está no `LEIA-ME-MONTAGEM.md`, ao lado.
+
+A lição é curta e vale mais que o arquivo: um teste que extrai a função mede a
+função, e a função estava perfeita — ninguém a chamava. O defeito da montagem por
+pipe vivia no `if` que a invocava, e custou três rodadas.
