@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh versão: 2026.10.03-ref-pin
+# setup.sh versão: 2026.10.03-set-e-pipeline
 set -eo pipefail
 
 # Onde este script está em disco. Quando ele roda por pipe, `BASH_SOURCE[0]` é
@@ -34,7 +34,44 @@ REPO_SLUG="rvlmt/dotfiles-fedora"
 # mecanismo que lê o arquivo cortar o fim — o que o `bash` FAZ, quando lê pela
 # entrada padrão em fatias: um script de 265 KB que faz `exec` é lido só até o
 # ponto da troca de processo.
-SETUP_VERSION="2026.10.03-ref-pin"
+# ── o que matou o run: `set -e` + `pipefail` numa atribuicao ────────────────
+#
+# O run morreu no meio do modulo de CLIs, logo depois de
+# `cursor-agent ja instalado, pulando.`, sem nenhuma mensagem. A causa e esta
+# forma:
+#
+#     oc_latest=$(curl ... | sed ... | head -1)
+#     if [ -z "$oc_latest" ]; then
+#         echo "Nao consegui consultar a versao mais recente do opencode"
+#         ...
+#     fi
+#
+# O `if` existe para o `curl` ter falhado. E ele nunca e alcancavel: com
+# `set -eo pipefail` no topo, um `curl` que falha da status nao-zero a ATRIBUICAO
+# inteira, e o `set -e` aborta o script — uma linha antes do `if`. Medido,
+# isolado:
+#
+#     $ bash -c 'set -eo pipefail; v=$(curl ... | sed ... | head -1)
+#                if [ -z "$v" ]; then echo "RAMO ALCANCAVEL"; fi'
+#     exit=7
+#
+# Sem o `pipefail`, o mesmo comando imprime o ramo. E o `2>/dev/null` ajudava a
+# esconder: o erro do `curl` sumia e o script morria calado.
+#
+# O `|| true` DENTRO da atribuicao e o conserto: o pipeline pode falhar, a
+# atribuicao nao, e o `[ -z ]` logo abaixo passa a ter o caso que ele sempre teve.
+# E nao e um `|| true` qualquer — ele fica dentro do `$( )`, senao a atribuicao
+# continua com status de falha.
+#
+# A forma ja era conhecida no arquivo: `oc_have`, tres linhas abaixo do `oc_latest`,
+# tem `|| echo ""`. O que faltava era aplicar nos outros quatro lugares, e a
+# checagem estrutural que impede o quinto.
+#
+# E um sub-ramo de um padrao maior, que a AUDITORIA registra: **uma atribuicao que
+# consulta algo externo nao pode ter o status dela passado para o `set -e`.** A
+# forma que a torna segura e `|| true` dentro do `$( )`, ou `|| <var>=""` depois.
+
+SETUP_VERSION="2026.10.03-set-e-pipeline"
 
 # O ref de onde este script se obtem quando vem por pipe. Vazio = `main`.
 #
@@ -58,7 +95,7 @@ SETUP_REF="${SETUP_REF:-}"
 
 # A última linha do arquivo. Ela é um comentário, então o shell nunca a executa:
 # serve para ser lida, não para rodar.
-# setup.sh versão: 2026.10.03-ref-pin
+# setup.sh versão: 2026.10.03-set-e-pipeline
 
 # Este script é para o servidor Fedora Workstation que roda os ambientes de
 # execução dos coding agents (host de containers Podman/devpod, acessado a
@@ -1531,7 +1568,7 @@ _setup_open_design_native() {
     local nb="$HOME/.local/share/mise/installs/node/current/bin"
     [ -x "$nb/node" ] || {
         local _nb
-        _nb=$(ls -1d "$HOME"/.local/share/mise/installs/node/*/bin 2>/dev/null | sort -V | tail -1)
+        _nb=$(ls -1d "$HOME"/.local/share/mise/installs/node/*/bin 2>/dev/null | sort -V | tail -1 || true)
         [ -n "$_nb" ] && [ -x "$_nb/node" ] && nb="$_nb"
     }
     [ -x "$nb/node" ] || { echo -e "${YELLOW}node do mise ausente; pulei o OpenDesign.${NC}" >&2; return 1; }
@@ -2212,7 +2249,7 @@ process.stdin.on("data", d => s += d).on("end", () => {
     const v = JSON.parse(s)["dist-tags"] && JSON.parse(s)["dist-tags"].latest;
     if (v) console.log(v);
   } catch (e) {}
-});' 2>/dev/null | head -1)
+});' 2>/dev/null | head -1 || true)
     fi
     if [ -z "$latest" ]; then
         # Sem o registro não há como saber se o que está instalado é o mais novo.
@@ -2374,7 +2411,7 @@ sync_device_keys_from_github() {
         grep -E '^(ssh-|ecdsa-|sk-)' "$bloco" > "$fpn.tmp" 2>/dev/null && mv "$fpn.tmp" "$fpn" || : > "$fpn"
         revogadas=$(ssh-keygen -lf "$fpa" 2>/dev/null | awk '{print $2}' | sort -u > "$fpa.fp"
                     ssh-keygen -lf "$fpn" 2>/dev/null | awk '{print $2}' | sort -u > "$fpn.fp"
-                    comm -23 "$fpa.fp" "$fpn.fp" | tr '\n' ' ')
+                    comm -23 "$fpa.fp" "$fpn.fp" | tr '\n' ' ' || true)
         rm -f "$fpa" "$fpn" "$fpa.tmp" "$fpn.tmp" "$fpa.fp" "$fpn.fp"
     fi
 
@@ -2558,7 +2595,7 @@ install_common_ai_clis() {
     if command -v curl &> /dev/null; then
         oc_latest=$(curl -fsSL --max-time 20 "$OPENCODE_LATEST_URL" 2>/dev/null \
             | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-            | head -1)
+            | head -1 || true)
     fi
     if [ -z "$oc_latest" ]; then
         # Sem o endpoint não há como saber se o que está instalado é o mais novo,
@@ -4573,7 +4610,7 @@ EOF
     # só resta não refazer trabalho: `passwd -S` devolve L para senha travada, e
     # essa é a única leitura privilegiada, agora que o `sudo -v` já passou.
     if [ "${CONFIRM_LOCK_ROOT:-}" = "1" ]; then
-        _rs=$(sudo passwd -S root 2>/dev/null | awk '{print $2}')
+        _rs=$(sudo passwd -S root 2>/dev/null | awk '{print $2}' || true)
         if [ "$_rs" = "L" ]; then
             echo -e "${YELLOW}Senha do root já está travada, pulando.${NC}"
         elif [ -z "$_rs" ]; then
@@ -5255,4 +5292,4 @@ if [ "${#_FALHAS[@]}" -ne 0 ]; then
     exit 1
 fi
 exit 0
-# setup.sh versão: 2026.10.03-ref-pin (última linha; leia-a para saber qual script é este)
+# setup.sh versão: 2026.10.03-set-e-pipeline (última linha; leia-a para saber qual script é este)

@@ -945,10 +945,93 @@ else
 fi
 # O sufixo precisa carregar o QUE MUDOU, nao so a data: e o que permite dizer se
 # um SHA traz uma correcao que o outro nao traz, sem abrir o diff.
-if grep -oE 'SETUP_VERSION="[0-9.]+-ref-pin' <<<"$codigo" >/dev/null; then
-  ok "e o sufixo nomeia a mudanca (ref-pin), nao so a data"
+# O sufixo precisa ser ALGO alem da data, e nao uma palavra especifica. A primeira
+# versao exigia `ref-pin`, que era o nome da mudanca daquele dia: na rodada
+# seguinte o sufixo passou a `set-e-pipeline`, e a checagem acusou um arquivo
+# correto. Um teste que exige o valor de hoje quebra com o tempo e ensina ninguem.
+_sufixo="${_const##*-}"
+if [ -n "$_sufixo" ] && [ "$_sufixo" != "$_const" ]; then
+  ok "e o sufixo nomeia a mudanca ($_sufixo), nao so a data"
 else
   falha "o sufixo da versao nao nomeia a mudanca; dois SHAs ficam indistinguiveis"
+fi
+
+echo "== nenhuma atribuicao passa status de pipeline falho para o set -e =="
+# O run morreu no meio do modulo de CLIs, sem nenhuma mensagem. A causa:
+#
+#     oc_latest=$(curl ... | sed ... | head -1)
+#     if [ -z "$oc_latest" ]; then ... fi
+#
+# Com `set -eo pipefail` no topo, o `curl` que falha da status nao-zero a
+# ATRIBUICAO, e o `set -e` aborta uma linha ANTES do `if` que existe para tratar
+# esse caso. O ramo era inalcancavel — e o `2>/dev/null` escondia o erro do curl,
+# de modo que o script morria calado.
+#
+# A forma segura e `|| true` DENTRO do `$( )`. Fora do `$( )` nao resolve: a
+# atribuicao continua com status de falha, que e o que o `set -e` ve.
+#
+# A checagem percorre as atribuicoes com pipeline e exige a guarda. E a atribuicao
+# `oc_have`, tres linhas abaixo da que matou o run, JA TINHA `|| echo ""`: o idiom
+# era conhecido no arquivo e nao era aplicado em todo lugar. Por isso a checagem
+# precisa ser estrutural e periodica, e nao uma correcao caso a caso.
+
+# So interessam atribuicoes cujo valor vem de um comando que pode FALHAR: curl,
+# ssh-keygen, sudo, ls sobre um glob que pode nao casar. `echo` e `cat` nao.
+# O criterio: contar parenthesis FORA de aspas simples, que e o que o bash faz ao
+# resolver o `$( )`. E nao um detalhe — e o que torna a checagem correta apesar de
+# haver um `node -e '...javascript...'` e um `awk '{print $2}'` no meio.
+#
+# A primeira versao usava `awk '/\)/ {exit}'` para achar o fecho do bloco, e parava
+# no primeiro `)` — que estava DENTRO do JS e do awk, entre aspas. Resultado: acusou
+# tres atribuicoes que ja tinham guarda. Um teste que acusa o codigo certo e pior
+# que nenhum: ele treina a leitura a desconfiar dele.
+n_atrib=0
+n_sem_guarda=0
+while IFS=: read -r _linha _resto; do
+  [ -z "$_linha" ] && continue
+  n_atrib=$((n_atrib + 1))
+  _guarda="$(awk -v s="$_linha" '
+    NR < s { next }
+    {
+      linha = $0
+      # some com o que esta entre apostrofos simples: o bash nao conta parenteses
+      # dentro deles, e o JS/awk do meio dos pipelines estao todos entre apostrofos
+      gsub(/'"'"'[^'"'"']*'"'"'/, "", linha)
+      txt = txt " " linha
+      abertos = gsub(/\(/, "(", linha)
+      fechados = gsub(/\)/, ")", linha)
+      prof = prof + abertos - fechados
+      if (NR > s && prof <= 0) { print txt; exit }
+    }
+    END { if (prof > 0) print txt }
+  ' <<<"$codigo")"
+  if ! grep -qE '\|\| *(true|echo "")' <<<"$_guarda"; then
+    n_sem_guarda=$((n_sem_guarda + 1))
+    printf '        sem guarda: %s\n' "$(head -1 <<<"$_guarda" | cut -c1-88)"
+  fi
+done < <(grep -nE '^ *[a-z_]+=\$\(' <<<"$codigo" | grep -E 'curl|ssh-keygen|sudo|ls -1d')
+if [ "$n_atrib" -eq 0 ]; then
+  falha "nenhuma atribuicao com pipeline encontrada — a busca parou de casar e a checagem virou verde"
+elif [ "$n_sem_guarda" -eq 0 ]; then
+  ok "as $n_atrib atribuicoes que consultam algo externo tem guarda (|| true)"
+else
+  falha "$n_sem_guarda de $n_atrib atribuicoes passam status de falha para o set -e"
+fi
+
+# E o par inverso: `|| true` FORA do `$( )` parece conserto e nao e —
+# `v=$(cmd) || true` continua com status de falha na atribuicao, que e o que o
+# `set -e` ve.
+#
+# A primeira versao desta checagem media "nenhuma atribuicao de uma linha existe",
+# que e uma propriedade do arquivo e nao do defeito: ela passava com o defeito
+# presente. Uma checagem que passa com o defeito presente treina a leitura a
+# ignorar. Este bloco e a forma honesta da mesma ideia, e ela so vale porque
+# acima ja mede o lado de dentro.
+_n_fora=$(grep -cE '^ *[a-z_]+=\$\([^)]*\) \|\| true' <<<"$codigo" || true)
+if [ "$_n_fora" -eq 0 ]; then
+  ok "e nenhum || true fica FORA do \$( ), que nao protege a atribuicao"
+else
+  falha "$_n_fora atribuicao(oes) com || true fora do \$( ): nao protege nada"
 fi
 
 echo "== sintaxe =="
