@@ -2223,11 +2223,11 @@ WantedBy=default.target"
     echo -e "${GREEN}✓ OpenCode: escuta $OPENCODE_HOST:$OPENCODE_PORT, unit habilitada e no ar.${NC}"
 }
 
-# Instala um pacote npm global (via Bun se disponível, com fallback pra npm), idempotente.
-# Instala um pacote npm global acompanhando a versão publicada mais recente.
+# Instala um pacote npm global (via Bun se disponível, com fallback pra npm)
+# acompanhando a versão publicada mais recente.
 #
-# Existe separada da install_npm_global porque aquela decide por PRESENÇA do
-# binário, e presença não é versão: uma máquina que rodou o módulo uma vez fica
+# Houve uma variante que decidia por PRESENÇA do binário, e ela foi removida:
+# presença não é versão, então uma máquina que rodou o módulo uma vez ficava
 # presa na primeira versão que caiu, para sempre. Aqui a pergunta é feita ao
 # registro, e o instalador só roda quando a resposta difere do que está em disco.
 #
@@ -2499,27 +2499,6 @@ sync_device_keys_from_github() {
     rm -f "$feed" "$limpo" "$bloco" "$atual" "$novo"
 }
 
-install_npm_global() {
-    local package="$1" bin_name="$2"
-    if command -v "$bin_name" &> /dev/null; then
-        echo -e "${YELLOW}$bin_name já instalado, pulando.${NC}"
-        return
-    fi
-    if command -v bun &> /dev/null; then
-        bun add -g "$package" || npm install -g "$package"
-    elif command -v npm &> /dev/null; then
-        npm install -g "$package"
-    else
-        echo -e "${YELLOW}Nem Bun nem npm encontrados para instalar $package.${NC}"
-        return
-    fi
-    if command -v "$bin_name" &> /dev/null; then
-        echo -e "${GREEN}✓ $bin_name instalado.${NC}"
-    else
-        echo -e "${YELLOW}Aviso: $package instalado, mas o comando '$bin_name' não foi encontrado no PATH.${NC}"
-    fi
-}
-
 # CLIs de IA disponíveis via npm/Bun ou script oficial (instaladas no host se confirmado).
 install_common_ai_clis() {
     # Bun é o caminho primário; o mise entra como fallback de npm e como
@@ -2540,7 +2519,7 @@ install_common_ai_clis() {
     export PATH="$HOME/.bun/bin:$npm_prefix_bin:$HOME/.local/bin:$PATH"
 
     # As três agent CLIs seguem a versão publicada mais recente, e não por
-    # uniformidade estética. A pergunta que `install_npm_global` faz é PRESENÇA do
+    # uniformidade estética. A pergunta por PRESENÇA do binário é
     # binário, e presença não é versão: uma máquina que rodou o módulo uma vez
     # fica presa na primeira versão que caiu, para sempre, e nada no repositório
     # avisa. `claude` e `codex` eram as duas que ainda usavam presença.
@@ -3322,98 +3301,57 @@ fi
 # O caso MAU é o pipe sem propósito: `./setup.sh < /dev/null` em CI. Aqui o
 # script está no disco e a recusa vale — ele perguntaria coisas e o `read` morreria
 # no fim da entrada, sem mensagem, no meio.
-if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ]; then
-    if [ -f "${BASH_SOURCE[0]}" ] && [ -s "${BASH_SOURCE[0]}" ]; then
-        echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
-        echo "" >&2
-        echo "stdin não é um terminal (pipe, redirecionamento ou CI), e este script está" >&2
-        echo "no disco — então o pipe é acidental. O comportamento seria morrer no meio," >&2
-        echo "sem aviso, em vez de recusar — por isso a recusa é aqui." >&2
-        echo "" >&2
-        echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
-        echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
-        echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
-        exit 1
-    fi
-
-    # Veio pela entrada padrão: este é o caminho de instalação. Se a URL de
-    # origem é conhecida, ele se obtém; se não é, diz como chamá-lo.
-    #
-    # E antes: veio por pipe SEM nenhum argumento? Essa é a combinação perigosa,
-    # e ela é mais provável do que parece. `curl -fsSL URL | bash` é a forma que
-    # todo mundo escreve e ela FUNCIONA — o script inteiro roda, com o perfil
-    # `host`. Numa VM de agentes, isso provisiona a camada da máquina de trabalho
-    # e não a da fronteira, sem aviso e com exit 0.
-    #
-    # A causa é do bash: sem o `-s`, o primeiro argumento depois do pipe vira nome
-    # de arquivo. Então `| bash --profile=vm` morre com "No such file or
-    # directory" — erro visível —, e `| bash` sem nada roda errado — erro
-    # invisível. O segundo é o que precisa de defesa.
-    if [ "$#" -eq 0 ] && [ -z "${SETUP_ORIGIN:-}" ]; then
-        echo "Este script veio por pipe sem nenhum argumento, e isso instala o perfil" >&2
-        echo "'host' — a camada da máquina de trabalho, não a da VM de agentes." >&2
-        echo "" >&2
-        echo "Para uma VM de agentes, o comando completo é:" >&2
-        echo "" >&2
-        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh \\"
-        echo "    | bash -s -- --profile=vm --defaults" >&2
-        echo "" >&2
-        echo "O '-s --' não é decoração: sem ele, '--profile=vm' vira nome de arquivo" >&2
-        echo "e o bash morre. E sem '--' os argumentos somem, e o perfil vira 'host'." >&2
-        echo "" >&2
-        echo "Se a intenção era provisionar esta máquina de trabalho, siga com:" >&2
-        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/main/setup.sh \\"
-        echo "    | bash -s -- --profile=host" >&2
-        exit 1
-    fi
-
-    # O ref pode vir do ambiente (para pinar) ou ficar no padrao. Sem isto, um
-    # `curl` de uma branch montava o `main` e rodava um script DIFERENTE do que a
-    # pessoa escolheu — o da branch servia so para fazer a montagem, e o `exec`
-    # rodava o `main`. Medido nesta VM com o `1a44d13` pipedo: o OpenDesign
-    # instalou (o clone do #89 esta no `main`) e as duas pendencias do #90 e do
-    # #91 continuaram, porque elas nunca executaram.
-    _ref="${SETUP_REF:-main}"
-    # `SETUP_BASE_URL` existe para o TESTE: com ele, a montagem pode buscar em
-    # outro lugar do que o pipe buscou — que e como se reproduz a divergencia de
-    # versao. Numa maquina de verdade ela esta vazia e a URL e a do GitHub.
-    # Com `SETUP_BASE_URL` apontando para um servidor local, o caminho tem de
-    # ENTRAR pela raiz: o servidor de teste serve `/setup.sh` e nao
-    # `/<owner>/<repo>/<ref>/setup.sh`. Sem esta distincao, a montagem procura um
-    # caminho que no GitHub existe e no servidor de teste nao — e o teste falha
-    # com "nao consegui baixar", que parece rede e e geometria de URL.
-    # O servidor de teste expoe `/setup.sh` na RAIZ, sem o `ref` no caminho — ele
-    # NAO e o GitHub, e fingir que e custa um segmento inteiro. Com o ref vazio a
-    # URL local fica `/setup.sh`, que e o que o servidor serve.
-    if [ -n "${SETUP_BASE_URL:-}" ]; then
-        _url_base="${SETUP_BASE_URL%/}/"
-    else
-        _url_base="https://raw.githubusercontent.com/${REPO_SLUG}/${_ref}"
-        if [ -n "$SETUP_ORIGIN" ]; then
-            _url_base="https://raw.githubusercontent.com/${SETUP_ORIGIN}/${_ref}"
-        fi
-    fi
-    echo "Montando a partir do ref: $_ref (a versao que entrou: $SETUP_VERSION)" >&2
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "ERRO: este script veio por pipe e não achou o 'curl' para se obter." >&2
-        echo "      Num Fedora novo o curl vem de fábrica; se não veio:" >&2
-        echo "      sudo dnf install -y curl" >&2
-        exit 1
-    fi
-    if ! _se_colocar_no_disco_e_reexecutar "$_url_base" "$SETUP_DESTINO" "$@"; then
-        # A montagem FALHOU, e sem isto o script continuava: o `ln -s` do modulo
-        # do `zshrc` usava o `SCRIPT_DIR` do script ORIGINAL — que, vindo de um
-        # pipe, e o diretorio de onde a pessoa digitou. O resultado medido na VM
-        # nova foi um `~/.zshrc` apontando para `/home/agent/zshrc`, que nao
-        # existe, e nenhum `setup.sh` em lugar nenhum do disco.
-        #
-        # Um modulo que instala um symlink para um caminho que o proprio script
-        # fabricou e um modulo que cria lixo permanente. Falhar em voz alta e
-        # melhor que seguir assumindo que deu certo.
-        echo "ERRO: não consegui me montar no disco, e sem isso os módulos" >&2
-        echo "      usariam um caminho errado. A saída acima diz o motivo." >&2
-        exit 1
-    fi
+# ── a recusa: pipe acidental ────────────────────────────────────────────────
+#
+# Este `if` tem QUATRO condições porque cada uma cobre uma entrada diferente, e
+# qualquer uma delas já chega aqui com o script no disco:
+#
+#   - `! -t 0`                  — a entrada não é terminal;
+#   - sem `--defaults`          — quem pediu interação sem ter terminal;
+#   - `[ -f ] && [ -s ]`        — o script ESTÁ no disco, então o `pipe` acima
+#                                 não é a forma de trazê-lo: ele já chegou.
+#
+# A terceira condição não é redundante com a montagem logo acima, e o motivo e
+# por que: se a entrada não é terminal e o `BASH_SOURCE` **não** tem conteúdo, quem
+# trata é a montagem — ela baixa o script e re-executa, e o processo novo lê de um
+# arquivo no disco. Chegar aqui com `! -t 0` pressupõe, portanto, que o script já
+# está no disco. A condição está escrita mesmo assim, porque ela é o que
+# nomeia o motivo, e um `if` sem nome é um `if` que ninguém sabe mexer.
+#
+# ── O QUE SAIU DAQUI, E POR QUÊ ─────────────────────────────────────────────
+#
+# Este bloco tinha 80 linhas a mais: a mensagem específica de "veio por pipe sem
+# nenhum argumento, e isso instala o perfil `host`", e uma cópia inteira da
+# montagem no ramo `else`.
+#
+# Nenhuma das duas era alcançável, e a medição é o que mostra:
+#
+#   * a mensagem — para chegar ao `else`, o `if [ -f ] && [ -s ]` precisa ser
+#     FALSO, e ser falso com o script no disco é impossível (a montagem já
+#     tratou o caso de `BASH_SOURCE` sem conteúdo). O `exit 1` do ramo verdadeiro
+#     impede o resto;
+#   * a cópia da montagem — mesma razão. `_url_base` e `_ref` não eram lidos
+#     depois do `fi`, então a cópia não servia a nada.
+#
+# O efeito é **nenhuma mudança observável**: `curl … | bash` sem argumentos já
+# montava o repositório, re-executava, e morria aqui com "precisa de um terminal".
+# A mensagem específica nunca saiu — e é por isso que a checagem estrutural
+# deste arquivo atesta, até esta mudança, uma defesa que nenhuma execução
+# alcança.
+#
+# A mensagem honesta para esse caso seria outra, e ela é uma **mudança de
+# comportamento** — o dono decide. O que está aqui é a defesa que realmente roda.
+if [ ! -t 0 ] && [ "${ASSUME_DEFAULTS:-0}" != "1" ] \
+    && [ -f "${BASH_SOURCE[0]}" ] && [ -s "${BASH_SOURCE[0]}" ]; then
+    echo "Este script precisa de um terminal: ele pergunta coisas antes de agir." >&2
+    echo "" >&2
+    echo "stdin não é um terminal (pipe, redirecionamento ou CI), e este script está" >&2
+    echo "no disco — então o pipe é acidental. O comportamento seria morrer no meio," >&2
+    echo "sem aviso, em vez de recusar — por isso a recusa é aqui." >&2
+    echo "" >&2
+    echo "Para rodar de verdade: abra um terminal e execute './setup.sh'." >&2
+    echo "Para rodar sem interação (pipe ou CI): './setup.sh --defaults'." >&2
+    echo "Para inspecionar sem rodar: './setup.sh --help'." >&2
     exit 1
 fi
 
